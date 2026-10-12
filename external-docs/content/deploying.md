@@ -96,7 +96,7 @@ or sandbox account it is worth confirming them up front:
 
 | Quota | Code | Requirement | If too low |
 |-------|------|-------------|------------|
-| **VPC** (VPCs per Region) | `L-F678F1CE` | Room for one more VPC in the target region | Delete an unused VPC or request an increase |
+| **VPC** (VPCs per Region) | `L-F678F1CE` | Room for one more VPC in the target region. Only checked when the deploy creates a VPC: not on an update of an existing deployment, and not with `SCL_VPC_ID` | Delete an unused VPC or request an increase |
 | **Lambda** (Concurrent executions) | `L-B99A9384` | Enough unreserved headroom to reserve the deployment's Lambda concurrency (default 5 × 2 functions = 10) above Lambda's account-wide minimum of 10 | Request an increase, **or** deploy with `SCL_LAMBDA_RESERVED_CONCURRENCY=0` (see [Lambda reserved concurrency](#lambda-reserved-concurrency)) |
 
 Check them with:
@@ -203,11 +203,16 @@ exactly as it does today; outside the US the defaults are unusable (see the warn
 
 | Config key | Sets the model for | Default |
 |------------|--------------------|---------|
-| `bedrockLlmModelId` | Serve query LLM (NL-to-SPARQL, synthesis) | `us.anthropic.claude-sonnet-5` |
+| `bedrockLlmModelId` | Serve query LLM (NL-to-SPARQL, synthesis, GraphRAG lexical retrieval) | `us.anthropic.claude-sonnet-5` |
 | `bedrockEmbedModelId` | **All** embeddings — induction, doc-KG-build, metric matching, serve retrieval | `us.cohere.embed-v4:0` |
 | `bedrockEmbedDimensions` | Vector dimension for the embedding model above | `1024` |
 | `bedrockInductionLlmModelId` | Ontology induction, grounding rerank, description generation | `us.anthropic.claude-sonnet-5` |
 | `bedrockChatModelId` | Source enrichment, constraint inference, document-ingestion extraction | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
+
+GraphRAG lexical retrieval calls the model through llama-index's `BedrockConverse`, which accepts only
+the models in its own table (Claude Sonnet 4.6 and Sonnet 5 in the pinned version). If `bedrockLlmModelId`
+names another model, the Tier 3 lexical retrieval strategies fail when they start, while the rest of serve
+keeps working.
 
 Both **geographic inference profiles** (`us.`, `eu.`, `apac.`, `jp.`, `global.`) and **bare in-region model
 IDs** (e.g. `cohere.embed-v4:0`) are accepted — bare IDs matter because some models publish geo
@@ -434,7 +439,25 @@ SCL_API_DOMAIN=api.ontology.example.com \
 SCL_API_CERT_ARN=arn:aws:acm:us-west-2:123456789012:certificate/api-cert-id \
 SCL_HOSTED_ZONE_ID=Z0123456789ABCDEFGHIJ \
 make deploy-dev
+
+# Optional OoPS! ontology pitfall scan (off by default) — see the note below
+SCL_OOPS_ENDPOINT=https://oops.example.internal/rest make deploy-dev
 ```
+
+!!! warning "The OoPS! pitfall scan sends your ontology to the endpoint you configure"
+    Tier-3 ontology validation can run the OoPS! (OntOlogy Pitfall Scanner)
+    pitfall scanner. To do so it POSTs the whole serialised ontology to the configured endpoint:
+    class and property names, labels, comments, and other literal values such as
+    sampled distinct values. It is therefore **off by default** — with no endpoint
+    configured, validation makes no outbound request and reports one `info` finding,
+    `OOPS_NOT_CONFIGURED`, while the rest of Tier 3 runs as usual.
+
+    To enable it, set `SCL_OOPS_ENDPOINT` (or pass `-c oops_endpoint=<url>` to
+    `cdk deploy`); the deploy sets `OOPS_ENDPOINT` on the ontology-engine container.
+    The value must be an `https://` URL (synth fails otherwise). Point it at a
+    self-hosted OoPS! instance unless you are content for your schema to leave your
+    network. Releases before this one defaulted to the public OoPS! service;
+    deployments that relied on that must now set the endpoint explicitly.
 
 !!! note "Custom domain certificate regions"
     `SCL_UI_CERT_ARN` must be an ACM certificate in `us-east-1` (CloudFront requirement) regardless of your deploy region. `SCL_API_CERT_ARN` must be in the same region you're deploying to (API Gateway requirement). CDK validates both at synth time and fails fast with a clear error if either is in the wrong region.
@@ -663,6 +686,7 @@ when tuning a large or pathological source.
 
 | Variable | Set By | Purpose |
 |----------|--------|---------|
+| `OOPS_ENDPOINT` | `ontology-stack.ts`, from the `oops_endpoint` context | REST endpoint of the OoPS! pitfall scanner used by Tier-3 ontology validation. **Unset by default**, which turns the scan off (no outbound request). When set, the serialised ontology is sent to it — see *Configuration Options*. |
 | `SCL_MCP_MODE` | `mcp-stack.ts` | Switches the container entrypoint between Context Manager (default) and MCP Server. When set to `"true"`, the container starts in MCP mode. |
 | `BULK_REVIEW_PAGE_BUDGET` | `worker.py` default | Per-invocation table budget for the bulk-review worker (default `1000`); when a source has more tables, the worker processes one page, re-enqueues a continuation, and resumes across chained invocations rather than silently capping. |
 | `BULK_REVIEW_WALL_CLOCK_BUDGET_S` | `worker.py` default | Per-invocation wall-clock budget in seconds (default `240`), a second guard under the 5-minute Lambda timeout that stops the worker after the current search page and continues in a fresh invocation when neared. |
@@ -1356,6 +1380,7 @@ group most easily missed when scoping IAM permissions or regional availability.
 | **Amazon Redshift Data API** | Querying Redshift-backed sources | `packages/context-manager/.../clients/redshift_data.py` |
 | **AWS Secrets Manager** | Data-source credentials (e.g. JDBC) | `packages/sources`, `packages/context-manager` |
 | **AWS STS** | Role assumption and caller identity across services | Widely used (~10 modules) |
+| **OoPS! (third party, optional)** | Ontology pitfall scan in Tier-3 validation. Off unless `OOPS_ENDPOINT` is configured; when on, receives the serialised ontology | `packages/ontology-engine/.../validation/validators/tier3.py` |
 
 
 ### A.3 Quotas to check before deploying
@@ -1372,7 +1397,7 @@ own applied values with the commands that follow.
 
 | Service | Quota (code) | AWS default | Why it matters here |
 |---------|--------------|-------------|---------------------|
-| **VPC** | VPCs per Region (`L-F678F1CE`) | 5 | Deploy creates one VPC unless `SCL_VPC_ID` is set. Preflight-checked — see [Service Quotas](#service-quotas) |
+| **VPC** | VPCs per Region (`L-F678F1CE`) | 5 | A first deploy creates one VPC unless `SCL_VPC_ID` is set; updates reuse it. Preflight-checked — see [Service Quotas](#service-quotas) |
 | **Lambda** | Concurrent executions (`L-B99A9384`) | 1,000 (10 on some new accounts) | Two functions reserve concurrency (default 5 each). Preflight-checked — see [Lambda reserved concurrency](#lambda-reserved-concurrency) |
 | **ECS / Fargate** | Fargate On-Demand vCPU resource count (`L-3032A538`) | **6** | **The tightest fit here.** Tasks are 2 vCPU / 8 GB and 4 vCPU / 16 GB, and VKG runs one service **per namespace** — so a single enrichment task plus two namespaces' VKG services can exhaust the default |
 | **OpenSearch Serverless** | Indexing max OCU (`L-50FA809B`), search max OCU (`L-4E98D4EB`) | 10 each | The collection runs with standby replicas enabled, which roughly doubles OCU consumption — see [A.4](#a4-considerations) |
