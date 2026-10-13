@@ -2767,6 +2767,55 @@ describe("SourcesStack", () => {
       });
     });
 
+    // The account check alone admitted any EventBridge rule anyone in the
+    // account created, and the consumer takes the source ids from the message.
+    // Bound to this deployment's re-scan rules on the default bus, the same
+    // pattern the API Lambda is allowed to create rules under.
+    it("accepts sends only from this deployment's Glue re-scan rules", () => {
+      const statements = Object.values(
+        template.findResources("AWS::SQS::QueuePolicy"),
+      ).flatMap(
+        (p) =>
+          (p as { Properties: { PolicyDocument: { Statement: any[] } } })
+            .Properties.PolicyDocument.Statement,
+      );
+      const send = statements.filter((s) => s.Sid === "AllowEventBridgeSend");
+      expect(send).toHaveLength(1);
+      const condition = send[0].Condition;
+      expect(condition.StringEquals).toEqual({
+        "aws:SourceAccount": "123456789012",
+      });
+      const sourceArn = JSON.stringify(condition.ArnLike?.["aws:SourceArn"]);
+      expect(sourceArn).toContain(":events:us-east-1:123456789012:rule/");
+      expect(sourceArn).toMatch(/glue-rescan-\*/);
+      // Default bus: `rule/<name>`, never `rule/<bus>/<name>`.
+      expect(sourceArn).not.toMatch(/rule\/[^"]*\/[^"]*glue-rescan/);
+    });
+
+    it("binds the queue policy to the same rule ARNs the API Lambda may create", () => {
+      const queueStatements = Object.values(
+        template.findResources("AWS::SQS::QueuePolicy"),
+      ).flatMap(
+        (p) =>
+          (p as { Properties: { PolicyDocument: { Statement: any[] } } })
+            .Properties.PolicyDocument.Statement,
+      );
+      const iamStatements = Object.values(
+        template.findResources("AWS::IAM::Policy"),
+      ).flatMap(
+        (p) =>
+          (p as { Properties: { PolicyDocument: { Statement: any[] } } })
+            .Properties.PolicyDocument.Statement,
+      );
+      const send = queueStatements.find(
+        (s) => s.Sid === "AllowEventBridgeSend",
+      );
+      const manage = iamStatements.find(
+        (s) => s.Sid === "ManageGlueEventRules",
+      );
+      expect(send.Condition.ArnLike["aws:SourceArn"]).toEqual(manage.Resource);
+    });
+
     it("creates the consumer Lambda with an SQS event source", () => {
       template.hasResourceProperties("AWS::Lambda::Function", {
         FunctionName: Match.stringLikeRegexp("sources-glue-event-rescan$"),
