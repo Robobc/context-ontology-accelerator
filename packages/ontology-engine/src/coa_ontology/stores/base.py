@@ -149,7 +149,9 @@ class VectorStore(Protocol):
     ) -> int:
         """Drop every embedding whose ``entity_uri`` is in ``entity_uris`` within a single ontology.
 
-        Returns the deleted count.
+        Returns the deleted count. Raises when it cannot remove them all: append
+        ingest relies on that to fail an accept instead of leaving the stale
+        embedding searchable beside the new one.
 
         Used by append-mode ingest right before it re-embeds the subjects of an
         incoming proposal: a class whose description a steward replaced must not

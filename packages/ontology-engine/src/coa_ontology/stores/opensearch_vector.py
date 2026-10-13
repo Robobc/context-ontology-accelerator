@@ -327,7 +327,9 @@ class OpenSearchVectorStore(VectorStore):
         """Delete all embeddings for an ontology, returning the deleted count.
 
         Uses per-doc deletes because AOSS has no ``_delete_by_query`` on
-        VECTORSEARCH collections.
+        VECTORSEARCH collections. Raises
+        :class:`~coa_common.opensearch.DeleteIncompleteError` if matching docs
+        are left when the delete stops making progress.
         """
         idx = self._read_index(namespace)
         return self._aoss().delete_by_term(idx, "ontology_id", ontology_id)
@@ -349,7 +351,9 @@ class OpenSearchVectorStore(VectorStore):
         One ``bool``-wrapped ``terms``+``term`` query + one verified delete loop
         for the whole set (see ``AossVectorClient.delete_by_term``) — NOT one
         round-trip per entity, so a re-accepted proposal with hundreds of
-        classes/properties pays the AOSS refresh-lag wait once.
+        classes/properties pays the AOSS refresh-lag wait once. Raises
+        :class:`~coa_common.opensearch.DeleteIncompleteError` if matching docs
+        are left when the delete stops making progress.
         """
         uris = [u for u in dict.fromkeys(entity_uris) if u]
         if not uris or not ontology_id:
