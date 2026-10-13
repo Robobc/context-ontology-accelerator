@@ -10,3 +10,15 @@
 packages:
   - "cdk-toolkit"
   - "*/cdk"
+
+# Security overrides for transitive dev/test dependencies (jest/ts-jest toolchain).
+# Range-scoped so each major stays on its own line and a blanket pin can't cross
+# majors. These projects are customer-facing CDK samples copied out and built on
+# their own, so the pins travel with the sample.
+overrides:
+  # brace-expansion ReDoS (GHSA, HIGH/MODERATE). Patched floors: v1 >=1.1.20,
+  # v2 >=2.1.4. Transitive via jest's micromatch. Same majors.
+  "brace-expansion@<1.1.20": 1.1.20
+  "brace-expansion@>=2.0.0 <2.1.4": 2.1.4
+  # handlebars <4.7.10 — critical RCE (GHSA-p8wg-vrv2-v86f, GHSA-8r5x-fm3f-whwj); via ts-jest.
+  "handlebars@<4.7.10": 4.7.10

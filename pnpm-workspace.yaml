@@ -76,3 +76,5 @@ overrides:
   # source-map-js <1.2.2 — event-loop DoS (GHSA-68fv-2mgg-jv7q, HIGH). Transitive
   # via vite/postcss in web-app. 1.2.2 is the patched floor; same major.
   "source-map-js@<1.2.2": 1.2.2
+  # handlebars <4.7.10 — critical RCE (GHSA-p8wg-vrv2-v86f, GHSA-8r5x-fm3f-whwj); via ts-jest.
+  "handlebars@<4.7.10": 4.7.10
