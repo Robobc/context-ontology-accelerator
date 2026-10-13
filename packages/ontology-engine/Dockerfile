@@ -6,7 +6,7 @@
 # now comes from the apt-get upgrade below, so a stale pin can no longer hold
 # back an OS security fix.
 # python:3.12-slim, digest resolved from the tag on 2026-09-01.
-FROM --platform=linux/amd64 public.ecr.aws/docker/library/python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+FROM --platform=linux/amd64 public.ecr.aws/docker/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 WORKDIR /app
 

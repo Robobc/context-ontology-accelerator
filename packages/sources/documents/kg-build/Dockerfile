@@ -3,7 +3,7 @@
 # Pin to digest to prevent supply-chain attacks via tag mutation. The pin is for
 # supply-chain integrity only, NOT patch currency — see the apt-get upgrade below.
 # python:3.12-slim, digest resolved from the tag on 2026-10-06.
-FROM --platform=linux/amd64 public.ecr.aws/docker/library/python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
+FROM --platform=linux/amd64 public.ecr.aws/docker/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 WORKDIR /app
 

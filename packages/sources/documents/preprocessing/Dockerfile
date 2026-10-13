@@ -4,7 +4,7 @@
 # digest to a newer base that AWS has rebuilt. Digest re-resolved from the
 # public.ecr.aws/lambda/python:3.12 tag on 2026-09-17 to clear the AL2023 expat /
 # openssl / libtiff HIGH CVEs Trivy/Inspector flagged against the prior 2026-05-13 base.
-FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12@sha256:a32fd0af1505dad402a3a8c2bc1766a81b292f6869f13f1239d6c28b57b434c7
+FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12@sha256:63837ca41c46aea16606f9e1b46160a4993a0634e61571b6a316dcfcbe73cc55
 
 # System deps: poppler for PDF text extraction, file-libs for libmagic (file type detection)
 RUN dnf install -y poppler-utils file-libs && dnf clean all
