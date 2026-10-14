@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import React, { useState } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   Alert,
   Badge,
@@ -24,6 +22,7 @@ import type {
 import { LiveSteps } from "./LiveSteps";
 import { EvidencePanel } from "./EvidencePanel";
 import { useAppI18n } from "../../../i18n/LocaleProvider";
+import { SafeModelMarkdown } from "./SafeModelMarkdown";
 import "../chat.css";
 
 export type ChatBubbleState = "loading" | "error" | "success";
@@ -127,9 +126,9 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
       <Alert type="warning" statusIconAriaLabel={t("Warning")}>
         <div style={{ fontSize: "14px", lineHeight: "20px" }}>
           <TextContent>
-            <Markdown remarkPlugins={[remarkGfm]}>
+            <SafeModelMarkdown>
               {response.synthesizedAnswer || content}
-            </Markdown>
+            </SafeModelMarkdown>
           </TextContent>
         </div>
       </Alert>
@@ -177,7 +176,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
     <SpaceBetween size="s">
       <div style={{ fontSize: "14px", lineHeight: "20px" }}>
         <TextContent>
-          <Markdown remarkPlugins={[remarkGfm]}>{displayAnswer}</Markdown>
+          <SafeModelMarkdown>{displayAnswer}</SafeModelMarkdown>
         </TextContent>
         {suppressedText && (
           <Box variant="span" fontSize="body-s" color="text-body-secondary">
