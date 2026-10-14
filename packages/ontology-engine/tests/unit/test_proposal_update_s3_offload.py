@@ -23,6 +23,12 @@ pytestmark = pytest.mark.unit
 _VALID_TTL = """@prefix owl: <http://www.w3.org/2002/07/owl#> .
 <https://example.org/o> a owl:Ontology .
 """
+_VALID_R2RML = """@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <https://example.org/> .
+ex:Map a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "records" ] ;
+  rr:subjectMap [ rr:class ex:Record ; rr:template "records/{id}" ] .
+"""
 
 
 def test_manual_turtle_edit_offloads_to_s3(monkeypatch):
@@ -53,7 +59,7 @@ def test_manual_turtle_edit_offloads_to_s3(monkeypatch):
     body = proposals.UpdateProposalRequest(
         proposal_id="p-edit",
         ontology_turtle=_VALID_TTL,
-        r2rml_turtle=_VALID_TTL,
+        r2rml_turtle=_VALID_R2RML,
     )
     resp = proposals.update_proposal(body, namespace="ns")
 
@@ -126,6 +132,30 @@ def test_invalid_turtle_rejected_before_persistence(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         proposals.update_proposal(body, namespace="ns")
     assert exc.value.status_code == 422
+
+
+def test_parseable_ontology_turtle_is_rejected_as_r2rml(monkeypatch):
+    """A presigned upload must not cross ontology bytes into the mapping slot."""
+    from coa_ontology import proposals
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        proposals.dynamo_store,
+        "get_proposal_by_id",
+        lambda pid, namespace="default": {"proposal_id": pid, "status": "pending"},
+    )
+    monkeypatch.setattr(
+        proposals.dynamo_store,
+        "_put_artifact_s3",
+        lambda *a, **k: pytest.fail("should not persist non-R2RML Turtle as a mapping"),
+    )
+
+    body = proposals.UpdateProposalRequest(proposal_id="p-crossed", r2rml_turtle=_VALID_TTL)
+    with pytest.raises(HTTPException) as exc:
+        proposals.update_proposal(body, namespace="ns")
+
+    assert exc.value.status_code == 422
+    assert "does not define any rr:TriplesMap" in exc.value.detail
 
 
 def test_unstructured_grounding_override_patches_turtle(monkeypatch):
