@@ -10,6 +10,11 @@ import os
 from typing import Any
 
 import structlog
+from coa_common import (
+    IntegrationProfileError,
+    default_namespace_integration_profile,
+    normalize_namespace_integration_profile,
+)
 from coa_common.dao import DynamoDBDAO
 from coa_common.response import api_response
 from coa_control_plane_server.models.update_namespace_request_content import (
@@ -67,6 +72,11 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if len(req.description) > _MAX_DESCRIPTION:
             return api_response(400, {"message": f"description must be {_MAX_DESCRIPTION} characters or fewer"})
         update_fields["description"] = req.description
+    if req.integration_profile is not None:
+        try:
+            update_fields["integrationProfile"] = normalize_namespace_integration_profile(req.integration_profile)
+        except IntegrationProfileError as exc:
+            return api_response(400, {"message": str(exc)})
 
     if not update_fields:
         return api_response(400, {"message": "No updatable fields provided"})
@@ -87,6 +97,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "createdAt": updated.get("createdAt"),
         "updatedAt": updated.get("updatedAt"),
         "athenaWorkgroupName": updated.get("athenaWorkgroupName"),
+        "integrationProfile": updated.get("integrationProfile") or default_namespace_integration_profile(),
     }
     ns = {k: v for k, v in ns.items() if v is not None}
 

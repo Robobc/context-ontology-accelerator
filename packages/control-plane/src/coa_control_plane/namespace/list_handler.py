@@ -278,6 +278,7 @@ def _to_summary(item: dict[str, Any]) -> NamespaceSummary:
             display_name=item.get("displayName"),
             status=NamespaceStatus(item.get("status", "ACTIVE")),
             source_count=item.get("sourceCount", 0),
+            profile_mode=((item.get("integrationProfile") or {}).get("mode") or "ACCELERATE"),
             created_at=item.get("createdAt"),
             updated_at=item.get("updatedAt"),
         )

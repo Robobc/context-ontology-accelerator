@@ -517,6 +517,28 @@ class TestSourceComposition:
         assert comp.has_unstructured_source is False
 
     @pytest.mark.asyncio
+    async def test_database_plus_exact_external_kb_route_is_mixed(self):
+        """An external KB counts as documents without requiring a fake SRC# row."""
+        registry = self._make_registry_with_query([{"sourceType": "DATABASE", "sourceId": "s1"}])
+        registry._external_document_namespaces = frozenset({"ns-db"})
+
+        comp = await registry.get_source_composition("ns-db")
+
+        assert comp.has_structured_source is True
+        assert comp.has_unstructured_source is True
+        assert comp.unknown is False
+
+    @pytest.mark.asyncio
+    async def test_database_plus_external_default_is_mixed(self):
+        registry = self._make_registry_with_query([{"sourceType": "DATABASE", "sourceId": "s1"}])
+        registry._external_document_default = True
+
+        comp = await registry.get_source_composition("ns-db")
+
+        assert comp.has_structured_source is True
+        assert comp.has_unstructured_source is True
+
+    @pytest.mark.asyncio
     async def test_mixed(self):
         registry = self._make_registry_with_query(
             [
@@ -539,6 +561,29 @@ class TestSourceComposition:
         # Fail-open: unknown must present as has-everything so no tier is dropped.
         assert comp.has_structured_source is True
         assert comp.has_unstructured_source is True
+
+    @pytest.mark.asyncio
+    async def test_empty_namespace_with_exact_external_kb_is_document_only(self):
+        """An explicit KB route makes an empty SRC# result unambiguous."""
+        registry = self._make_registry_with_query([])
+        registry._external_document_namespaces = frozenset({"ns-kb"})
+
+        comp = await registry.get_source_composition("ns-kb")
+
+        assert comp.has_structured_source is False
+        assert comp.has_unstructured_source is True
+        assert comp.unknown is False
+
+    @pytest.mark.asyncio
+    async def test_empty_namespace_with_external_default_is_document_only(self):
+        registry = self._make_registry_with_query([])
+        registry._external_document_default = True
+
+        comp = await registry.get_source_composition("ns-kb")
+
+        assert comp.has_structured_source is False
+        assert comp.has_unstructured_source is True
+        assert comp.unknown is False
 
     @pytest.mark.asyncio
     async def test_not_available_is_unknown(self):
@@ -673,3 +718,64 @@ class TestNamespaceExists:
         with patch("boto3.resource"):
             unconfigured = SourcesRegistry(table_name="test-sources", region="us-west-2")
         assert unconfigured.namespaces_configured is False
+
+
+@pytest.mark.unit
+class TestNamespaceIntegrationProfile:
+    """Semantic planning routing comes from validated namespace metadata."""
+
+    def _registry(self, item):
+        with patch("boto3.resource") as resource:
+            table = MagicMock()
+            table.get_item.return_value = {"Item": item}
+            resource.return_value.Table.return_value = table
+            registry = SourcesRegistry(
+                table_name="sources",
+                namespaces_table="namespaces",
+                region="us-west-2",
+            )
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_returns_explicit_validated_profile(self):
+        profile = {
+            "mode": "FEDERATE",
+            "profileVersion": "v1",
+            "ontologyVersion": "ontology-v1",
+            "sourceTargets": [
+                {
+                    "targetId": "external-graph",
+                    "kind": "EXTERNAL_GRAPH",
+                    "accessMode": "READ_ONLY",
+                }
+            ],
+        }
+        registry = self._registry({"integrationProfile": profile})
+        result = await registry.get_namespace_integration_profile("11111111-2222-4333-8444-555555555555")
+        assert result == profile
+
+    @pytest.mark.asyncio
+    async def test_legacy_record_returns_explicit_unversioned_default(self):
+        registry = self._registry({"name": "legacy"})
+        result = await registry.get_namespace_integration_profile("11111111-2222-4333-8444-555555555555")
+        assert result["ontologyVersion"] == "legacy-unversioned"
+
+    @pytest.mark.asyncio
+    async def test_malformed_stored_profile_fails_closed(self):
+        registry = self._registry(
+            {
+                "integrationProfile": {
+                    "mode": "FEDERATE",
+                    "profileVersion": "v1",
+                    "ontologyVersion": "ontology-v1",
+                    "sourceTargets": [
+                        {
+                            "targetId": "external-graph",
+                            "kind": "EXTERNAL_GRAPH",
+                            "accessMode": "READ_WRITE",
+                        }
+                    ],
+                }
+            }
+        )
+        assert await registry.get_namespace_integration_profile("11111111-2222-4333-8444-555555555555") is None

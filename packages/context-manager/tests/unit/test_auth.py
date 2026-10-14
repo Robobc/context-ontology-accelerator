@@ -62,6 +62,7 @@ class TestTokenClaimsFromAuthHeader:
         claims = TokenClaims._from_auth_header(f"Bearer {token}")
         assert claims is not None
         assert claims.user_id == "opaque-azure-sub"
+        assert claims.email == "user@contoso.com"
 
 
 class TestTokenClaimsFromRequestContext:

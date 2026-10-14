@@ -174,24 +174,36 @@ describe("useSessions", () => {
     expect(result.current.sessionId).toBe("captured-session");
   });
 
-  it("sends runtime session ID header with user sub", async () => {
-    mockFetch.mockResolvedValueOnce(
-      createMockResponse({ sessionId: null, messages: [] }),
-    );
+  it("rotates the transport session ID without changing the logical session", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        createMockResponse({ sessionId: null, messages: [] }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({ sessionId: null, messages: [] }),
+      );
 
-    renderHook(() => useSessions(defaultProps));
+    const { result } = renderHook(() => useSessions(defaultProps));
 
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalled();
     });
 
-    const headers = mockFetch.mock.calls[0][1].headers;
-    // Length-prefixed (see deriveRuntimeSessionId): the prefix is what keeps
-    // two distinct subs from deriving the same session id.
-    expect(headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"]).toBe(
-      "036-12345678-abcd-1234-abcd-1234567890ab",
-    );
-    expect(headers["Authorization"]).toBe("Bearer mock-token");
+    await act(async () => {
+      await result.current.listSessions();
+    });
+
+    const firstHeaders = mockFetch.mock.calls[0][1].headers;
+    const secondHeaders = mockFetch.mock.calls[1][1].headers;
+    const firstTransportId =
+      firstHeaders["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"];
+    const secondTransportId =
+      secondHeaders["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"];
+
+    expect(firstTransportId).toMatch(/^rt-[0-9a-f-]{36}$/);
+    expect(secondTransportId).toMatch(/^rt-[0-9a-f-]{36}$/);
+    expect(firstTransportId).not.toBe(secondTransportId);
+    expect(firstHeaders["Authorization"]).toBe("Bearer mock-token");
   });
 
   it("resets state on namespace change", async () => {

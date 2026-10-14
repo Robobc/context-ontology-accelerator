@@ -58,6 +58,38 @@ class TestFactory:
         mock_build.assert_called_once()
         assert result is mock_build.return_value
 
+    def test_build_document_retriever_routes_only_selected_namespace(self):
+        from coa_serve.clients.factory import build_document_retriever
+
+        config = MagicMock()
+        config.document_retriever_backend = "opensearch"
+        config.bedrock_kb_id = ""
+        config.bedrock_kb_by_namespace = (("managed-docs", "ABCDEFGHIJ"),)
+        config.bedrock_region = "us-east-1"
+
+        retriever = build_document_retriever(config, AsyncMock(spec=VectorClient))
+
+        assert retriever.backend_name("managed-docs") == "bedrock-kb"
+        assert retriever.backend_name("default-search") == "opensearch"
+
+    @patch.dict("os.environ", {"PORTKEY_API_KEY": "test-key"})
+    def test_build_llm_client_composes_portkey_with_bedrock_embeddings(self):
+        from coa_serve.clients.factory import build_llm_client
+        from coa_serve.clients.portkey import PortkeyLLMClient
+
+        config = MagicMock()
+        config.generation_backend = "portkey"
+        config.bedrock_model_id = "bedrock-model"
+        config.bedrock_region = "us-east-1"
+        config.portkey_model_id = "@bedrock/claude"
+        config.portkey_base_url = "https://example.portkey.test/v1"
+        config.portkey_secret_arn = ""
+
+        client = build_llm_client(config)
+
+        assert isinstance(client, PortkeyLLMClient)
+        assert client.model_id == "@bedrock/claude"
+
 
 @pytest.mark.unit
 class TestClientSet:

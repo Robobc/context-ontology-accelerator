@@ -27,6 +27,7 @@ if __name__ == "__main__":
             "list_metrics",
             "describe_schema",
             "query",
+            "semantic_execution_plan",
             "translate_sparql",
             "rag_retrieval",
             "graph_traversal",

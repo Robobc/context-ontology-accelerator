@@ -106,9 +106,16 @@ class FakeController:
 class FakeSynthesizer:
     """A mocked Synthesizer; ``synthesize`` returns a scripted result or raises."""
 
-    def __init__(self, *, result: SynthesisResult | None = None, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        result: SynthesisResult | None = None,
+        raises: Exception | None = None,
+        provider_name: str = "bedrock",
+    ) -> None:
         self._result = result
         self._raises = raises
+        self.provider_name = provider_name
         self.calls: list[dict] = []
 
     async def synthesize(
@@ -248,6 +255,19 @@ class TestFinalSemanticSearch:
         assert names.index("agentic_final_semantic_search") < names.index("llm_synthesize")
         # Its chunk flowed into the synthesized result's supporting content.
         assert any(c["chunkId"] == "final-sem" for c in result.supporting_content)
+
+    async def test_synthesis_trace_uses_gateway_provider(self):
+        sem = _FinalTool("strategy:chunk_based_semantic", _final_result())
+        synthesizer = FakeSynthesizer(
+            result=SynthesisResult(answer="ans", confidence=0.8, duration_ms=5),
+            provider_name="portkey",
+        )
+        retriever = self._retriever(_registry(sem), synthesizer=synthesizer)
+        trace = TraceCollector()
+
+        await retriever.resolve("question", NS, trace=trace)
+
+        assert synth_steps(trace)[0].tool_used == "portkey"
 
     async def test_falls_back_to_vector_tool_when_no_chunk_strategy(self):
         vec = _FinalTool("vector_search", _final_result("vec-sem"))

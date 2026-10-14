@@ -22,6 +22,16 @@ logger = structlog.get_logger(__name__)
 _HTTP_TIMEOUT = 30
 
 
+def extract_email_claim(claims: dict[str, Any]) -> str:
+    """Return the caller's email-like principal from common OIDC claims.
+
+    Entra ID does not guarantee an ``email`` claim for every account. Its v2
+    tokens do provide ``preferred_username`` (and some enterprise tenants
+    still emit ``upn``), so use those only when ``email`` is absent.
+    """
+    return str(claims.get("email") or claims.get("preferred_username") or claims.get("upn") or "")
+
+
 def extract_groups_claim(claims: dict[str, Any], group_claim_name: str = "groups") -> list[str]:
     """Normalize an IdP groups claim to list[str] (shared identity extraction).
 
@@ -146,7 +156,7 @@ class TokenAuthorizer(ABC):
 
     def _extract_email(self, claims: dict[str, Any]) -> str:
         """Extract email from claims. Override if the claim name differs."""
-        return str(claims.get("email", ""))
+        return extract_email_claim(claims)
 
     def _get_token_type(self, claims: dict[str, Any]) -> TokenType:  # noqa: ARG002
         """Determine the token type. Override for agent access token support.

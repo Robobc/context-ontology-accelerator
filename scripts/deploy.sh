@@ -8,6 +8,7 @@ set -euo pipefail
 
 ENV="${1:-dev}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export SCL_DEPLOY_ENV="$ENV"
 
 # Optional context overrides via environment variables:
 #   SCL_PREFIX=myproj  make deploy-dev

@@ -11,6 +11,7 @@ with text, source document attribution, and relevance scores.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 from coa_common import graphrag_chunk_index_name
@@ -53,6 +54,31 @@ class VectorRetriever:
     def vector_client(self) -> VectorClient:
         """Public access to underlying vector client for direct search (T-Box assembly)."""
         return self._vector
+
+    def backend_name(self, namespace: str) -> str:
+        """Return the trace/metrics name for this document backend."""
+        return "opensearch"
+
+    def requires_query_embedding(self, namespace: str) -> bool:
+        """OpenSearch k-NN retrieval requires a caller-produced embedding."""
+        return True
+
+    async def retrieve(
+        self,
+        query: str,
+        namespace: str,
+        *,
+        query_embedding: list[float] | None = None,
+        top_k: int = DEFAULT_TOP_K,
+        retrieval_filter: dict[str, Any] | None = None,
+    ) -> list[ChunkResult]:
+        """Implement the text-first document contract over vector search."""
+        if retrieval_filter:
+            # Silently ignoring an authorization filter would be a data leak.
+            raise NotImplementedError("OpenSearch document filters are not implemented")
+        if query_embedding is None:
+            return []
+        return await self.search(query_embedding, namespace, top_k=top_k)
 
     async def search(
         self,

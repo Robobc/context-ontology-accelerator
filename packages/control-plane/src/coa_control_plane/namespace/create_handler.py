@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 from coa_common.dao import DynamoDBDAO
+from coa_common.integration_profiles import IntegrationProfileError
 from coa_common.logging import setup_logging
 from coa_common.metadata_store import MetadataStoreError, SMUSClient
 from coa_common.response import api_response
@@ -85,6 +86,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return api_response(201, {"namespace": ns.model_dump(by_alias=True, exclude_none=True)})
     except ConflictError as exc:
         return api_response(409, {"message": str(exc)})
+    except IntegrationProfileError as exc:
+        return api_response(400, {"message": str(exc)})
     except MetadataStoreError as exc:
         logger.exception("datazone_error", error=str(exc))
         return api_response(

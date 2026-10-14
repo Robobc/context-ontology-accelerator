@@ -29,7 +29,18 @@ const BASE_CONTEXT = {
   "aws:cdk:bundling-stacks": [],
 };
 
-function createStack(contextOverrides: Record<string, unknown> = {}): Template {
+function createStack(
+  contextOverrides: Record<string, unknown> = {},
+  integrationProps: {
+    documentRetrieverBackend?: "opensearch" | "bedrock-kb";
+    bedrockKnowledgeBaseId?: string;
+    bedrockKnowledgeBaseByNamespace?: Record<string, string>;
+    generationBackend?: "bedrock" | "portkey";
+    portkeyBaseUrl?: string;
+    portkeyModelId?: string;
+    portkeySecretArn?: string;
+  } = {},
+): Template {
   const app = new cdk.App({
     context: { ...BASE_CONTEXT, ...contextOverrides },
   });
@@ -59,10 +70,90 @@ function createStack(contextOverrides: Record<string, unknown> = {}): Template {
     vkgEndpoint: "http://vkg.coa-dev-services.local:8080",
     rolesTable: mkTable("Roles"),
     resourceRoleMappingsTable: mkTable("RRM"),
+    ...integrationProps,
   });
 
   return Template.fromStack(stack);
 }
+
+describe("ServeStack - managed Knowledge Base retrieval", () => {
+  it("configures namespace routing and least-privilege Retrieve access", () => {
+    const template = createStack(
+      {},
+      {
+        documentRetrieverBackend: "opensearch",
+        bedrockKnowledgeBaseByNamespace: {
+          "managed-docs": "ABCDEFGHIJ",
+        },
+      },
+    );
+
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DOCUMENT_RETRIEVER_BACKEND: "opensearch",
+        BEDROCK_KB_BY_NAMESPACE: '{"managed-docs":"ABCDEFGHIJ"}',
+      }),
+    });
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "bedrock:Retrieve",
+            Resource:
+              "arn:aws:bedrock:us-east-1:123456789012:knowledge-base/ABCDEFGHIJ",
+          }),
+        ]),
+      },
+    });
+  });
+});
+
+describe("ServeStack - Portkey generation", () => {
+  const secretArn =
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:portkey-abc123";
+
+  it("injects non-secret config and grants access to the existing secret", () => {
+    const template = createStack(
+      {},
+      {
+        generationBackend: "portkey",
+        portkeyBaseUrl: "https://api.portkey.ai/v1",
+        portkeyModelId: "@bedrock/claude",
+        portkeySecretArn: secretArn,
+      },
+    );
+
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        GENERATION_BACKEND: "portkey",
+        PORTKEY_BASE_URL: "https://api.portkey.ai/v1",
+        PORTKEY_MODEL_ID: "@bedrock/claude",
+        PORTKEY_SECRET_ARN: secretArn,
+      }),
+    });
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: Match.arrayWith([
+              "secretsmanager:GetSecretValue",
+              "secretsmanager:DescribeSecret",
+            ]),
+            Resource: secretArn,
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("rejects Portkey mode without a model or secret", () => {
+    expect(() => createStack({}, { generationBackend: "portkey" })).toThrow(
+      "portkeyModelId is required",
+    );
+  });
+});
 
 describe("ServeStack - Security Group egress", () => {
   describe("without JDBC peer CIDRs", () => {

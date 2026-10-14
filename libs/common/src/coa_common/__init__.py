@@ -88,6 +88,11 @@ from coa_common.guardrail_screener import (
     ScreeningResult,
     assessment_has_block,
 )
+from coa_common.integration_profiles import (
+    IntegrationProfileError,
+    default_namespace_integration_profile,
+    normalize_namespace_integration_profile,
+)
 from coa_common.logging import setup_logging
 from coa_common.metadata_store import (
     AssetResult,
@@ -95,6 +100,12 @@ from coa_common.metadata_store import (
     MetadataStoreError,
     ProjectResult,
     SMUSClient,
+)
+from coa_common.model_text import (
+    delimit_model_input,
+    secure_system_prompt,
+    strip_hidden_model_characters,
+    validate_model_output_text,
 )
 from coa_common.namespace_resolver import resolve_namespace_id
 from coa_common.principal_keys import build_principal_keys, sanitize_principal_key
@@ -130,6 +141,7 @@ __all__ = [
     "GuardrailBlockedError",
     "GuardrailScreener",
     "GuardrailScreenerError",
+    "IntegrationProfileError",
     "InputTooLargeError",
     "BusinessMetadata",
     "CORS_HEADERS",
@@ -201,6 +213,12 @@ __all__ = [
     "validate_namespace_id",
     "validate_namespace_name",
     "validate_s3_prefix",
+    "default_namespace_integration_profile",
+    "normalize_namespace_integration_profile",
+    "strip_hidden_model_characters",
+    "secure_system_prompt",
+    "delimit_model_input",
+    "validate_model_output_text",
     "resolve_namespace_id",
     "sanitize_principal_key",
     "build_principal_keys",

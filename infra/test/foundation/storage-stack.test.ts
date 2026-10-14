@@ -105,6 +105,29 @@ describe("StorageStack", () => {
       });
     });
 
+    it("keeps the collection-group name within the AOSS 32-character limit", () => {
+      const app = new cdk.App({
+        context: {
+          resource_prefix: "enterprise-poc",
+          env: "dev",
+        },
+      });
+      const network = new NetworkStack(app, "EnterpriseNetwork", {
+        env: TEST_ENV,
+      });
+      const storage = new StorageStack(app, "EnterpriseStorage", {
+        network,
+        env: TEST_ENV,
+      });
+      const groups = Template.fromStack(storage).findResources(
+        "AWS::OpenSearchServerless::CollectionGroup",
+      );
+      const group = Object.values(groups)[0] as any;
+
+      expect(group.Properties.Name).toBe("enterprise-poc-dev-vector-group");
+      expect(group.Properties.Name.length).toBeLessThanOrEqual(32);
+    });
+
     it("creates an encryption policy with AWS-owned key", () => {
       const { template } = buildStacks();
       template.hasResourceProperties(

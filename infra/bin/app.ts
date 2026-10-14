@@ -15,6 +15,7 @@ import {
 import { Paths } from "../lib/paths";
 import { SsmConfig, CustomDomainConfig, IdpType } from "../lib/types";
 import {
+  parseAgentCoreAzNames,
   resolveAgentCoreAzNames,
   resolveEndpointServiceAzNames,
 } from "../lib/utils/agentcore-az";
@@ -44,6 +45,7 @@ import {
   MetricServiceStack,
   NamespaceStack,
   OntologyStack,
+  OuterAgentStack,
   ServeStack,
   SourcesStack,
   VkgStack,
@@ -129,23 +131,34 @@ async function deploy(): Promise<void> {
     | string
     | undefined);
   let agentCoreAzNames: string[] | undefined;
-  if (!importingVpc && hasCredentials) {
-    // The OpenSearch Serverless control-plane VPC endpoint
-    // (com.amazonaws.<region>.aoss) is offered in only a subset of AZs. Pin
-    // the VPC to AgentCore AZs that ALSO support it so both the AgentCore
-    // Runtime ENIs and the AOSS endpoint land on valid zones (e.g. in
-    // us-east-1, AgentCore allows {1a,1b,1c} but AOSS only {1b,1c,1d} — the
-    // intersection {1b,1c} avoids the 1a endpoint-create failure).
-    const aossAzNames = await resolveEndpointServiceAzNames(
+  if (!importingVpc) {
+    const configuredAzNames = parseAgentCoreAzNames(
+      app.node.tryGetContext("agentcore_az_names"),
       deployRegion,
-      `com.amazonaws.${deployRegion}.aoss`,
     );
-    agentCoreAzNames = await resolveAgentCoreAzNames(
-      deployRegion,
-      2,
-      undefined,
-      aossAzNames,
-    );
+    if (configuredAzNames) {
+      // Resumed-deployment path: copy these from the existing deployment's
+      // private subnets. This preserves VPC placement when the EC2
+      // endpoint-service discovery API is temporarily unavailable.
+      agentCoreAzNames = configuredAzNames;
+    } else if (hasCredentials) {
+      // The OpenSearch Serverless control-plane VPC endpoint
+      // (com.amazonaws.<region>.aoss) is offered in only a subset of AZs. Pin
+      // the VPC to AgentCore AZs that ALSO support it so both the AgentCore
+      // Runtime ENIs and the AOSS endpoint land on valid zones (e.g. in
+      // us-east-1, AgentCore allows {1a,1b,1c} but AOSS only {1b,1c,1d} — the
+      // intersection {1b,1c} avoids the 1a endpoint-create failure).
+      const aossAzNames = await resolveEndpointServiceAzNames(
+        deployRegion,
+        `com.amazonaws.${deployRegion}.aoss`,
+      );
+      agentCoreAzNames = await resolveAgentCoreAzNames(
+        deployRegion,
+        2,
+        undefined,
+        aossAzNames,
+      );
+    }
   }
   const authProps = IdpAuthenticationStack.fromSsmConfig(config);
   // Custom domains are all-or-nothing: provide every field or none.
@@ -384,6 +397,9 @@ async function deploy(): Promise<void> {
       "/system-health": `/${prefix}/ontology-engine/api-fn-arn`,
       // ── Data Layer (Serve) — runtime query/retrieval ───────────────
       "/namespaces/{namespaceId}/query": `/${prefix}/data-layer/api-fn-arn`,
+      // PlanSemanticExecution — source-neutral planning; the data-layer api-fn
+      // proxies it to the context-manager (`action: semanticPlan`).
+      "/namespaces/{namespaceId}/semantic-plan": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/translate": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/kb/search": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/graph/traverse": `/${prefix}/data-layer/api-fn-arn`,
@@ -410,6 +426,13 @@ async function deploy(): Promise<void> {
     bedrockLlmModelId: config.bedrockLlmModelId,
     bedrockEmbedModelId: config.bedrockEmbedModelId,
     allowedOverrideModels: config.allowedOverrideModels,
+    documentRetrieverBackend: config.documentRetrieverBackend,
+    bedrockKnowledgeBaseId: config.bedrockKnowledgeBaseId,
+    bedrockKnowledgeBaseByNamespace: config.bedrockKnowledgeBaseByNamespace,
+    generationBackend: config.generationBackend,
+    portkeyBaseUrl: config.portkeyBaseUrl,
+    portkeyModelId: config.portkeyModelId,
+    portkeySecretArn: config.portkeySecretArn,
     alarmAction,
   });
   serve.addDependency(smusDomain); // needs /namespace/namespaces-table-name SSM param
@@ -533,6 +556,22 @@ async function deploy(): Promise<void> {
   mcp.addDependency(metricService); // needs /metric/api-fn-arn SSM param (discovery tools)
   mcp.addDependency(ontology); // needs /ontology-engine/api-fn-arn SSM param (discovery tools)
   mcp.addDependency(auth); // needs /issuer, /userpool-client-id, /mcp-client-id SSM params
+
+  if (config.outerAgent) {
+    if (!config.portkeyModelId || !config.portkeySecretArn) {
+      throw new Error(
+        "outerAgent requires portkeyModelId and portkeySecretArn",
+      );
+    }
+    const outerAgent = new OuterAgentStack(app, `${stackPrefix}-outer-agent`, {
+      config: config.outerAgent,
+      portkeyBaseUrl: config.portkeyBaseUrl,
+      portkeyModelId: config.portkeyModelId,
+      portkeySecretArn: config.portkeySecretArn,
+    });
+    outerAgent.addDependency(auth);
+    outerAgent.addDependency(mcp);
+  }
 
   // Inject the resolved brand tokens (BRAND_PREFIX / GRAPH_BASE_URI /
   // EVENT_SOURCE_PREFIX) into every Lambda and ECS container. Applied as an

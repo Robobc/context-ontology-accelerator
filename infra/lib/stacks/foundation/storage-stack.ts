@@ -291,7 +291,10 @@ export class StorageStack extends SCLStack {
       this,
       "VectorStoreGroup",
       {
-        name: this.prefixed("vector-store-group"),
+        // AOSS collection-group names are capped at 32 characters. Keep this
+        // physical suffix shorter than the collection's descriptive suffix so
+        // customer deployment prefixes such as "enterprise-poc" remain valid.
+        name: this.prefixed("vector-group"),
         standbyReplicas: "ENABLED",
         generation: "NEXTGEN",
         capacityLimits: {

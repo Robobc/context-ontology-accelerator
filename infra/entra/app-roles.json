@@ -1,0 +1,26 @@
+[
+  {
+    "allowedMemberTypes": ["User"],
+    "description": "May administer the COA platform after an equivalent COA platform grant is created.",
+    "displayName": "COA Platform Administrator",
+    "id": "3065fd37-ad3a-411d-92b5-5c5ac6d1115a",
+    "isEnabled": true,
+    "value": "platform-admin"
+  },
+  {
+    "allowedMemberTypes": ["User"],
+    "description": "May curate namespace data and ontologies after an equivalent COA namespace grant is created.",
+    "displayName": "COA Data Steward",
+    "id": "af1f11b9-f0b6-4d6a-ab69-027b04e54155",
+    "isEnabled": true,
+    "value": "data-steward"
+  },
+  {
+    "allowedMemberTypes": ["User"],
+    "description": "May query namespace data after an equivalent COA namespace grant is created.",
+    "displayName": "COA Data Analyst",
+    "id": "8714d782-821e-4c63-ab80-9fb9b9eea94e",
+    "isEnabled": true,
+    "value": "data-analyst"
+  }
+]

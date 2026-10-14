@@ -36,6 +36,46 @@ apply Query @examples([
     }
 ])
 
+apply PlanSemanticExecution @examples([
+    {
+        title: "Compile a question for source-native execution"
+        input: { namespaceId: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d", query: "Show the current status for project P-123" }
+        output: {
+            plan: {
+                planVersion: "1.0"
+                status: "RESOLVED"
+                namespaceId: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+                profileMode: "ADOPT"
+                profileVersion: "profile-v1"
+                originalQuestion: "Show the current status for project P-123"
+                groundedQuestion: "Show the current delivery status for canonical project P-123"
+                ontologyVersion: "ontology-2026-10-14"
+                sourceDirectives: [
+                    {
+                        targetId: "project-data"
+                        targetKind: "GOVERNED_QUERY"
+                        language: "SEMANTIC_INTENT"
+                        query: "Show the current delivery status for canonical project P-123"
+                        readOnly: true
+                        requiresCompilation: true
+                        expectedEvidence: ["ROW", "PROVENANCE"]
+                    }
+                ]
+                expectedEvidence: ["ROW", "PROVENANCE"]
+                generationTarget: "portkey"
+            }
+            trace: [
+                {
+                    step: "semantic-plan"
+                    status: "ok"
+                    durationMs: 240
+                }
+            ]
+            requestId: "req-01HZY8K3M4N5P6Q7R8S9T0V1W2"
+        }
+    }
+])
+
 apply TranslateSPARQL @examples([
     {
         title: "Preview the SPARQL for a question"

@@ -143,3 +143,40 @@ class TestUpdateNamespaceInputValidation:
         resp, dao = self._call({"displayName": "", "description": ""})
         assert resp["statusCode"] == 200
         dao.update.assert_called_once()
+
+
+@pytest.mark.unit
+class TestUpdateIntegrationProfile:
+    def test_replaces_valid_profile(self):
+        profile = {
+            "mode": "FEDERATE",
+            "profileVersion": "v1",
+            "ontologyVersion": "ontology-v1",
+            "sourceTargets": [
+                {
+                    "targetId": "external-graph",
+                    "kind": "EXTERNAL_GRAPH",
+                    "accessMode": "READ_ONLY",
+                    "scopeRef": "graph-scope",
+                }
+            ],
+        }
+        with patch(f"{MODULE}._get_ns_dao") as mock:
+            dao = MagicMock()
+            mock.return_value = dao
+            dao.get.side_effect = [
+                _NS_ITEM,
+                {**_NS_ITEM, "integrationProfile": profile},
+            ]
+            from coa_control_plane.namespace.update_handler import handler
+
+            result = handler(
+                {
+                    "pathParameters": {"namespaceId": "ns-123"},
+                    "body": json.dumps({"integrationProfile": profile}),
+                },
+                None,
+            )
+        assert result["statusCode"] == 200
+        assert dao.update.call_args.kwargs["update_fields"]["integrationProfile"] == profile
+        assert json.loads(result["body"])["namespace"]["integrationProfile"] == profile

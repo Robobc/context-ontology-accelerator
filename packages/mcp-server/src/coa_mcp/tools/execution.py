@@ -161,6 +161,30 @@ async def execute_query(
     }
 
 
+async def execute_semantic_plan(
+    cm_client: ContextManagerClient,
+    query: str,
+    namespace_id: str,
+    profile: dict,
+    bearer_token: str,
+) -> dict[str, Any]:
+    """Compile a source-neutral plan without executing any source target."""
+    payload: dict[str, Any] = {
+        "action": "semanticPlan",
+        "query": query,
+        "namespace": namespace_id,
+        "profile": _build_cm_profile(profile),
+    }
+    response = await cm_client.invoke(payload, bearer_token)
+    _raise_for_cm_error(response)
+    unwrapped = _strip_envelope(response)
+    return {
+        "plan": unwrapped.get("plan", {}),
+        "trace": unwrapped.get("trace", []),
+        "requestId": unwrapped.get("requestId") or response.get("requestId"),
+    }
+
+
 async def execute_translate_sparql(
     cm_client: ContextManagerClient,
     query: str,

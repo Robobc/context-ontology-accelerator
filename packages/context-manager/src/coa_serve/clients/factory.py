@@ -25,6 +25,8 @@ from .base import ClientSet
 if TYPE_CHECKING:
     from ..config import ServiceConfig
     from ..lexical.baseline_retriever import BaselineLexicalRetriever
+    from ..tier3.document_retriever import DocumentRetriever
+    from .base import VectorClient
 
 logger = structlog.get_logger(__name__)
 
@@ -119,6 +121,55 @@ def _build_default_clients() -> ClientSet:
         # Executes authorized SQL against customer relational databases
         # (PostgreSQL via asyncpg, Athena for cross-source federation).
         query_executor=SourceDBQueryExecutor(),
+    )
+
+
+def build_document_retriever(config: ServiceConfig, vector_client: VectorClient) -> DocumentRetriever:
+    """Build the default and per-namespace document retrieval adapters."""
+    from ..tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
+    from ..tier3.document_retriever import RoutingDocumentRetriever
+    from ..tier3.vector_retriever import VectorRetriever
+
+    opensearch_retriever = VectorRetriever(vector_client)
+    default: DocumentRetriever = opensearch_retriever
+    if config.document_retriever_backend == "bedrock-kb":
+        default = BedrockKnowledgeBaseRetriever(
+            config.bedrock_kb_id,
+            region=config.bedrock_region,
+        )
+
+    routes = {
+        namespace: BedrockKnowledgeBaseRetriever(kb_id, region=config.bedrock_region)
+        for namespace, kb_id in config.bedrock_kb_by_namespace
+    }
+    if not routes:
+        return default
+    return RoutingDocumentRetriever(default=default, routes=routes)
+
+
+def build_llm_client(config: ServiceConfig):
+    """Build Bedrock-native or Portkey generation with Bedrock embeddings."""
+    from .bedrock import BedrockLLMClient
+
+    bedrock = BedrockLLMClient(
+        model_id=config.bedrock_model_id,
+        region=config.bedrock_region,
+    )
+    if config.generation_backend == "bedrock":
+        return bedrock
+
+    from .portkey import PortkeyLLMClient
+
+    return PortkeyLLMClient(
+        model_id=config.portkey_model_id,
+        embedding_client=bedrock,
+        base_url=config.portkey_base_url,
+        api_key=os.environ.get("PORTKEY_API_KEY") or None,
+        secret_arn=config.portkey_secret_arn or None,
+        virtual_key=os.environ.get("PORTKEY_VIRTUAL_KEY") or None,
+        config_id=os.environ.get("PORTKEY_CONFIG_ID") or None,
+        region=config.bedrock_region,
+        guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT"),
     )
 
 

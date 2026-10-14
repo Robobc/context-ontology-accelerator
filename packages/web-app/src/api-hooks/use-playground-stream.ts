@@ -70,10 +70,10 @@ export function usePlaygroundStream({
       controllerRef.current = controller;
       setIsStreaming(true);
 
-      // Get ID token and user sub (carries email + groups for Cedar auth; AgentCore validates aud)
-      // Sub feeds X-Amzn-Bedrock-AgentCore-Runtime-Session-Id (must be ≥33 chars,
-      // sticky routing) — deriveRuntimeSessionId pads/normalizes since some IdPs
-      // issue short subs (e.g. "noahpaig") that fail that constraint as-is.
+      // Get ID token and user sub (carries email + groups for Cedar auth; AgentCore validates aud).
+      // The sub gates creation of a fresh transport-only AgentCore session id.
+      // COA's logical conversation session stays in request.sessionId; it must
+      // not be coupled to AgentCore worker/version affinity.
       let token: string;
       let runtimeSessionId: string | undefined;
       try {

@@ -90,6 +90,21 @@ export interface CustomDomainConfig {
 
 // ── SSM Config (JSON-serializable) ─────────────────────────────────
 
+export interface OuterAgentSourceTargetConfig {
+  readonly kind: "MANAGED_KB" | "GOVERNED_QUERY" | "EXTERNAL_GRAPH" | "COA_GRAPH";
+  /** Administrator-bound managed KBs. Required only for MANAGED_KB. */
+  readonly knowledgeBaseIds?: string[];
+  /** Maximum AgenticRetrieveStream planning/retrieval iterations. @default 5 */
+  readonly maxAgentIterations?: number;
+}
+
+export interface OuterAgentConfig {
+  /** Logical target IDs referenced by namespace integration profiles. */
+  readonly sourceTargets: Record<string, OuterAgentSourceTargetConfig>;
+  readonly maxEvidenceItems?: number;
+  readonly maxEvidenceCharacters?: number;
+}
+
 /**
  * Deployment configuration loaded from SSM Parameter Store.
  *
@@ -157,4 +172,29 @@ export interface SsmConfig {
   /** Model IDs allowed for per-request override via options.modelId.
    *  When omitted or empty, any valid model ID is accepted. */
   readonly allowedOverrideModels?: string[];
+
+  /** Default passage-retrieval backend. OpenSearch remains the ontology vector
+   * index even when this is BEDROCK_KB. */
+  readonly documentRetrieverBackend?: "opensearch" | "bedrock-kb";
+
+  /** Default existing Bedrock Knowledge Base id for document retrieval. */
+  readonly bedrockKnowledgeBaseId?: string;
+
+  /** Namespace id to existing Bedrock Knowledge Base id overrides. */
+  readonly bedrockKnowledgeBaseByNamespace?: Record<string, string>;
+
+  /** Generation backend; embeddings remain on Bedrock in both modes. */
+  readonly generationBackend?: "bedrock" | "portkey";
+
+  /** Portkey OpenAI-compatible API base URL. */
+  readonly portkeyBaseUrl?: string;
+
+  /** Model identifier understood by the configured Portkey workspace. */
+  readonly portkeyModelId?: string;
+
+  /** Secrets Manager ARN containing apiKey and optional virtualKey/configId. */
+  readonly portkeySecretArn?: string;
+
+  /** Optional source-native orchestration runtime. */
+  readonly outerAgent?: OuterAgentConfig;
 }

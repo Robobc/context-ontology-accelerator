@@ -1054,7 +1054,7 @@ class TestKnowledgeRetrieverWithLexical:
         the parallel vector + graph path — the retriever is not engaged."""
         mock_lexical = AsyncMock()
         mock_vector = AsyncMock()
-        mock_vector.search.return_value = [
+        mock_vector.retrieve.return_value = [
             ChunkResult(chunk_id="c1", text="test", source_doc="doc.pdf", relevance_score=0.8)
         ]
         mock_graph = AsyncMock()
@@ -1072,12 +1072,16 @@ class TestKnowledgeRetrieverWithLexical:
         await retriever.resolve("test query", "550e8400-e29b-41d4-a716-446655440000", embedding=[0.1] * 1024)
 
         mock_lexical.retrieve.assert_not_called()
-        mock_vector.search.assert_called_once()
+        mock_vector.retrieve.assert_awaited_once_with(
+            "test query",
+            "test-ns",
+            query_embedding=[0.1] * 1024,
+        )
         mock_graph.traverse.assert_called_once()
 
     async def test_does_not_call_lexical_when_none(self):
         mock_vector = AsyncMock()
-        mock_vector.search.return_value = [
+        mock_vector.retrieve.return_value = [
             ChunkResult(chunk_id="c1", text="test", source_doc="doc.pdf", relevance_score=0.8)
         ]
         mock_graph = AsyncMock()
@@ -1094,7 +1098,11 @@ class TestKnowledgeRetrieverWithLexical:
         await retriever.resolve("test query", "550e8400-e29b-41d4-a716-446655440000", embedding=[0.1] * 1024)
 
         # Vector and graph WERE called (hand-rolled path)
-        mock_vector.search.assert_called_once()
+        mock_vector.retrieve.assert_awaited_once_with(
+            "test query",
+            "test-ns",
+            query_embedding=[0.1] * 1024,
+        )
         mock_graph.traverse.assert_called_once()
 
     async def test_lexical_trace_steps_included(self):

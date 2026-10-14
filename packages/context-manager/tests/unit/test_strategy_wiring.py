@@ -296,7 +296,7 @@ class TestKnowledgeRetrieverHandRolledParity:
 
     async def test_retriever_strategy_ignored_when_lexical_none(self):
         mock_vector = AsyncMock(spec=VectorRetriever)
-        mock_vector.search.return_value = [
+        mock_vector.retrieve.return_value = [
             ChunkResult(chunk_id="c1", text="t", source_doc="d.pdf", relevance_score=0.8)
         ]
         mock_graph = AsyncMock(spec=GraphTraverser)
@@ -318,7 +318,11 @@ class TestKnowledgeRetrieverHandRolledParity:
         )
 
         # Parallel vector + graph path executed unchanged.
-        mock_vector.search.assert_awaited_once()
+        mock_vector.retrieve.assert_awaited_once_with(
+            "q",
+            "ns",
+            query_embedding=[0.1] * 8,
+        )
         mock_graph.traverse.assert_awaited_once()
         # No lexical trace step appears on the hand-rolled path.
         step_names = [s["step"] for s in result.trace_steps]
@@ -329,7 +333,7 @@ class TestKnowledgeRetrieverHandRolledParity:
     async def test_no_strategy_and_no_lexical_runs_parallel_path(self):
         # Control: omit retriever_strategy entirely; behavior is identical.
         mock_vector = AsyncMock(spec=VectorRetriever)
-        mock_vector.search.return_value = []
+        mock_vector.retrieve.return_value = []
         mock_graph = AsyncMock(spec=GraphTraverser)
         mock_graph.traverse.return_value = []
 
@@ -342,7 +346,11 @@ class TestKnowledgeRetrieverHandRolledParity:
 
         await retriever.resolve("q", "ns", embedding=[0.1] * 8)
 
-        mock_vector.search.assert_awaited_once()
+        mock_vector.retrieve.assert_awaited_once_with(
+            "q",
+            "ns",
+            query_embedding=[0.1] * 8,
+        )
         mock_graph.traverse.assert_awaited_once()
 
 

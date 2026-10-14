@@ -3,13 +3,13 @@
 
 """MCP Server for Context Ontology Accelerator.
 
-Exposes 6 MCP tools (2 discovery + 4 execution) via Streamable HTTP
+Exposes 7 MCP tools (2 discovery + 5 execution) via Streamable HTTP
 on AgentCore Runtime (port 8000, --protocol MCP).
 
 Architecture:
 - Discovery tools (list_metrics, describe_schema) invoke backend Lambdas
   directly via LambdaClient (bypassing API Gateway).
-- Execution tools (query, translate_sparql, rag_retrieval, graph_traversal)
+- Execution tools (query, semantic_execution_plan, translate_sparql, rag_retrieval, graph_traversal)
   delegate to the Context Manager via AgentCore InvokeAgentRuntime.
 - JWT validated by the platform; server extracts claims and forwards token.
 - Authorization against delegating USER (not agent).
@@ -25,6 +25,7 @@ import time
 from typing import Any, Literal
 
 import structlog
+from coa_common.auth import extract_email_claim
 from mcp.server.fastmcp import Context, FastMCP
 
 from .audit import log_tool_invocation
@@ -52,6 +53,11 @@ mcp = FastMCP(
 
 _lambda_client: LambdaClient | None = None
 _cm_client: ContextManagerClient | None = None
+
+
+def _caller_email(caller: CallerIdentity) -> str:
+    """Return normalized email while tolerating legacy/test CallerIdentity construction."""
+    return caller.email or extract_email_claim(caller.raw_claims)
 
 
 def _get_lambda_client() -> LambdaClient:
@@ -127,8 +133,8 @@ async def _resolve_caller_and_profile(
     profile = grant.to_profile_dict()
     # Pass original IdP groups + email for the Context Manager's own RRM resolution.
     profile["idpGroups"] = caller.roles
-    if caller.raw_claims.get("email"):
-        profile["userId"] = caller.raw_claims["email"]
+    if email := _caller_email(caller):
+        profile["userId"] = email
     return caller, profile
 
 
@@ -167,7 +173,7 @@ def _build_authorizer_context(caller: CallerIdentity, profile: dict) -> dict:
         "principalId": caller.user_id,
         "userId": caller.user_id,
         "sub": caller.user_id,
-        "email": caller.raw_claims.get("email", caller.user_id),
+        "email": _caller_email(caller) or caller.user_id,
         "groups": ",".join(caller.roles),
         "globalRoles": ",".join(profile.get("globalRoles", [])),
     }
@@ -428,6 +434,75 @@ async def query(
 
 
 @mcp.tool()
+async def semantic_execution_plan(
+    ctx: Context,
+    query: str,
+    namespaceId: str,
+) -> str:
+    """Compile a governed, versioned source-execution plan without executing it.
+
+    The plan resolves ontology concepts and emits logical read-only directives
+    for administrator-configured Managed KB, Databricks, COA graph, or external
+    graph targets. It contains no rows, chunks, credentials, endpoints, or grants.
+    Source systems retain authorization and execution ownership.
+    """
+    start = time.perf_counter()
+    caller = None
+    try:
+        caller, profile = await _resolve_caller_and_profile(
+            namespaceId,
+            ctx,
+            cedar_action=TOOL_CEDAR_ACTION["semantic_execution_plan"],
+        )
+        token = _extract_bearer_token(ctx)
+        result = await execution.execute_semantic_plan(_get_cm_client(), query, namespaceId, profile, token)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        if caller:
+            log_tool_invocation(
+                caller,
+                "semantic_execution_plan",
+                namespaceId,
+                duration_ms=duration_ms,
+            )
+        return json.dumps(result, indent=2, default=str)
+    except (ClaimsExtractionError, GrantResolutionError) as exc:
+        if caller:
+            log_tool_invocation(
+                caller,
+                "semantic_execution_plan",
+                namespaceId,
+                success=False,
+                error=str(exc),
+            )
+        raise ValueError(str(exc)) from exc
+    except ContextManagerError as exc:
+        if caller:
+            log_tool_invocation(
+                caller,
+                "semantic_execution_plan",
+                namespaceId,
+                success=False,
+                error=str(exc),
+            )
+        raise ValueError(f"CM {exc.status_code}: {exc.message}") from exc
+    except Exception as exc:
+        logger.error(
+            "semantic_execution_plan_failed",
+            namespace=namespaceId,
+            error=type(exc).__name__,
+        )
+        if caller:
+            log_tool_invocation(
+                caller,
+                "semantic_execution_plan",
+                namespaceId,
+                success=False,
+                error=type(exc).__name__,
+            )
+        raise
+
+
+@mcp.tool()
 async def translate_sparql(
     ctx: Context,
     query: str,
@@ -631,7 +706,15 @@ if __name__ == "__main__":
         host=config.mcp_host,
         port=config.mcp_port,
         auth_enabled=config.auth_enabled,
-        tools=["list_metrics", "describe_schema", "query", "translate_sparql", "rag_retrieval", "graph_traversal"],
+        tools=[
+            "list_metrics",
+            "describe_schema",
+            "query",
+            "semantic_execution_plan",
+            "translate_sparql",
+            "rag_retrieval",
+            "graph_traversal",
+        ],
     )
 
     # Add CORS middleware for local demo UI

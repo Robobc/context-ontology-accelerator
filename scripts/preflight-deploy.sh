@@ -218,8 +218,24 @@ if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1
   [[ "$VPC_LIMIT" =~ ^[0-9]+$ ]] || VPC_LIMIT=5
   if [ "$VPC_COUNT" != "?" ]; then
     if [ "$VPC_COUNT" -ge "$VPC_LIMIT" ]; then
-      err "VPC limit reached: $VPC_COUNT/$VPC_LIMIT VPCs in $REGION."
-      err "Delete unused VPCs or request a quota increase before deploying."
+      # A resumed deployment does not need VPC headroom when its network stack
+      # already owns a VPC. Without this check, the first partial deployment
+      # consumes the last slot and preflight permanently blocks its own retry.
+      DEPLOYMENT_VPC_ID=""
+      if [ -n "${SCL_DEPLOY_ENV:-}" ]; then
+        NETWORK_STACK="${SCL_PREFIX:-coa}-${SCL_DEPLOY_ENV}-network"
+        DEPLOYMENT_VPC_ID=$(aws cloudformation describe-stacks \
+          --stack-name "$NETWORK_STACK" \
+          --region "$REGION" \
+          --query "Stacks[0].Outputs[?OutputKey=='VpcId'].OutputValue | [0]" \
+          --output text 2>/dev/null || echo "")
+      fi
+      if [ -n "$DEPLOYMENT_VPC_ID" ] && [ "$DEPLOYMENT_VPC_ID" != "None" ]; then
+        ok "VPC quota full ($VPC_COUNT/$VPC_LIMIT); reusing deployment VPC $DEPLOYMENT_VPC_ID"
+      else
+        err "VPC limit reached: $VPC_COUNT/$VPC_LIMIT VPCs in $REGION."
+        err "Delete unused VPCs or request a quota increase before deploying."
+      fi
     else
       ok "VPC headroom: $VPC_COUNT/$VPC_LIMIT used in $REGION"
     fi

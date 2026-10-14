@@ -12,9 +12,12 @@ There are two ways agents connect, both under the same delegated-auth model:
 
 - **MCP (Model Context Protocol)** — the primary path for AI agents (Claude,
   Amazon Q, IDE integrations like Kiro/Claude Desktop/Cursor). Ontology
-  Accelerator runs an MCP server on AgentCore Runtime exposing 6 tools —
+  Accelerator runs an MCP server on AgentCore Runtime exposing 7 tools —
   `list_metrics` and `describe_schema` for discovery, plus `query`,
-  `translate_sparql`, `rag_retrieval`, and `graph_traversal` for execution.
+  `semantic_execution_plan`, `translate_sparql`, `rag_retrieval`, and
+  `graph_traversal` for execution. Use `semantic_execution_plan` when a domain
+  agent must retain source-native authorization/execution; use `query` for the
+  turnkey COA path.
   See "MCP Server Setup" below.
 - **Direct REST API** — for scripts, notebooks, or custom automation that
   isn't going through an MCP client. Uses the same endpoints the web app
