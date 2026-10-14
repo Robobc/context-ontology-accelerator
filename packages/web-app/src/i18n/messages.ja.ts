@@ -1987,6 +1987,8 @@ export const MESSAGES_JA = {
   "Run query": "クエリを実行",
   "Running a custom query": "カスタムクエリを実行中",
   "Running knowledge graph query": "ナレッジグラフクエリを実行中",
+  "Query execution failed; no rows were returned.":
+    "クエリの実行に失敗しました。行は返されませんでした。",
   "Running query": "クエリを実行中",
   "SPARQL generated.": "SPARQL を生成しました。",
   "SQL Firewall": "SQL ファイアウォール",

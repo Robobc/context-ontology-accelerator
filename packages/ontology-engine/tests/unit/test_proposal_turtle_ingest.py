@@ -591,6 +591,18 @@ class TestAcceptProposalR2rmlWiring:
         assert by_class["https://example.com/onto#Doctor"] is True
         assert by_class["https://example.com/onto#Patient"] is False
 
+    def test_parseable_non_r2rml_turtle_is_rejected_before_accept(self, accept_client):
+        http, dynamo, mock_graph, *_ = accept_client
+        proposal = dynamo[("default#PROPOSAL#p-1", "META")]
+        proposal["r2rml_turtle"] = TURTLE
+
+        resp = http.post("/ontology/proposals/p-1/accept")
+
+        assert resp.status_code == 422
+        assert "does not define any rr:TriplesMap" in resp.json()["detail"]
+        assert proposal["status"] == "pending"
+        mock_graph.load_turtle.assert_not_called()
+
 
 class TestProposalCancel:
     def test_cancel_pending_proposal(self, accept_client):

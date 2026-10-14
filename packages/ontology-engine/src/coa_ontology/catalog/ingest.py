@@ -344,6 +344,77 @@ class IngestMetadata:
     source: str = "import"  # import | import-from-url | proposal-accept
 
 
+def _parse_r2rml_graph(r2rml_content: bytes | str | None) -> Graph | None:
+    """Parse optional R2RML once per consumer, failing soft for non-mapped ontologies."""
+    if not r2rml_content:
+        return None
+    text = r2rml_content.decode("utf-8") if isinstance(r2rml_content, bytes) else r2rml_content
+    if not text.strip():
+        return None
+    try:
+        graph = Graph()
+        graph.parse(data=text, format="turtle")
+        return graph
+    except Exception as e:  # noqa: BLE001 — malformed optional R2RML must not fail ingest
+        log.warning("r2rml parse failed while deriving structured-query metadata: %s", e)
+        return None
+
+
+def _sql_name_for_prompt(value: str) -> str:
+    """Render an R2RML SQL identifier compactly without losing required quoting."""
+    parts = re.findall(r'"(?:[^"]|"")*"|[^.]+', value.strip())
+    rendered: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if part.startswith('"') and part.endswith('"'):
+            part = part[1:-1].replace('""', '"')
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", part):
+            rendered.append(part)
+        elif part:
+            rendered.append(f'"{part.replace(chr(34), chr(34) * 2)}"')
+    return ".".join(rendered)
+
+
+def _sql_names_from_r2rml(r2rml_content: bytes | str | None) -> tuple[dict[str, str], dict[str, str]]:
+    """Return unambiguous class→table and property→column SQL names from R2RML."""
+    graph = _parse_r2rml_graph(r2rml_content)
+    if graph is None:
+        return {}, {}
+
+    rr = Namespace("http://www.w3.org/ns/r2rml#")
+    tables: dict[str, set[str]] = {}
+    columns: dict[str, set[str]] = {}
+    for triples_map in graph.subjects(RDF.type, rr.TriplesMap):
+        logical_table = graph.value(triples_map, rr.logicalTable)
+        table_name = _sql_name_for_prompt(str(graph.value(logical_table, rr.tableName) or ""))
+        for subject_map in graph.objects(triples_map, rr.subjectMap):
+            class_uri = graph.value(subject_map, rr["class"])
+            if class_uri is not None and table_name:
+                tables.setdefault(str(class_uri), set()).add(table_name)
+
+        for predicate_object_map in graph.objects(triples_map, rr.predicateObjectMap):
+            physical_names = {
+                _sql_name_for_prompt(str(value))
+                for object_map in graph.objects(predicate_object_map, rr.objectMap)
+                for value in graph.objects(object_map, rr.column)
+            }
+            physical_names.update(
+                _sql_name_for_prompt(str(value))
+                for object_map in graph.objects(predicate_object_map, rr.objectMap)
+                for join in graph.objects(object_map, rr.joinCondition)
+                for value in graph.objects(join, rr.child)
+            )
+            physical_names.discard("")
+            for predicate in graph.objects(predicate_object_map, rr.predicate):
+                columns.setdefault(str(predicate), set()).update(physical_names)
+
+    # Multiple physical mappings for one semantic term are unsafe to guess from.
+    return (
+        {uri: next(iter(names)) for uri, names in tables.items() if len(names) == 1},
+        {uri: next(iter(names)) for uri, names in columns.items() if len(names) == 1},
+    )
+
+
 def _class_datasource_map_from_r2rml(r2rml_content: bytes | str | None) -> dict[str, str]:
     """Map each R2RML-mapped class URI → its datasource-id, parsed from R2RML.
 
@@ -385,21 +456,12 @@ def _class_datasource_map_from_r2rml(r2rml_content: bytes | str | None) -> dict[
     Returns an empty dict when ``r2rml_content`` is None/empty or unparseable
     (fail-soft: a class with no derivable mapping is simply treated as unmapped).
     """
-    if not r2rml_content:
-        return {}
-    text = r2rml_content.decode("utf-8") if isinstance(r2rml_content, bytes) else r2rml_content
-    if not text.strip():
+    rg = _parse_r2rml_graph(r2rml_content)
+    if rg is None:
         return {}
 
     rr = Namespace("http://www.w3.org/ns/r2rml#")
     scl = Namespace(VOCAB_URI)
-    try:
-        rg = Graph()
-        rg.parse(data=text, format="turtle")
-    except Exception as e:  # noqa: BLE001 — malformed R2RML must not fail ingest
-        log.warning("r2rml parse failed while deriving class→datasource map: %s", e)
-        return {}
-
     mapping: dict[str, str] = {}
     for tmap in rg.subjects(RDF.type, rr.TriplesMap):
         ds_id = str(rg.value(tmap, scl.datasourceId) or "")
@@ -582,6 +644,11 @@ def ingest_ontology(
     # presence of any ds-id = answerable). Multi-source routing (federate instead
     # of pinning one source) is a planned follow-up — widen to dict[str, set[str]].
     class_to_datasource: dict[str, str] = _class_datasource_map_from_r2rml(r2rml_content)
+    # @amsec-loaf: model-validation
+    # The model's executable schema context comes only from parsed R2RML SQL
+    # identifiers. Human-facing ontology labels remain retrieval vocabulary but
+    # never masquerade as physical table or column names.
+    class_to_sql_table, property_to_sql_column = _sql_names_from_r2rml(r2rml_content)
 
     # ── 3. Tier-1 validators (optional) ─────────────────────────────────
     if validate:
@@ -810,6 +877,8 @@ def ingest_ontology(
         dt_props=dt_props,
         namespace=namespace,
         class_to_datasource=class_to_datasource,
+        class_to_sql_table=class_to_sql_table,
+        property_to_sql_column=property_to_sql_column,
     )
     log.info(
         "ingest: step3 accumulate_embeddings %.0fms (%s)",
@@ -1267,6 +1336,8 @@ def _accumulate_embeddings(
     dt_props: set,
     namespace: str,
     class_to_datasource: dict[str, str] | None = None,
+    class_to_sql_table: dict[str, str] | None = None,
+    property_to_sql_column: dict[str, str] | None = None,
 ) -> dict:
     """Embed every class + property and upsert into the namespace's vector index.
 
@@ -1311,6 +1382,8 @@ def _accumulate_embeddings(
     # induced class). A class present in the map is R2RML-mapped; its ds-id
     # string is written to ``data_source_id`` for the serve NL->SQL filter.
     ds_map = class_to_datasource or {}
+    table_map = class_to_sql_table or {}
+    column_map = property_to_sql_column or {}
 
     def _mapped_parents(cls_uri) -> list[str]:
         """Labels of this class's ``rdfs:subClassOf`` parents that are mapped tables.
@@ -1331,7 +1404,7 @@ def _accumulate_embeddings(
         key_list = graph.value(cls_uri, OWL.hasKey)
         if key_list is None:
             return []
-        return [_label_of(prop) for prop in Collection(graph, key_list)]
+        return [column_map.get(str(prop), _label_of(prop)) for prop in Collection(graph, key_list)]
 
     def _term_hints(subject) -> str:
         """Bracketed synonyms / glossary terms / tags for one column or relationship."""
@@ -1360,7 +1433,8 @@ def _accumulate_embeddings(
         class, the primary key, per-column synonyms / glossary terms / tags, and
         each column's type and ``allowed values: [...]``.
         """
-        name = _label_of(cls_uri)
+        business_name = _label_of(cls_uri)
+        name = table_map.get(str(cls_uri), business_name)
         description = str(graph.value(cls_uri, RDFS.comment) or "")
         synonyms = [str(o) for o in graph.objects(cls_uri, SKOS.altLabel)]
         glossary_terms = _literals(cls_uri, GLOSSARY_TERM)
@@ -1368,23 +1442,29 @@ def _accumulate_embeddings(
         parents = _mapped_parents(cls_uri)
         primary_key = _primary_key(cls_uri)
 
-        # (label, target, comment, hints)
-        obj_props_list: list[tuple[str, str, str, str]] = []
-        # (label, dtype, comment, distinct_values, hints)
-        data_props_list: list[tuple[str, str, str, list[str], str]] = []
+        # (physical name, business label, target, comment, hints)
+        obj_props_list: list[tuple[str, str, str, str, str]] = []
+        # (physical name, business label, dtype, comment, distinct_values, hints)
+        data_props_list: list[tuple[str, str, str, str, list[str], str]] = []
 
         for prop_uri in graph.subjects(RDFS.domain, cls_uri):
             prop_label = _label_of(prop_uri)
+            prop_name = column_map.get(str(prop_uri), prop_label)
             prop_comment = str(graph.value(prop_uri, RDFS.comment) or "")
             prop_range = graph.value(prop_uri, RDFS.range)
 
             if (prop_uri, RDF.type, OWL.ObjectProperty) in graph:
-                range_label = _label_of(prop_range) if prop_range else ""
-                obj_props_list.append((prop_label, range_label, prop_comment, _term_hints(prop_uri)))
+                range_business_name = _label_of(prop_range) if prop_range else ""
+                range_name = table_map.get(str(prop_range), range_business_name) if prop_range else ""
+                obj_props_list.append(
+                    (prop_name, prop_label, range_name, prop_comment, _term_hints(prop_uri))
+                )
             elif (prop_uri, RDF.type, OWL.DatatypeProperty) in graph:
                 dtype = str(prop_range).split("#")[-1] if prop_range else "string"
                 distinct_vals = [str(o) for o in graph.objects(prop_uri, _SCL_NS.distinctValues)]
-                data_props_list.append((prop_label, dtype, prop_comment, distinct_vals, _term_hints(prop_uri)))
+                data_props_list.append(
+                    (prop_name, prop_label, dtype, prop_comment, distinct_vals, _term_hints(prop_uri))
+                )
 
         if not data_props_list and not obj_props_list:
             thin = _text_for(cls_uri)
@@ -1392,6 +1472,8 @@ def _accumulate_embeddings(
 
         def _head(*, rich: bool) -> list[str]:
             parts = [f"Table: {name}"]
+            if business_name != name:
+                parts.append(f"Business name: {business_name}")
             if description:
                 parts.append(f"Description: {description}")
             if synonyms:
@@ -1409,8 +1491,11 @@ def _accumulate_embeddings(
                     parts.append(f"Primary key: {', '.join(primary_key)}")
             if obj_props_list:
                 rels = ", ".join(
-                    f"{label}->{target}" + (f" ({comment})" if comment else "") + (hints if rich else "")
-                    for label, target, comment, hints in obj_props_list
+                    f"{name}->{target}"
+                    + (f" [business label: {label}]" if label != name else "")
+                    + (f" ({comment})" if comment else "")
+                    + (hints if rich else "")
+                    for name, label, target, comment, hints in obj_props_list
                 )
                 parts.append(f"Relationships: {rels}")
             return parts
@@ -1422,11 +1507,12 @@ def _accumulate_embeddings(
             # rich=True → generation context: adds type, steward terms and allowed
             # values so the LLM writes correct casts and WHERE literals.
             return ", ".join(
-                (f"{label}:{dtype}" if rich else label)
+                (f"{name}:{dtype}" if rich else name)
+                + (f" [business label: {label}]" if label != name else "")
                 + (f" ({comment[:100]})" if comment else "")
                 + (hints if rich else "")
                 + (f" allowed values: [{', '.join(vals[:20])}]" if rich and vals else "")
-                for label, dtype, comment, vals, hints in data_props_list
+                for name, label, dtype, comment, vals, hints in data_props_list
             )
 
         embed_parts = _head(rich=False)

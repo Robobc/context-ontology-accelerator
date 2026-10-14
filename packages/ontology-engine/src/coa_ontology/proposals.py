@@ -254,6 +254,19 @@ def _ontology_short_id(ontology_id: str) -> str:
     return safe_id.split("_")[-1] if "_" in safe_id else safe_id
 
 
+def _validate_r2rml_turtle(r2rml_turtle: str) -> None:
+    """Reject parseable Turtle that is not an executable R2RML mapping."""
+    from rdflib import RDF, Namespace
+
+    try:
+        graph = Graph().parse(data=r2rml_turtle, format="turtle")
+    except Exception as e:
+        raise ValueError(f"invalid Turtle: {e}") from e
+    rr = Namespace("http://www.w3.org/ns/r2rml#")
+    if not any(graph.subjects(RDF.type, rr.TriplesMap)):
+        raise ValueError("does not define any rr:TriplesMap")
+
+
 def _mapping_table_names(r2rml_turtle: str | None) -> set[str] | None:
     """The ``rr:tableName`` literals the mapping being persisted actually declares.
 
@@ -1710,6 +1723,11 @@ def accept_proposal(
         r2rml_turtle = reviewed["r2rml_turtle"]
     else:
         r2rml_turtle = item.get("r2rml_turtle", "")
+    if r2rml_turtle:
+        try:
+            _validate_r2rml_turtle(r2rml_turtle)
+        except ValueError as e:
+            raise HTTPException(422, f"Invalid R2RML: {e}") from e
 
     explicit_target = body.ontology_id if body else None
     target_ontology_id = explicit_target or item.get("ontology_id", "")
@@ -1993,8 +2011,17 @@ def update_proposal(body: UpdateProposalRequest, namespace: str = "default"):
             version,
         )
 
+    def _validate_r2rml(ttl: str) -> None:
+        # Upstream's parse check first (its tests pin the "Invalid R2RML Turtle"
+        # wording); then reject parseable Turtle that is not an R2RML mapping.
+        _validate_turtle(ttl, "R2RML")
+        try:
+            _validate_r2rml_turtle(ttl)
+        except ValueError as e:
+            raise HTTPException(422, f"Invalid R2RML: {e}") from e
+
     if body.r2rml_turtle is not None:
-        _validate_turtle(body.r2rml_turtle, "R2RML")
+        _validate_r2rml(body.r2rml_turtle)
         updates["r2rml_s3_key"] = dynamo_store._put_artifact_s3(
             namespace,
             body.proposal_id,
@@ -2006,7 +2033,7 @@ def update_proposal(body: UpdateProposalRequest, namespace: str = "default"):
         ttl = dynamo_store._get_artifact_s3(namespace, body.proposal_id, "r2rml", version=version)
         if ttl is None:
             raise HTTPException(400, "r2rml_uploaded was set but no uploaded artifact was found in S3")
-        _validate_turtle(ttl, "R2RML")
+        _validate_r2rml(ttl)
         updates["r2rml_s3_key"] = dynamo_store._proposal_s3_key(
             namespace,
             body.proposal_id,

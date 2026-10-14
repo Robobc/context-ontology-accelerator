@@ -115,6 +115,7 @@ const _firewallFormatter: Formatter = (d, t) => {
 };
 
 const _executeFormatter: Formatter = (d, t) => {
+  if (d.error) return t("Query execution failed; no rows were returned.");
   const rows = d.rowCount ?? d.rows ?? 0;
   const tables = Array.isArray(d.tables)
     ? summarizeList(d.tables, t)
