@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import structlog
-from coa_common.auth import TokenAuthorizer, build_token_authorizer
+from coa_common.auth import TokenAuthorizer, build_token_authorizer, extract_email_claim
 
 logger = structlog.get_logger(__name__)
 
@@ -124,7 +124,7 @@ def extract_caller_identity(authorization_header: str | None) -> CallerIdentity:
         namespaces=namespaces,
         roles=roles,
         raw_claims=claims,
-        email=claims.get("email", "") or "",
+        email=extract_email_claim(claims),
     )
 
 

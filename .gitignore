@@ -63,6 +63,7 @@ Thumbs.db
 
 # Local dev runtime config (contains env-specific endpoints and credentials)
 packages/web-app/public/runtime-config.json
+infra/entra/*.local.json
 
 # Vite build output (hashed chunks — never commit these)
 public/assets/

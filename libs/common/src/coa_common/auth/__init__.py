@@ -10,6 +10,7 @@ from coa_common.auth.token_authorizer import (
     TokenAuthorizer,
     TokenType,
     TokenValidationResult,
+    extract_email_claim,
 )
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "TokenType",
     "TokenValidationResult",
     "build_token_authorizer",
+    "extract_email_claim",
     "is_cognito_issuer",
 ]
