@@ -17,9 +17,11 @@ from coa_common.bedrock import (
     BedrockTruncationError,
     GuardrailBlockedError,
     InputTooLargeError,
+    clamp_max_tokens,
     extract_text_blocks,
     resolve_chat_model_id,
 )
+from coa_common.model_text import delimit_model_input, secure_system_prompt
 
 pytestmark = pytest.mark.unit
 
@@ -112,10 +114,12 @@ class TestBedrockClient:
         assert result.input_tokens == 10
         assert result.output_tokens == 5
         assert result.latency_ms > 0
+        # The fork hardens both prompts before the call (coa_common.model_text):
+        # the system prompt gets the boundary preamble, the user prompt is delimited.
         mock_client.converse.assert_called_once_with(
             modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            messages=[{"role": "user", "content": [{"text": "user"}]}],
-            system=[{"text": "system"}],
+            messages=[{"role": "user", "content": [{"text": delimit_model_input("user")}]}],
+            system=[{"text": secure_system_prompt("system")}],
             inferenceConfig={"maxTokens": 4096},
         )
 
