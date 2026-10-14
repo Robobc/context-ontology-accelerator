@@ -17,6 +17,7 @@ from coa_mcp.tools.execution import (
     execute_graph_traversal,
     execute_query,
     execute_rag_retrieval,
+    execute_semantic_plan,
     execute_translate_sparql,
 )
 
@@ -237,6 +238,27 @@ class TestExecuteQuery:
         assert declared, "Query.timeoutMs @range not found"
         assert int(declared.group(1)) == execution.QUERY_TIMEOUT_MS_MIN
         assert int(declared.group(2)) <= execution.QUERY_TIMEOUT_MS_MAX
+
+
+@pytest.mark.unit
+class TestExecuteSemanticPlan:
+    """Tests for the semantic_execution_plan tool delegate."""
+
+    @pytest.mark.asyncio
+    async def test_invokes_plan_only_action(self, mock_cm, profile):
+        mock_cm.invoke.return_value = {
+            "plan": {"planVersion": "1.0", "sourceDirectives": []},
+            "trace": [],
+            "requestId": "req-plan",
+            "statusCode": 200,
+        }
+        result = await execute_semantic_plan(mock_cm, "trace project", "ns", profile, "tok")
+        payload = mock_cm.invoke.call_args[0][0]
+        assert payload["action"] == "semanticPlan"
+        assert payload["query"] == "trace project"
+        assert payload["namespace"] == "ns"
+        assert result["plan"]["planVersion"] == "1.0"
+        assert result["requestId"] == "req-plan"
 
 
 @pytest.mark.unit

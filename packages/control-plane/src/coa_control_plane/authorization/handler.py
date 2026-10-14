@@ -624,6 +624,11 @@ _PATH_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
     "/namespaces/{namespaceId}/query": {
         "POST": ("query", "Namespace"),
     },
+    # Non-executing plan over the same governed surface as query; the MCP
+    # grant resolver gates semantic_execution_plan under ``query`` too.
+    "/namespaces/{namespaceId}/semantic-plan": {
+        "POST": ("query", "Namespace"),
+    },
     "/namespaces/{namespaceId}/translate": {
         "POST": ("translateQuery", "Namespace"),
     },

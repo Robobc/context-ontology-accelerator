@@ -1000,7 +1000,12 @@ class TestHandleKbSearchOptions:
         orch._bedrock_client = AsyncMock()
         orch._bedrock_client.embed.return_value = [0.1]
         orch._bedrock_client._embed_model_id = "embed-model"
-        orch._knowledge_retriever._vector.search = AsyncMock(
+        # The handler goes through the backend-agnostic DocumentRetriever facade
+        # (OpenSearch or Bedrock KB per namespace), not the OpenSearch retriever.
+        doc = orch._knowledge_retriever.document_retriever
+        doc.requires_query_embedding.return_value = True
+        doc.backend_name.return_value = "opensearch"
+        doc.retrieve = AsyncMock(
             return_value=[ChunkResult(chunk_id=c, text=c, source_doc="d", relevance_score=s) for c, s in chunks]
         )
         return orch
@@ -1030,14 +1035,15 @@ class TestHandleKbSearchOptions:
         from coa_serve.main import KB_SEARCH_MAX_TOP_K
 
         _, orch = await self._run({"topK": 100})
-        kwargs = orch._knowledge_retriever._vector.search.call_args.kwargs
-        assert kwargs["top_k"] == 100
-        assert kwargs["max_top_k"] == KB_SEARCH_MAX_TOP_K == 100
+        kwargs = orch._knowledge_retriever.document_retriever.retrieve.call_args.kwargs
+        # The facade receives the validated value unchanged; _parse_kb_search_options
+        # already rejects anything above the contract bound, so no second cap applies.
+        assert kwargs["top_k"] == KB_SEARCH_MAX_TOP_K == 100
 
     @pytest.mark.asyncio
     async def test_kb_search_defaults_top_k(self):
         _, orch = await self._run({})
-        assert orch._knowledge_retriever._vector.search.call_args.kwargs["top_k"] == 10
+        assert orch._knowledge_retriever.document_retriever.retrieve.call_args.kwargs["top_k"] == 10
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1072,7 +1078,7 @@ class TestHandleKbSearchOptions:
 
         assert KB_SEARCH_MIN_TOP_K <= KB_SEARCH_DEFAULT_TOP_K <= KB_SEARCH_MAX_TOP_K
         _, orch = await self._run({})
-        assert orch._knowledge_retriever._vector.search.call_args.kwargs["top_k"] == KB_SEARCH_DEFAULT_TOP_K
+        assert orch._knowledge_retriever.document_retriever.retrieve.call_args.kwargs["top_k"] == KB_SEARCH_DEFAULT_TOP_K
 
     @pytest.mark.asyncio
     async def test_kb_search_accepts_min_top_k(self):
@@ -1080,7 +1086,7 @@ class TestHandleKbSearchOptions:
 
         result, orch = await self._run({"topK": KB_SEARCH_MIN_TOP_K})
         assert result["statusCode"] == 200
-        assert orch._knowledge_retriever._vector.search.call_args.kwargs["top_k"] == KB_SEARCH_MIN_TOP_K
+        assert orch._knowledge_retriever.document_retriever.retrieve.call_args.kwargs["top_k"] == KB_SEARCH_MIN_TOP_K
 
     @pytest.mark.asyncio
     async def test_kb_search_empty_filters_are_accepted(self):

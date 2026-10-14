@@ -9,6 +9,9 @@ namespace com.amazon.semanticcontext.datalayer
 use com.amazon.semanticcontext.common#AccessDeniedError
 use com.amazon.semanticcontext.common#Uuid
 use com.amazon.semanticcontext.common#ValidationError
+use com.amazon.semanticcontext.namespace#IntegrationTargetId
+use com.amazon.semanticcontext.namespace#IntegrationTargetKind
+use com.amazon.semanticcontext.namespace#NamespaceProfileMode
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Errors
@@ -624,6 +627,255 @@ operation Query {
         OntologyNotPublishedError
         QueryTranslationError
         VKGExecutionError
+        DataSourceUnavailableError
+    ]
+}
+
+// ── PlanSemanticExecution ───────────────────────────────────────────────────
+/// Stable version of the semantic execution plan wire contract.
+enum SemanticExecutionPlanVersion {
+    /// Initial source-neutral planning contract.
+    V1 = "1.0"
+}
+
+/// Whether a plan is safe to execute or needs caller action.
+enum SemanticPlanStatus {
+    /// All required meaning and routing information is resolved.
+    RESOLVED
+
+    /// One or more semantic choices require clarification or approval.
+    AMBIGUOUS
+
+    /// The namespace profile cannot represent the requested operation.
+    UNSUPPORTED
+}
+
+/// Representation passed to the source-owned execution adapter.
+enum SemanticDirectiveLanguage {
+    /// Natural-language retrieval query for a governed knowledge base.
+    NATURAL_LANGUAGE
+
+    /// Typed intent that a source-owned adapter must compile and validate.
+    SEMANTIC_INTENT
+
+    /// Read-only SPARQL to be validated and executed by a graph owner.
+    SPARQL
+}
+
+/// Evidence category an adapter must return for a directive.
+enum ExpectedEvidenceKind {
+    /// Retrieved document or document fragment.
+    DOCUMENT
+
+    /// Source-native citation identifying supporting content.
+    CITATION
+
+    /// Structured result row.
+    ROW
+
+    /// RDF or property-graph binding.
+    GRAPH_BINDING
+
+    /// Source execution and lineage metadata.
+    PROVENANCE
+}
+
+/// Ontology concept selected while grounding the original question.
+structure ResolvedSemanticConcept {
+    /// Stable ontology IRI.
+    @required
+    iri: String
+
+    /// Human-readable concept label.
+    label: String
+
+    /// Confidence that this concept represents the question.
+    confidence: ConfidenceScore
+}
+
+list ResolvedSemanticConceptList {
+    member: ResolvedSemanticConcept
+}
+
+/// Enterprise entity resolved to a canonical identifier with provenance.
+structure CanonicalEntity {
+    /// Ontology class or business entity type.
+    @required
+    entityType: String
+
+    /// Stable identifier owned by the enterprise resolution authority.
+    @required
+    canonicalId: String
+
+    /// Human-readable entity label.
+    label: String
+
+    /// Confidence in the identity resolution.
+    confidence: ConfidenceScore
+
+    /// Source identifiers or decisions supporting the resolution.
+    provenance: StringList
+
+    /// Timestamp or source version at which the resolution was current.
+    freshness: String
+}
+
+list CanonicalEntityList {
+    member: CanonicalEntity
+}
+
+/// One unresolved semantic choice that prevents safe source execution.
+structure SemanticAmbiguity {
+    /// Stable machine-readable ambiguity code.
+    @required
+    code: String
+
+    /// Human-readable clarification request.
+    @required
+    message: String
+
+    /// Candidate identifiers or meanings the caller may choose from.
+    candidates: StringList
+}
+
+list SemanticAmbiguityList {
+    member: SemanticAmbiguity
+}
+
+/// Evidence categories required across all source directives.
+list ExpectedEvidenceKindList {
+    member: ExpectedEvidenceKind
+}
+
+/// Bounded query or semantic intent supplied to a source-owned adapter.
+@length(min: 1, max: 100000)
+string SemanticDirectiveQuery
+
+/// One read-only instruction for a logical, administrator-configured source target.
+structure SemanticSourceDirective {
+    /// Logical target registry key; never a caller-provided endpoint.
+    @required
+    targetId: IntegrationTargetId
+
+    /// Adapter contract required for this source.
+    @required
+    targetKind: IntegrationTargetKind
+
+    /// Representation used for the instruction.
+    @required
+    language: SemanticDirectiveLanguage
+
+    /// Read-only query text or semantic intent.
+    @required
+    query: SemanticDirectiveQuery
+
+    /// Always true in this version; adapters reject mutation.
+    @required
+    readOnly: Boolean
+
+    /// Whether the source owner must compile this intent into an executable query.
+    @required
+    requiresCompilation: Boolean
+
+    /// Logical server-side policy scope applied before execution.
+    scopeRef: IntegrationTargetId
+
+    /// Evidence the source adapter must return.
+    expectedEvidence: ExpectedEvidenceKindList
+}
+
+list SemanticSourceDirectiveList {
+    member: SemanticSourceDirective
+}
+
+/// Source-neutral interpretation contract. It contains instructions and
+/// provenance requirements, never retrieved rows, chunks, credentials, or grants.
+structure SemanticExecutionPlan {
+    /// Wire-contract version used to validate the plan.
+    @required
+    planVersion: SemanticExecutionPlanVersion
+
+    /// Resolution state; only RESOLVED plans contain executable directives.
+    @required
+    status: SemanticPlanStatus
+
+    /// Namespace whose ontology and profile compiled this plan.
+    @required
+    namespaceId: Uuid
+
+    /// Domain onboarding posture active for the namespace.
+    @required
+    profileMode: NamespaceProfileMode
+
+    /// Version of the namespace integration profile.
+    @required
+    profileVersion: String
+
+    /// Exact user question, preserved through planning.
+    @required
+    originalQuestion: NaturalLanguageQuery
+
+    /// Question enriched with resolved ontology vocabulary.
+    @required
+    groundedQuestion: NaturalLanguageQuery
+
+    /// Approved ontology or semantic-snapshot version used for planning.
+    @required
+    ontologyVersion: String
+
+    /// Ontology concepts selected while grounding the question.
+    resolvedConcepts: ResolvedSemanticConceptList
+
+    /// Canonical enterprise entities resolved before source execution.
+    canonicalEntities: CanonicalEntityList
+
+    /// Choices requiring clarification; non-empty plans are not executable.
+    ambiguities: SemanticAmbiguityList
+
+    /// Read-only instructions for source-owned execution adapters.
+    sourceDirectives: SemanticSourceDirectiveList
+
+    /// Evidence categories required before final generation.
+    expectedEvidence: ExpectedEvidenceKindList
+
+    /// Logical model gateway selected after authorized evidence assembly.
+    generationTarget: IntegrationTargetId
+}
+
+/// Compile a question into a governed semantic plan without executing any
+/// document, SQL, graph, or generation target.
+@http(method: "POST", uri: "/namespaces/{namespaceId}/semantic-plan")
+operation PlanSemanticExecution {
+    input := {
+        /// Namespace whose approved profile and ontology compile the plan.
+        @required
+        @httpLabel
+        namespaceId: Uuid
+
+        /// Original natural-language question to interpret.
+        @required
+        query: NaturalLanguageQuery
+    }
+
+    output := {
+        /// Validated source-neutral semantic execution plan.
+        @required
+        plan: SemanticExecutionPlan
+
+        /// Planning trace; contains no retrieved source data.
+        @required
+        trace: TraceStepList
+
+        /// Request correlation identifier.
+        requestId: String
+    }
+
+    errors: [
+        ValidationError
+        AccessDeniedError
+        NamespaceNotFoundError
+        OntologyNotPublishedError
+        QueryTranslationError
         DataSourceUnavailableError
     ]
 }

@@ -3,7 +3,7 @@
 
 """Tests for the MCP server tool handlers and auth/profile helpers.
 
-The 6 tools are thin protocol adapters: authenticate, resolve profile,
+The 7 tools are thin protocol adapters: authenticate, resolve profile,
 delegate to a backend client, serialize JSON, audit-log. These tests mock
 the backend clients and delegate functions to verify the adapter behavior
 (JSON output, auth branching, error mapping) without any network calls.
@@ -485,6 +485,32 @@ class TestQueryTool:
         monkeypatch.setattr(server.execution, "execute_query", boom)
         with pytest.raises(RuntimeError, match="cm down"):
             await server.query(None, "hi", "sales")
+
+
+@pytest.mark.unit
+class TestSemanticExecutionPlanTool:
+    @pytest.mark.asyncio
+    async def test_returns_serialized_plan(self, monkeypatch, _local_dev):
+        async def fake_delegate(cm, text, ns, profile, token):
+            return {
+                "plan": {"planVersion": "1.0", "profileMode": "ADOPT"},
+                "trace": [],
+            }
+
+        monkeypatch.setattr(server.execution, "execute_semantic_plan", fake_delegate)
+        out = await server.semantic_execution_plan(None, "trace project", "sales")
+        parsed = json.loads(out)
+        assert parsed["plan"]["planVersion"] == "1.0"
+        assert parsed["plan"]["profileMode"] == "ADOPT"
+
+    @pytest.mark.asyncio
+    async def test_backend_error_reraised(self, monkeypatch, _local_dev):
+        async def boom(*args, **kwargs):
+            raise RuntimeError("plan failed")
+
+        monkeypatch.setattr(server.execution, "execute_semantic_plan", boom)
+        with pytest.raises(RuntimeError, match="plan failed"):
+            await server.semantic_execution_plan(None, "trace project", "sales")
 
 
 @pytest.mark.unit

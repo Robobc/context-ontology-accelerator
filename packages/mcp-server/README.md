@@ -7,7 +7,7 @@
 
 ## Overview
 
-Exposes Context Ontology Accelerator capabilities as 6 discoverable MCP tools for AI agents via Streamable HTTP
+Exposes Context Ontology Accelerator capabilities as 7 discoverable MCP tools for AI agents via Streamable HTTP
 on AgentCore Runtime (`--protocol MCP`, port 8000).
 
 **Architecture**: Thin protocol adapter on a separate AgentCore Runtime.
@@ -26,6 +26,7 @@ Needs DynamoDB (role resolution), Lambda invoke (discovery), and HTTPS egress (t
 | `list_metrics` | Discovery | List governed metric definitions (name, description, dimensions) |
 | `describe_schema` | Discovery | Describe ontology classes, properties, and data source tables |
 | `query` | Execution | End-to-end NL query with tiered resolution |
+| `semantic_execution_plan` | Planning | Return a versioned, non-executing plan for source-native tools |
 | `translate_sparql` | Execution | Translate NL to SPARQL using the published ontology |
 | `rag_retrieval` | Execution | Retrieve semantically similar document chunks |
 | `graph_traversal` | Execution | Traverse the semantic graph for entity relationships |
