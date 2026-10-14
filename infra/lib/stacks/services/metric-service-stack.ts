@@ -276,7 +276,9 @@ export class MetricServiceStack extends SCLStack {
     // OpenSearch Serverless requires a data access policy in addition
     // to IAM permissions. Without this, the role cannot read/write documents.
     new opensearchserverless.CfnAccessPolicy(this, "OSSDataAccessPolicy", {
-      name: this.prefixed("metric-data-access"),
+      // AOSS policy names are capped at 32 characters. Keep the suffix short
+      // enough for customer prefixes such as "enterprise-poc".
+      name: this.prefixed("metric-access"),
       type: "data",
       policy: JSON.stringify([
         {

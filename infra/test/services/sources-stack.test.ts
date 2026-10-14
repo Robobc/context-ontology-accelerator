@@ -3324,3 +3324,39 @@ describe("kg-build Dockerfile CVE hygiene", () => {
     expect(dockerfile).toMatch(/pip install[^\n]*--upgrade pip/);
   });
 });
+
+describe("SourcesStack - enterprise deployment prefix", () => {
+  test("keeps the AOSS policy name within the 32-character service limit", () => {
+    const app = new cdk.App({
+      context: {
+        ...TEST_CONTEXT,
+        resource_prefix: "enterprise-poc",
+        env: "dev",
+      },
+    });
+    const network = new NetworkStack(app, "EnterpriseNetwork", {
+      env: TEST_ENV,
+    });
+    const storage = new StorageStack(app, "EnterpriseStorage", {
+      network,
+      env: TEST_ENV,
+    });
+    const customerPrefixTemplate = Template.fromStack(
+      new SourcesStack(app, "EnterpriseSources", {
+        network,
+        storage,
+        allowedOrigin: "https://test.example.com",
+        env: TEST_ENV,
+      }),
+    );
+    const policies = customerPrefixTemplate.findResources(
+      "AWS::OpenSearchServerless::AccessPolicy",
+    );
+    const names = Object.values(policies).map(
+      (policy) => policy.Properties.Name as string,
+    );
+
+    expect(names).toContain("enterprise-poc-dev-src-ingest");
+    expect(names.every((name) => name.length <= 32)).toBe(true);
+  });
+});

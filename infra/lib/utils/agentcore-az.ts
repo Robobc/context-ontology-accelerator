@@ -24,6 +24,50 @@ export const AGENTCORE_RESTRICTED_AZ_IDS: Record<string, readonly string[]> = {
 };
 
 /**
+ * Parse an explicit standard-AZ list for a resumed deployment.
+ *
+ * This is an operator-supplied escape hatch for a control-plane outage in
+ * ``DescribeVpcEndpointServices``. Values must be copied from the deployment's
+ * existing subnets; fresh deployments should continue using live discovery so
+ * AgentCore and endpoint-service compatibility is checked automatically.
+ */
+export function parseAgentCoreAzNames(
+  value: unknown,
+  region: string,
+  count = 2,
+): string[] | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error("agentcore_az_names must be a comma-separated string");
+  }
+
+  const names = value
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (new Set(names).size !== names.length) {
+    throw new Error("agentcore_az_names must not contain duplicates");
+  }
+  if (names.length < count) {
+    throw new Error(
+      `agentcore_az_names requires at least ${count} AZs; got ${names.length}`,
+    );
+  }
+
+  const escapedRegion = region.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const standardAz = new RegExp(`^${escapedRegion}[a-z]$`);
+  const invalid = names.filter((name) => !standardAz.test(name));
+  if (invalid.length > 0) {
+    throw new Error(
+      `agentcore_az_names must contain standard AZs in ${region}; invalid: ${invalid.join(", ")}`,
+    );
+  }
+  return names;
+}
+
+/**
  * Resolve AgentCore-supported AZ **names** for the deploying account in
  * a restricted region, by querying ``ec2:DescribeAvailabilityZones`` and
  * filtering to the supported AZ-IDs.

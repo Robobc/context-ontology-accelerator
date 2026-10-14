@@ -9,6 +9,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { Construct } from "constructs";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
@@ -84,6 +85,27 @@ export interface ServeStackProps extends cdk.StackProps {
    *  When omitted, any valid model ID is accepted (open by default). */
   readonly allowedOverrideModels?: string[];
 
+  /** Default document retrieval backend. */
+  readonly documentRetrieverBackend?: "opensearch" | "bedrock-kb";
+
+  /** Existing Bedrock Knowledge Base used as the default document backend. */
+  readonly bedrockKnowledgeBaseId?: string;
+
+  /** Per-namespace existing Bedrock Knowledge Base overrides. */
+  readonly bedrockKnowledgeBaseByNamespace?: Record<string, string>;
+
+  /** Generation backend; embeddings continue to use Bedrock. */
+  readonly generationBackend?: "bedrock" | "portkey";
+
+  /** Portkey API base URL. */
+  readonly portkeyBaseUrl?: string;
+
+  /** Model id configured in Portkey. */
+  readonly portkeyModelId?: string;
+
+  /** Existing secret containing apiKey and optional virtualKey/configId. */
+  readonly portkeySecretArn?: string;
+
   /** OE alarm action strategy (SNS/chatbot routing). */
   readonly alarmAction?: IAlarmActionStrategy;
 }
@@ -127,6 +149,18 @@ export class ServeStack extends SCLStack {
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
     const { prefix, ssmPrefix } = resolveContext(this.node);
+    if (props.generationBackend === "portkey") {
+      if (!props.portkeyModelId?.trim()) {
+        throw new Error(
+          "portkeyModelId is required when generationBackend=portkey",
+        );
+      }
+      if (!props.portkeySecretArn?.trim()) {
+        throw new Error(
+          "portkeySecretArn is required when generationBackend=portkey",
+        );
+      }
+    }
 
     // ── Resolve OpenSearch config via SSM (decoupled from storage stack exports) ──
     const opensearchEndpoint = ssm.StringParameter.valueForStringParameter(
@@ -674,6 +708,27 @@ export class ServeStack extends SCLStack {
           ...(props.allowedOverrideModels?.length && {
             ALLOWED_OVERRIDE_MODELS: props.allowedOverrideModels.join(","),
           }),
+          DOCUMENT_RETRIEVER_BACKEND:
+            props.documentRetrieverBackend ?? "opensearch",
+          ...(props.bedrockKnowledgeBaseId && {
+            BEDROCK_KNOWLEDGE_BASE_ID: props.bedrockKnowledgeBaseId,
+          }),
+          ...(props.bedrockKnowledgeBaseByNamespace &&
+            Object.keys(props.bedrockKnowledgeBaseByNamespace).length && {
+              BEDROCK_KB_BY_NAMESPACE: JSON.stringify(
+                props.bedrockKnowledgeBaseByNamespace,
+              ),
+            }),
+          GENERATION_BACKEND: props.generationBackend ?? "bedrock",
+          ...(props.portkeyBaseUrl && {
+            PORTKEY_BASE_URL: props.portkeyBaseUrl,
+          }),
+          ...(props.portkeyModelId && {
+            PORTKEY_MODEL_ID: props.portkeyModelId,
+          }),
+          ...(props.portkeySecretArn && {
+            PORTKEY_SECRET_ARN: props.portkeySecretArn,
+          }),
         },
         description: "Context Manager orchestration service",
       });
@@ -696,6 +751,33 @@ export class ServeStack extends SCLStack {
           resources: ["*"],
         }),
       );
+
+      const knowledgeBaseIds = Array.from(
+        new Set(
+          [
+            props.bedrockKnowledgeBaseId,
+            ...Object.values(props.bedrockKnowledgeBaseByNamespace ?? {}),
+          ].filter((id): id is string => Boolean(id)),
+        ),
+      );
+      if (knowledgeBaseIds.length) {
+        runtime.addToRolePolicy(
+          new iam.PolicyStatement({
+            actions: ["bedrock:Retrieve"],
+            resources: knowledgeBaseIds.map(
+              (id) =>
+                `arn:aws:bedrock:${region}:${account}:knowledge-base/${id}`,
+            ),
+          }),
+        );
+      }
+      if (props.portkeySecretArn) {
+        secretsmanager.Secret.fromSecretCompleteArn(
+          this,
+          "PortkeySecret",
+          props.portkeySecretArn,
+        ).grantRead(runtime.role!);
+      }
       if (explicitImageUri) {
         const ecr = parseEcrImageUri(explicitImageUri);
         runtime.addToRolePolicy(
