@@ -14,6 +14,8 @@ import os
 import re
 from enum import StrEnum
 
+from coa_common.model_text import strip_hidden_model_characters
+
 # ---------------------------------------------------------------------------
 # Brand tokens — parameterized via environment variables so different
 # deployments (CI/dev = "scl", greenfield = "coa", customer = custom) get
@@ -362,6 +364,7 @@ def validate_query_text(value: object) -> str:
     """
     if not isinstance(value, str):
         raise ValueError("query must be a string")
+    value = strip_hidden_model_characters(value)
     if len(value) > MAX_QUERY_CODEPOINTS:
         raise ValueError(f"query must be at most {MAX_QUERY_CODEPOINTS} characters")
     query = value.strip()
