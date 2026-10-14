@@ -216,6 +216,27 @@ class TestOIDCTokenAuthorizer:
 
         assert result.groups == ["TeamA", "TeamB"]
 
+    def test_entra_preferred_username_is_email_fallback(self, _make_token, jwks_response):
+        claims = {
+            "sub": "opaque-entra-sub",
+            "preferred_username": "user@contoso.com",
+            "roles": ["data-steward"],
+            "iss": "https://login.microsoftonline.com/tenant-id/v2.0",
+            "exp": int(time.time()) + 3600,
+        }
+        token = _make_token(claims)
+        authorizer = OIDCTokenAuthorizer(
+            issuer="https://login.microsoftonline.com/tenant-id/v2.0",
+            group_claim_name="roles",
+        )
+
+        with patch.object(authorizer, "_get_jwks", return_value=jwks_response):
+            result = authorizer.validate(f"Bearer {token}")
+
+        assert result.email == "user@contoso.com"
+        assert result.principal_id == "user@contoso.com"
+        assert result.groups == ["data-steward"]
+
     def test_groups_as_csv_string(self, _make_token, jwks_response):
         claims = {
             "sub": "u1",

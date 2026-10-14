@@ -213,6 +213,22 @@ class TestEmailExtraction:
         identity = extract_caller_identity(f"Bearer {token}")
         assert identity.email == ""
 
+    def test_entra_preferred_username_is_email_fallback(self):
+        token = jwt.encode(
+            {
+                "sub": "opaque-entra-sub",
+                "preferred_username": "user@contoso.com",
+                "iss": _TEST_ISSUER,
+                "aud": _TEST_AUDIENCE,
+                "exp": int(time.time()) + 3600,
+            },
+            _private_key,
+            algorithm="RS256",
+            headers={"kid": _TEST_KID},
+        )
+        identity = extract_caller_identity(f"Bearer {token}")
+        assert identity.email == "user@contoso.com"
+
     def test_none_email_coalesced_to_empty_string(self):
         """An explicit ``"email": None`` in the JWT (e.g. some IdPs emit this
         for unverified/hidden emails) is coalesced to ``""`` via the ``or ""``

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 import jwt
 import structlog
-from coa_common.auth.token_authorizer import extract_groups_claim
+from coa_common.auth.token_authorizer import extract_email_claim, extract_groups_claim
 
 logger = structlog.get_logger(__name__)
 
@@ -78,4 +78,4 @@ class TokenClaims:
         # implementation across the control-plane authorizer and serve.
         groups = extract_groups_claim(claims, _GROUP_CLAIM_NAME)
 
-        return cls(user_id=sub, email=str(claims.get("email", "")), groups=groups)
+        return cls(user_id=sub, email=extract_email_claim(claims), groups=groups)

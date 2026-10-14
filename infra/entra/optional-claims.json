@@ -1,0 +1,11 @@
+{
+  "idToken": [
+    {
+      "additionalProperties": [],
+      "essential": true,
+      "name": "email"
+    }
+  ],
+  "accessToken": [],
+  "saml2Token": []
+}

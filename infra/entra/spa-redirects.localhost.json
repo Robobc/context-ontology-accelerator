@@ -1,0 +1,7 @@
+{
+  "spa": {
+    "redirectUris": [
+      "http://localhost:5173/authenticate/"
+    ]
+  }
+}
