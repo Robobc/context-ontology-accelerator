@@ -21,6 +21,7 @@ members = [
     "coa-mcp",
     "coa-metrics",
     "coa-ontology",
+    "coa-outer-agent",
     "coa-serve",
     "coa-sources",
     "coa-vkg",
@@ -868,6 +869,33 @@ provides-extras = ["demo"]
 dev = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13.7" },
+]
+
+[[package]]
+name = "coa-outer-agent"
+version = "0.3.5"
+source = { editable = "packages/outer-agent" }
+dependencies = [
+    { name = "bedrock-agentcore" },
+    { name = "boto3" },
+    { name = "coa-common" },
+    { name = "httpx" },
+    { name = "mcp" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bedrock-agentcore", specifier = "==1.18.1" },
+    { name = "boto3", specifier = ">=1.35" },
+    { name = "coa-common", editable = "libs/common" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "mcp", specifier = ">=1.28.1,<2" },
+    { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "pyjwt", specifier = ">=2.13.0" },
+    { name = "structlog", specifier = ">=24.0" },
 ]
 
 [[package]]

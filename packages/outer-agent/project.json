@@ -1,0 +1,15 @@
+{
+  "name": "outer-agent",
+  "namedInputs": { "default": ["python"] },
+  "targets": {
+    "lint": {
+      "command": "uv run ruff check packages/outer-agent && uv run ruff format --check packages/outer-agent && uv run mypy packages/outer-agent/src --ignore-missing-imports --cache-dir packages/outer-agent/.mypy_cache"
+    },
+    "test": {
+      "command": "COVERAGE_FILE=packages/outer-agent/.coverage uv run pytest packages/outer-agent/tests -m unit -v --tb=short --cov=packages/outer-agent/src --cov-report=term-missing --cov-report=xml:packages/outer-agent/coverage.xml --cov-fail-under=85 --junitxml=packages/outer-agent/junit.xml"
+    },
+    "format": {
+      "command": "uv run ruff format packages/outer-agent"
+    }
+  }
+}
