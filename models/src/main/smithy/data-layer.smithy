@@ -15,6 +15,7 @@ service DataLayerService {
     version: "2025-05-01"
     operations: [
         Query
+        PlanSemanticExecution
         TranslateSPARQL
         KBSearch
         GraphTraverse

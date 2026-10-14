@@ -26,7 +26,6 @@ from coa_common.logging import setup_logging
 from pydantic import ValidationError
 
 from .clients.athena import AthenaQueryExecutor
-from .clients.bedrock import BedrockLLMClient
 from .clients.composite_executor import CompositeQueryExecutor
 from .clients.neptune import NeptuneGraphClient
 from .clients.opensearch import OpenSearchVectorClient
@@ -74,7 +73,7 @@ from .tier3.synthesizer import Synthesizer
 if TYPE_CHECKING:
     from .clients.sources_registry import SourcesRegistry
     from .deadline import Deadline
-from .tier3.vector_retriever import VectorRetriever
+
 from .trace import TraceCollector
 
 setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
@@ -171,7 +170,9 @@ async def _ensure_initialized():
         # Build client layer
         neptune_client = NeptuneGraphClient(endpoint=config.neptune_endpoint)
         opensearch_client = OpenSearchVectorClient(endpoint=config.opensearch_endpoint)
-        bedrock_client = BedrockLLMClient(model_id=config.bedrock_model_id, region=config.bedrock_region)
+        from .clients.factory import build_llm_client
+
+        bedrock_client = build_llm_client(config)
         # VKG endpoint used as template: "://vkg." is replaced with "://vkg-{ns}." per request
 
         from .clients.sources_registry import SourcesRegistry
@@ -180,6 +181,8 @@ async def _ensure_initialized():
             table_name=config.data_sources_table,
             namespaces_table=os.environ.get("NAMESPACES_TABLE", ""),
             region=config.bedrock_region,
+            external_document_namespaces=(namespace for namespace, _ in config.bedrock_kb_by_namespace),
+            external_document_default=(config.document_retriever_backend == "bedrock-kb"),
         )
         _sources_registry = sources_registry
         athena_executor = AthenaQueryExecutor(region=config.bedrock_region, sources_registry=sources_registry)
@@ -267,7 +270,9 @@ async def _ensure_initialized():
             query_executor=query_executor,
             sources_registry=sources_registry,
         )
-        vector_retriever = VectorRetriever(vector_client=opensearch_client)
+        from .clients.factory import build_document_retriever
+
+        document_retriever = build_document_retriever(config, opensearch_client)
         graph_traverser = GraphTraverser(graph_client=neptune_client)
 
         # Query-time chunk screening: evaluate retrieved content against retrieval
@@ -307,7 +312,7 @@ async def _ensure_initialized():
         lexical_retriever = build_lexical_retriever(config)
 
         knowledge_retriever = KnowledgeRetriever(
-            vector_retriever=vector_retriever,
+            vector_retriever=document_retriever,
             graph_traverser=graph_traverser,
             synthesizer=synthesizer,
             lexical_retriever=lexical_retriever,
@@ -465,6 +470,60 @@ def _error(status_code: int, message: str, request_id: str) -> dict:
     }
 
 
+async def _handle_semantic_plan(payload: dict, request_id: str) -> dict:
+    """Compile a versioned plan without executing any source or generation target."""
+    from .semantic_plan import build_semantic_execution_plan
+
+    namespace = payload.get("namespace", "")
+    try:
+        query = validate_query_text(payload.get("query"))
+    except ValueError:
+        return _error(400, "invalid query", request_id)
+    if not namespace:
+        return _error(400, "namespace required", request_id)
+    if _sources_registry is None:
+        raise DataSourceUnavailableError("Namespace profile registry unavailable")
+
+    integration_profile = await _sources_registry.get_namespace_integration_profile(namespace)
+    if integration_profile is None:
+        raise DataSourceUnavailableError("Unable to verify namespace integration profile")
+
+    trace = TraceCollector()
+    try:
+        result = await asyncio.wait_for(
+            _nl_to_sparql.translate(query, namespace),
+            timeout=RESOLVE_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        raise QueryTranslationError("Semantic planning timed out") from exc
+    except Exception as exc:
+        logger.error(
+            "semantic_plan_translation_failed",
+            error=type(exc).__name__,
+            request_id=request_id,
+        )
+        raise QueryTranslationError("Semantic planning failed") from exc
+
+    if result.trace_steps:
+        trace.add_dicts(result.trace_steps)
+    if not result.sparql:
+        raise QueryTranslationError("Could not generate a semantic source directive")
+
+    plan = build_semantic_execution_plan(
+        question=query,
+        namespace_id=namespace,
+        integration_profile=integration_profile,
+        sparql=result.sparql,
+        confidence=result.confidence,
+    )
+    return {
+        "plan": plan,
+        "trace": trace.steps_serializable,
+        "requestId": request_id,
+        "statusCode": 200,
+    }
+
+
 async def _handle_translate(payload: dict, request_id: str) -> dict:
     """NL-to-SPARQL translation only (no VKG execution)."""
     namespace = payload.get("namespace", "")
@@ -520,27 +579,37 @@ async def _handle_kb_search(payload: dict, request_id: str) -> dict:
         return _error(400, "namespace required", request_id)
 
     top_k = min(options.get("topK", 10), 100)
-    vector_retriever = _orchestrator._knowledge_retriever._vector
+    document_retriever = _orchestrator._knowledge_retriever.document_retriever
     bedrock_client = _orchestrator._bedrock_client
 
-    if not vector_retriever or not bedrock_client:
-        raise DataSourceUnavailableError("Vector search not configured")
+    if not document_retriever:
+        raise DataSourceUnavailableError("Document retrieval not configured")
 
     trace = TraceCollector()
+    embedding = None
+    requires_embedding = document_retriever.requires_query_embedding(namespace)
 
-    try:
-        t0 = time.perf_counter()
-        embedding = await bedrock_client.embed(query)
-        embed_ms = int((time.perf_counter() - t0) * 1000)
-        trace.record(StepId.QUERY_EMBED, "success", embed_ms, tool_used="bedrock")
-    except Exception as e:
-        logger.error("kb_search_embed_error", error=str(e), request_id=request_id)
-        raise DataSourceUnavailableError("Embedding generation failed") from e
+    if requires_embedding:
+        if not bedrock_client:
+            raise DataSourceUnavailableError("Embedding generation not configured")
+        try:
+            t0 = time.perf_counter()
+            embedding = await bedrock_client.embed(query)
+            embed_ms = int((time.perf_counter() - t0) * 1000)
+            trace.record(StepId.QUERY_EMBED, "success", embed_ms, tool_used="bedrock")
+        except Exception as e:
+            logger.error("kb_search_embed_error", error=str(e), request_id=request_id)
+            raise DataSourceUnavailableError("Embedding generation failed") from e
 
     try:
         t0 = time.perf_counter()
         chunks = await asyncio.wait_for(
-            vector_retriever.search(embedding, namespace, top_k=top_k),
+            document_retriever.retrieve(
+                query,
+                namespace,
+                query_embedding=embedding,
+                top_k=top_k,
+            ),
             timeout=RESOLVE_TIMEOUT_S,
         )
         search_ms = int((time.perf_counter() - t0) * 1000)
@@ -549,7 +618,7 @@ async def _handle_kb_search(payload: dict, request_id: str) -> dict:
             "success",
             search_ms,
             detail=f"{len(chunks)} chunks",
-            tool_used="opensearch",
+            tool_used=document_retriever.backend_name(namespace),
         )
     except TimeoutError as e:
         raise DataSourceUnavailableError("Vector search timed out") from e
@@ -559,7 +628,7 @@ async def _handle_kb_search(payload: dict, request_id: str) -> dict:
         logger.error("kb_search_error", error=str(e), request_id=request_id)
         raise DataSourceUnavailableError("Vector search failed") from e
 
-    return {
+    response = {
         "chunks": [
             {
                 "chunkId": c.chunk_id,
@@ -571,10 +640,12 @@ async def _handle_kb_search(payload: dict, request_id: str) -> dict:
             for c in chunks
         ],
         "trace": trace.steps_serializable,
-        "queryEmbeddingModel": bedrock_client._embed_model_id,
         "requestId": request_id,
         "statusCode": 200,
     }
+    if requires_embedding:
+        response["queryEmbeddingModel"] = bedrock_client._embed_model_id
+    return response
 
 
 async def _handle_graph_traverse(payload: dict, request_id: str) -> dict:
@@ -1074,7 +1145,7 @@ async def invoke(payload: dict, context=None):
     # backend call. The full query path validates again through InvokeRequest;
     # this early gate protects isolated actions and prevents oversized input from
     # reaching synchronous Unicode segmentation.
-    if action in (None, "translate", "kbSearch"):
+    if action in (None, "semanticPlan", "translate", "kbSearch"):
         try:
             payload["query"] = validate_query_text(payload.get("query"))
         except ValueError:
@@ -1149,6 +1220,9 @@ async def invoke(payload: dict, context=None):
             return
 
     try:
+        if action == "semanticPlan":
+            yield await _handle_semantic_plan(payload, request_id)
+            return
         if action == "translate":
             yield await _handle_translate(payload, request_id)
             return
