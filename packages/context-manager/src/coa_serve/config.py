@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +128,16 @@ class ServiceConfig:
     # the majority of real edges). "strict" restores the allowlist (ontology edges
     # only), guarded so it never strips the request down to nothing.
     deep_reasoning_ontology_edge_mode: Literal["soft_prior", "strict"] = "soft_prior"
+    # Passage retrieval is independent of the ontology vector index. A
+    # deployment may default to OpenSearch and route selected namespaces to an
+    # existing Bedrock Knowledge Base.
+    document_retriever_backend: Literal["opensearch", "bedrock-kb"] = "opensearch"
+    bedrock_kb_id: str = ""
+    bedrock_kb_by_namespace: tuple[tuple[str, str], ...] = ()
+    generation_backend: Literal["bedrock", "portkey"] = "bedrock"
+    portkey_base_url: str = "https://api.portkey.ai/v1"
+    portkey_model_id: str = ""
+    portkey_secret_arn: str = ""
 
 
 class ConfigurationError(Exception):
@@ -295,6 +307,48 @@ def load_config() -> ServiceConfig:
         )
         deep_reasoning_ontology_edge_mode = "soft_prior"
 
+    document_retriever_backend = os.environ.get("DOCUMENT_RETRIEVER_BACKEND", "opensearch")
+    if document_retriever_backend not in ("opensearch", "bedrock-kb"):
+        raise ConfigurationError("DOCUMENT_RETRIEVER_BACKEND must be 'opensearch' or 'bedrock-kb'")
+    bedrock_kb_id = os.environ.get("BEDROCK_KNOWLEDGE_BASE_ID", "").strip()
+    if bedrock_kb_id and not re.fullmatch(r"[A-Z0-9]{10}", bedrock_kb_id):
+        raise ConfigurationError("BEDROCK_KNOWLEDGE_BASE_ID is invalid")
+
+    raw_kb_map = os.environ.get("BEDROCK_KB_BY_NAMESPACE", "").strip()
+    kb_map: dict[str, str] = {}
+    if raw_kb_map:
+        try:
+            parsed_kb_map = json.loads(raw_kb_map)
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError("BEDROCK_KB_BY_NAMESPACE must be a JSON object") from exc
+        if not isinstance(parsed_kb_map, dict):
+            raise ConfigurationError("BEDROCK_KB_BY_NAMESPACE must be a JSON object")
+        for namespace, kb_id in parsed_kb_map.items():
+            if not isinstance(namespace, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", namespace):
+                raise ConfigurationError("BEDROCK_KB_BY_NAMESPACE contains an invalid namespace")
+            if not isinstance(kb_id, str) or not re.fullmatch(r"[A-Z0-9]{10}", kb_id):
+                raise ConfigurationError(f"BEDROCK_KB_BY_NAMESPACE contains an invalid KB id for {namespace}")
+            kb_map[namespace] = kb_id
+    if document_retriever_backend == "bedrock-kb" and not bedrock_kb_id:
+        raise ConfigurationError("BEDROCK_KNOWLEDGE_BASE_ID is required when DOCUMENT_RETRIEVER_BACKEND=bedrock-kb")
+
+    generation_backend = os.environ.get("GENERATION_BACKEND", "bedrock")
+    if generation_backend not in ("bedrock", "portkey"):
+        raise ConfigurationError("GENERATION_BACKEND must be 'bedrock' or 'portkey'")
+    portkey_base_url = os.environ.get(
+        "PORTKEY_BASE_URL",
+        "https://api.portkey.ai/v1",
+    ).rstrip("/")
+    portkey_model_id = os.environ.get("PORTKEY_MODEL_ID", "").strip()
+    portkey_secret_arn = os.environ.get("PORTKEY_SECRET_ARN", "").strip()
+    if generation_backend == "portkey":
+        if not portkey_model_id:
+            raise ConfigurationError("PORTKEY_MODEL_ID is required when GENERATION_BACKEND=portkey")
+        if not portkey_secret_arn and not os.environ.get("PORTKEY_API_KEY"):
+            raise ConfigurationError(
+                "PORTKEY_SECRET_ARN or PORTKEY_API_KEY is required when GENERATION_BACKEND=portkey"
+            )
+
     # Default topic_beam: the strongest single-shot strategy on the SEC-10-Q
     # benchmark (45.13% strict vs 34.36% hand-rolled, 195 questions).
     #
@@ -339,6 +393,13 @@ def load_config() -> ServiceConfig:
         deep_reasoning_ontology_source=deep_reasoning_ontology_source,
         deep_reasoning_ontology_file=deep_reasoning_ontology_file,
         deep_reasoning_ontology_edge_mode=deep_reasoning_ontology_edge_mode,
+        document_retriever_backend=document_retriever_backend,
+        bedrock_kb_id=bedrock_kb_id,
+        bedrock_kb_by_namespace=tuple(sorted(kb_map.items())),
+        generation_backend=generation_backend,
+        portkey_base_url=portkey_base_url,
+        portkey_model_id=portkey_model_id,
+        portkey_secret_arn=portkey_secret_arn,
     )
 
 

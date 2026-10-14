@@ -576,3 +576,113 @@ class TestValidLexicalRetrieverStrategiesFallback:
 
         # Default value still loads cleanly.
         assert config.lexical_retriever_strategy == "chunk_based_semantic"
+
+    @patch("coa_serve.config.boto3")
+    def test_loads_namespace_knowledge_base_routes(self, mock_boto3):
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "gr-test"}}
+        mock_boto3.client.return_value = mock_ssm
+
+        with patch.dict(
+            "os.environ",
+            {
+                "DOCUMENT_RETRIEVER_BACKEND": "opensearch",
+                "BEDROCK_KB_BY_NAMESPACE": (
+                    '{"managed-namespace":"ABCDEFGHIJ","other":"KLMNOPQRST"}'
+                ),
+            },
+        ):
+            config = load_config()
+
+        assert config.document_retriever_backend == "opensearch"
+        assert config.bedrock_kb_by_namespace == (
+            ("managed-namespace", "ABCDEFGHIJ"),
+            ("other", "KLMNOPQRST"),
+        )
+
+    @patch("coa_serve.config.boto3")
+    def test_bedrock_kb_default_requires_id(self, mock_boto3):
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "gr-test"}}
+        mock_boto3.client.return_value = mock_ssm
+
+        from coa_serve.config import ConfigurationError
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "DOCUMENT_RETRIEVER_BACKEND": "bedrock-kb",
+                    "BEDROCK_KNOWLEDGE_BASE_ID": "",
+                },
+            ),
+            pytest.raises(ConfigurationError, match="BEDROCK_KNOWLEDGE_BASE_ID"),
+        ):
+            load_config()
+
+    @patch("coa_serve.config.boto3")
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "[]",
+            "{bad json",
+            '{"../../escape":"ABCDEFGHIJ"}',
+            '{"managed-docs":"not-an-id"}',
+        ],
+    )
+    def test_rejects_invalid_knowledge_base_route_map(self, mock_boto3, raw):
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "gr-test"}}
+        mock_boto3.client.return_value = mock_ssm
+
+        from coa_serve.config import ConfigurationError
+
+        with (
+            patch.dict("os.environ", {"BEDROCK_KB_BY_NAMESPACE": raw}),
+            pytest.raises(ConfigurationError, match="BEDROCK_KB_BY_NAMESPACE"),
+        ):
+            load_config()
+
+    @patch("coa_serve.config.boto3")
+    def test_loads_portkey_generation_config(self, mock_boto3):
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "gr-test"}}
+        mock_boto3.client.return_value = mock_ssm
+
+        with patch.dict(
+            "os.environ",
+            {
+                "GENERATION_BACKEND": "portkey",
+                "PORTKEY_MODEL_ID": "@bedrock/claude",
+                "PORTKEY_SECRET_ARN": (
+                    "arn:aws:secretsmanager:us-east-1:123456789012:"
+                    "secret:portkey-abc123"
+                ),
+            },
+        ):
+            config = load_config()
+
+        assert config.generation_backend == "portkey"
+        assert config.portkey_model_id == "@bedrock/claude"
+
+    @patch("coa_serve.config.boto3")
+    def test_portkey_generation_requires_model_and_credentials(self, mock_boto3):
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "gr-test"}}
+        mock_boto3.client.return_value = mock_ssm
+
+        from coa_serve.config import ConfigurationError
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "GENERATION_BACKEND": "portkey",
+                    "PORTKEY_MODEL_ID": "",
+                    "PORTKEY_SECRET_ARN": "",
+                    "PORTKEY_API_KEY": "",
+                },
+            ),
+            pytest.raises(ConfigurationError, match="PORTKEY_MODEL_ID"),
+        ):
+            load_config()

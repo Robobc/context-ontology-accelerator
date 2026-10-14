@@ -517,7 +517,7 @@ class TestKnowledgeRetrieverContextPassthrough:
 class TestTier3ToolUsed:
     """the retriever's progressive trace records carry stable
     toolUsed ids (vector_search=opensearch, graph_traverse=neptune,
-    llm_synthesize=bedrock)."""
+    llm_synthesize=generation provider)."""
 
     async def test_record_sites_carry_tool_used(self, mock_neptune, mock_bedrock):
         os_client = AsyncMock()
@@ -538,3 +538,23 @@ class TestTier3ToolUsed:
         assert by_step["t3.vector_search"].tool_used == "opensearch"
         assert by_step["t3.graph_traverse"].tool_used == "neptune"
         assert by_step["t3.synthesize"].tool_used == "bedrock"
+
+    async def test_synthesis_trace_uses_gateway_provider(self, mock_neptune, mock_bedrock):
+        mock_bedrock.provider_name = "portkey"
+        os_client = AsyncMock()
+        os_client.search.return_value = []
+        retriever = KnowledgeRetriever(
+            VectorRetriever(os_client),
+            GraphTraverser(
+                graph_client=mock_neptune,
+                graph_uri_template="https://ontology-workbench.local/{namespace}",
+            ),
+            Synthesizer(bedrock_client=mock_bedrock, guardrail_id=""),
+        )
+        from coa_serve.trace import TraceCollector
+
+        trace = TraceCollector()
+        await retriever.resolve("test", "ns", embedding=[0.1] * 10, trace=trace)
+
+        synth_step = next(step for step in trace.steps if step.step == "t3.synthesize")
+        assert synth_step.tool_used == "portkey"

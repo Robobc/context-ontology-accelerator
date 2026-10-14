@@ -227,6 +227,12 @@ class Synthesizer:
         """
         return bool(self._effective_guardrail_id())
 
+    @property
+    def provider_name(self) -> str:
+        """Return the generation provider used for synthesis traces."""
+        provider = getattr(self._bedrock, "provider_name", None)
+        return provider if isinstance(provider, str) and provider else "bedrock"
+
     async def synthesize(
         self,
         query: str,

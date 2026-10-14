@@ -47,6 +47,7 @@ from coa_common.bedrock_metrics import CostTracker
 from coa_common.config import resolve_region
 from coa_common.constants import DEFAULT_EMBED_DIMENSIONS, DEFAULT_EMBED_MODEL_ID
 from coa_common.metrics import emit_metric
+from coa_common.model_text import strip_hidden_model_characters
 
 logger = structlog.get_logger(__name__)
 
@@ -149,6 +150,7 @@ def _prep(text: str) -> str:
     # single-space sentinel for empty/whitespace-only input — Cohere 400s on
     # empty/whitespace, and whitespace is truthy so `text or " "` would NOT
     # catch it. HLD §3.3.
+    text = strip_hidden_model_characters(text)
     if len(text) > _MAX_INPUT_CHARS:
         # The tail is silently absent from the vector (a wide table's last columns
         # stop being searchable), so make the cut visible and countable.

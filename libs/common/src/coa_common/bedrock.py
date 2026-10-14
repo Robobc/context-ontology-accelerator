@@ -21,6 +21,11 @@ from coa_common.guardrail_metrics import (
     emit_guardrail_decision,
     filter_type_from_assessments,
 )
+from coa_common.model_text import (
+    delimit_model_input,
+    secure_system_prompt,
+    validate_model_output_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +203,8 @@ class BedrockClient:
 
     def invoke(self, system_prompt: str, user_prompt: str, max_tokens: int = 4096) -> BedrockInvocationResult:
         """Call Bedrock via Converse API, parse JSON response, and return result with token usage + latency."""
+        system_prompt = secure_system_prompt(system_prompt)
+        user_prompt = delimit_model_input(user_prompt)
         input_chars = len(system_prompt) + len(user_prompt)
         if input_chars > self._max_input_chars:
             logger.warning("Bedrock input too large: %d chars (limit %d)", input_chars, self._max_input_chars)
@@ -316,7 +323,7 @@ class BedrockClient:
             # returns a reasoningContent block (no "text" key) ahead of the
             # answer, so content[0]["text"] would KeyError. extract_text_blocks
             # raises ValueError if there is no text block at all.
-            content = extract_text_blocks(content_blocks)
+            content = validate_model_output_text(extract_text_blocks(content_blocks))
             if not content.strip():
                 logger.error("Bedrock returned empty content")
                 raise ValueError("Bedrock returned empty response")

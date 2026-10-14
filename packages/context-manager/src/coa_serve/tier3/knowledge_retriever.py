@@ -16,6 +16,7 @@ After retrieval, assembles all context and makes one LLM Converse call.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import time
 from collections.abc import Awaitable, Callable, Coroutine
@@ -27,12 +28,12 @@ import structlog
 if TYPE_CHECKING:
     from ..lexical.baseline_retriever import BaselineLexicalRetriever
     from ..lexical.strategies import RetrieverStrategy
+    from .document_retriever import DocumentRetriever
 
 from ..step_ids import StepId
 from ..trace import TraceCollector, client_error_detail
 from .graph_traverser import GraphTraverser
 from .synthesizer import MAX_PROMPT_CHUNKS, SynthesisResult, Synthesizer
-from .vector_retriever import VectorRetriever
 
 logger = structlog.get_logger(__name__)
 
@@ -86,7 +87,7 @@ class KnowledgeRetriever:
 
     def __init__(
         self,
-        vector_retriever: VectorRetriever | None,
+        vector_retriever: DocumentRetriever | None,
         graph_traverser: GraphTraverser | None,
         synthesizer: Synthesizer,
         lexical_retriever: BaselineLexicalRetriever | None = None,
@@ -94,20 +95,31 @@ class KnowledgeRetriever:
         """Wire the retrieval sources and synthesizer for Tier 3.
 
         Args:
-            vector_retriever: Optional k-NN chunk retriever.
+            vector_retriever: Optional document retriever. The parameter name is
+                retained for source compatibility; implementations may be
+                OpenSearch vector retrieval or a managed Knowledge Base.
             graph_traverser: Optional Neptune graph traverser.
             synthesizer: LLM synthesizer that composes the final answer.
             lexical_retriever: Optional graphrag lexical baseline retriever.
         """
+        self._documents = vector_retriever
+        # Compatibility for callers/tests that reached into the old private
+        # attribute. New code uses ``document_retriever``.
         self._vector = vector_retriever
         self._graph = graph_traverser
         self._synthesizer = synthesizer
         self._lexical = lexical_retriever
 
     @property
-    def vector_retriever(self) -> VectorRetriever | None:
-        """Public access to vector retriever for T-Box context assembly."""
-        return self._vector
+    def vector_retriever(self) -> DocumentRetriever | None:
+        """Compatibility alias for the passage retriever."""
+        return self.document_retriever
+
+    @property
+    def document_retriever(self) -> DocumentRetriever | None:
+        """Public access to the configured passage retriever."""
+        documents = getattr(self, "_documents", None)
+        return documents if documents is not None else self._vector
 
     @property
     def lexical_enabled(self) -> bool:
@@ -167,7 +179,12 @@ class KnowledgeRetriever:
         # absent a request value with no deployment default), fall through to the
         # parallel vector + graph retrieval below. The retriever is built on every
         # deployment, so the strategy — not its mere presence — is the trigger.
-        if self._lexical is not None and retriever_strategy is not None:
+        document_backend = self._document_backend(namespace)
+        # A managed KB replaces the OpenSearch passage leg, so the graphrag
+        # lexical strategy must not silently bypass that namespace route.
+        # ``none`` remains eligible: the lexical retriever owns its own stores
+        # and was valid before the document-retriever protocol was introduced.
+        if self._lexical is not None and retriever_strategy is not None and document_backend != "bedrock-kb":
             return await self._resolve_via_lexical(
                 query,
                 namespace,
@@ -191,9 +208,17 @@ class KnowledgeRetriever:
                 graph_coro = self._graph.traverse(query, namespace)
             coros.append(("graph_traverse", graph_coro))
 
-        # Vector search requires an embedding and a vector retriever; skip if unavailable
-        if embedding is not None and self._vector is not None:
-            coros.append(("vector_search", self._vector.search(embedding, namespace)))
+        # Managed KBs are text-first; OpenSearch still needs the shared query
+        # embedding. The protocol reports which behavior applies per namespace.
+        documents = self.document_retriever
+        requires_embedding = self._requires_query_embedding(namespace)
+        if documents is not None and (embedding is not None or not requires_embedding):
+            coros.append(
+                (
+                    "vector_search",
+                    documents.retrieve(query, namespace, query_embedding=embedding),
+                )
+            )
 
         # Execute all retrieval in parallel with partial failure tolerance and per-source timeouts
         results: dict[str, tuple[Any, int]] = {}
@@ -222,11 +247,11 @@ class KnowledgeRetriever:
                 vec_trace["status"],
                 vec_trace.get("durationMs", 0),
                 detail=vec_trace.get("detail"),
-                tool_used="opensearch",
+                tool_used=document_backend,
                 parallel_group=StepId.T3_RETRIEVE,
             )
         else:
-            detail = "no_embedding" if self._vector is not None else "no_vector_retriever"
+            detail = "no_embedding" if documents is not None else "no_document_retriever"
             trace_steps.append(
                 {
                     "step": StepId.T3_VECTOR_SEARCH,
@@ -284,6 +309,7 @@ class KnowledgeRetriever:
             "t3_retrieve_done",
             wall_ms=gather_wall_ms,
             vector_status=("success" if "vector_search" in results else "skipped"),
+            document_backend=document_backend,
             graph_status=("success" if "graph_traverse" in results else "skipped"),
         )
 
@@ -330,7 +356,12 @@ class KnowledgeRetriever:
                     "durationMs": synthesis.duration_ms,
                 }
             )
-            trace.record(StepId.T3_SYNTHESIZE, "success", synthesis.duration_ms, tool_used="bedrock")
+            trace.record(
+                StepId.T3_SYNTHESIZE,
+                "success",
+                synthesis.duration_ms,
+                tool_used=self._synthesis_backend(),
+            )
             self._record_guardrail_step(synthesis, trace_steps, trace)
         except Exception as exc:
             logger.error("synthesis_failure", error_type=type(exc).__name__, exc_info=True)
@@ -342,7 +373,13 @@ class KnowledgeRetriever:
                     "detail": error_detail,
                 }
             )
-            trace.record(StepId.T3_SYNTHESIZE, "error", 0, detail=error_detail, tool_used="bedrock")
+            trace.record(
+                StepId.T3_SYNTHESIZE,
+                "error",
+                0,
+                detail=error_detail,
+                tool_used=self._synthesis_backend(),
+            )
             raise
 
         grounded_chunks = vec_chunks[:MAX_PROMPT_CHUNKS]
@@ -374,6 +411,33 @@ class KnowledgeRetriever:
             trace_steps=tuple(trace_steps),
             degraded_sources=tuple(degraded_sources),
         )
+
+    def _document_backend(self, namespace: str) -> str:
+        retriever = self.document_retriever
+        if retriever is None:
+            return "none"
+        backend_name = getattr(retriever, "backend_name", None)
+        resolved = (
+            backend_name(namespace)
+            if callable(backend_name) and not inspect.iscoroutinefunction(backend_name)
+            else None
+        )
+        # Protocol-compatible retrievers return a string. Fall back for legacy
+        # implementations and generic test doubles rather than leaking an
+        # awaitable or arbitrary object into the typed trace contract.
+        return resolved if isinstance(resolved, str) else "opensearch"
+
+    def _synthesis_backend(self) -> str:
+        provider = getattr(self._synthesizer, "provider_name", None)
+        return provider if isinstance(provider, str) and provider else "bedrock"
+
+    def _requires_query_embedding(self, namespace: str) -> bool:
+        retriever = self.document_retriever
+        if retriever is None:
+            return False
+        requires = getattr(retriever, "requires_query_embedding", None)
+        resolved = requires(namespace) if callable(requires) and not inspect.iscoroutinefunction(requires) else None
+        return resolved if isinstance(resolved, bool) else True
 
     async def _resolve_via_lexical(
         self,
@@ -463,7 +527,12 @@ class KnowledgeRetriever:
                     "durationMs": synthesis.duration_ms,
                 }
             )
-            trace.record(StepId.T3_SYNTHESIZE, "success", synthesis.duration_ms, tool_used="bedrock")
+            trace.record(
+                StepId.T3_SYNTHESIZE,
+                "success",
+                synthesis.duration_ms,
+                tool_used=self._synthesis_backend(),
+            )
             self._record_guardrail_step(synthesis, trace_steps, trace)
         except Exception as exc:
             logger.error("synthesis_failure", error_type=type(exc).__name__, exc_info=True)
@@ -475,7 +544,13 @@ class KnowledgeRetriever:
                     "detail": error_detail,
                 }
             )
-            trace.record(StepId.T3_SYNTHESIZE, "error", 0, detail=error_detail, tool_used="bedrock")
+            trace.record(
+                StepId.T3_SYNTHESIZE,
+                "error",
+                0,
+                detail=error_detail,
+                tool_used=self._synthesis_backend(),
+            )
             raise
 
         grounded_chunks = vec_chunks[:MAX_PROMPT_CHUNKS]
