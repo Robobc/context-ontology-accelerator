@@ -66,7 +66,8 @@ class TestBedrockLLMClient:
 
         call_kwargs = mock_client.converse.call_args[1]
         assert "system" in call_kwargs
-        assert call_kwargs["system"][0]["text"] == "You are a SPARQL expert"
+        assert call_kwargs["system"][0]["text"].endswith("You are a SPARQL expert")
+        assert "COA_SYSTEM_BOUNDARY_7C2A91F4" in call_kwargs["system"][0]["text"]
 
     async def test_embed_returns_vector(self):
         from coa_serve.clients.bedrock import BedrockLLMClient
@@ -148,8 +149,9 @@ class TestBedrockLLMClient:
         messages = call_kwargs["messages"]
         content_blocks = messages[0]["content"]
         assert len(content_blocks) == 2
-        assert content_blocks[0] == {"text": "context here"}
-        assert content_blocks[1] == {"guardContent": {"text": {"text": "Question: hello"}}}
+        assert "<user_input>context here</user_input>" in content_blocks[0]["text"]
+        guarded = content_blocks[1]["guardContent"]["text"]["text"]
+        assert "<user_input>Question: hello</user_input>" in guarded
 
     async def test_converse_guard_content_sent_without_guardrail(self):
         """The guarded text must still reach the model, as PLAIN text.
@@ -173,10 +175,9 @@ class TestBedrockLLMClient:
 
         call_kwargs = mock_client.converse.call_args[1]
         content_blocks = call_kwargs["messages"][0]["content"]
-        assert content_blocks == [
-            {"text": "context here"},
-            {"text": "Question: hello"},
-        ]
+        assert len(content_blocks) == 2
+        assert "<user_input>context here</user_input>" in content_blocks[0]["text"]
+        assert "<user_input>Question: hello</user_input>" in content_blocks[1]["text"]
         # And without a guardrail_id, no guardrailConfig on the request.
         assert "guardrailConfig" not in call_kwargs
 
@@ -499,7 +500,8 @@ class TestBedrockConverseStream:
 
         call_kwargs = mock_client.converse_stream.call_args[1]
         content_blocks = call_kwargs["messages"][0]["content"]
-        assert content_blocks[1] == {"guardContent": {"text": {"text": "Question: hi"}}}
+        guarded = content_blocks[1]["guardContent"]["text"]["text"]
+        assert "<user_input>Question: hi</user_input>" in guarded
         assert call_kwargs["guardrailConfig"]["streamProcessingMode"] == "sync"
 
     async def test_stream_untags_guard_content_without_a_guardrail(self):
@@ -526,7 +528,10 @@ class TestBedrockConverseStream:
             pass
 
         call_kwargs = mock_client.converse_stream.call_args[1]
-        assert call_kwargs["messages"][0]["content"] == [{"text": "ctx"}, {"text": "Question: hi"}]
+        content_blocks = call_kwargs["messages"][0]["content"]
+        assert len(content_blocks) == 2
+        assert "<user_input>ctx</user_input>" in content_blocks[0]["text"]
+        assert "<user_input>Question: hi</user_input>" in content_blocks[1]["text"]
         assert "guardrailConfig" not in call_kwargs
 
     async def test_converse_model_id_override(self):

@@ -39,6 +39,11 @@ from coa_common.guardrail_metrics import (
     emit_guardrail_decision,
     filter_type_from_assessments,
 )
+from coa_common.model_text import (
+    delimit_model_input,
+    secure_system_prompt,
+    validate_model_output_text,
+)
 
 from .base import (
     STOP_REASON_MAX_TOKENS,
@@ -348,6 +353,11 @@ class BedrockLLMClient:
         """Return the default Converse model id for this client."""
         return self._model_id
 
+    @property
+    def provider_name(self) -> str:
+        """Return the stable trace label for direct model generation."""
+        return "bedrock"
+
     def _get_client(self):
         if self._client is None:
             with self._client_lock:
@@ -487,7 +497,7 @@ class BedrockLLMClient:
         # Join ALL text blocks. The Converse API may split a response across several
         # content blocks; taking only the first silently truncated the generation
         # (and for NL→SQL / NL→SPARQL that means a query cut off mid-statement).
-        text = "".join(text_blocks)
+        text = validate_model_output_text("".join(text_blocks))
 
         # UNKNOWN means we could not classify the intervention, so the text may be
         # real model output that a policy would have blocked. Suppressing the flag
@@ -579,7 +589,7 @@ class BedrockLLMClient:
                         _close_stream_quietly(response["stream"])
                         return
                     if "contentBlockDelta" in event:
-                        text = event["contentBlockDelta"].get("delta", {}).get("text", "")
+                        text = validate_model_output_text(event["contentBlockDelta"].get("delta", {}).get("text", ""))
                         if text:
                             loop.call_soon_threadsafe(queue.put_nowait, text)
                     elif "messageStop" in event:
@@ -804,6 +814,9 @@ class BedrockLLMClient:
             model_id: Per-call model override. When None, uses self._model_id.
         """
         effective_model_id = model_id or self._model_id
+        prompt = delimit_model_input(prompt)
+        system = secure_system_prompt(system)
+        guard_content = delimit_model_input(guard_content) if guard_content is not None else None
         if model_id and model_id != self._model_id:
             logger.info("using_model_override", override=model_id, default=self._model_id)
         # Build message content blocks

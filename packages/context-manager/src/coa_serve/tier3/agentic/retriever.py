@@ -608,6 +608,7 @@ class AgenticRetriever:
         :class:`Tier3Result` (guardrail block Req 8.3-8.4, synthesis failure
         Req 8.6, confidence Req 8.5, supporting content Req 8.2).
         """
+        synthesis_backend = self._synthesis_backend()
         degraded = list(ctx.degraded_sources)
         # Structured rows count as context: a namespace answered purely by NL→SQL /
         # metric tools has no chunks or entities but is NOT a no-context case.
@@ -628,7 +629,7 @@ class AgenticRetriever:
                 "skipped",
                 clock.elapsed_ms(),
                 detail="no source succeeded; no context retrieved",
-                tool_used="bedrock",
+                tool_used=synthesis_backend,
             )
             return self._build_result(
                 synthesized_answer="",
@@ -686,7 +687,7 @@ class AgenticRetriever:
                 "error",
                 clock.elapsed_ms(),
                 detail={"error": "TimeoutError", "fallback": "working_answer" if ctx.working_answer else "empty"},
-                tool_used="bedrock",
+                tool_used=synthesis_backend,
             )
             return self._build_result(
                 synthesized_answer=ctx.working_answer or "",
@@ -711,7 +712,7 @@ class AgenticRetriever:
                 "error",
                 clock.elapsed_ms(),
                 detail={"error": type(exc).__name__, "message": str(exc)[:200]},
-                tool_used="bedrock",
+                tool_used=synthesis_backend,
             )
             return self._build_result(
                 synthesized_answer="",
@@ -731,7 +732,7 @@ class AgenticRetriever:
                 "success",
                 synthesis.duration_ms,
                 detail="guardrail_blocked",
-                tool_used="bedrock",
+                tool_used=synthesis_backend,
             )
             return self._build_result(
                 synthesized_answer="",
@@ -752,7 +753,7 @@ class AgenticRetriever:
                 "error",
                 synthesis.duration_ms,
                 detail="synthesis returned no answer",
-                tool_used="bedrock",
+                tool_used=synthesis_backend,
             )
             return self._build_result(
                 synthesized_answer="",
@@ -765,7 +766,12 @@ class AgenticRetriever:
                 partial=True,
             )
 
-        trace.record("llm_synthesize", "success", synthesis.duration_ms, tool_used="bedrock")
+        trace.record(
+            "llm_synthesize",
+            "success",
+            synthesis.duration_ms,
+            tool_used=synthesis_backend,
+        )
         return self._build_result(
             synthesized_answer=synthesis.answer,
             confidence=min(1.0, max(0.0, synthesis.confidence)),
@@ -776,6 +782,10 @@ class AgenticRetriever:
             degraded=degraded,
             partial=partial,
         )
+
+    def _synthesis_backend(self) -> str:
+        provider = getattr(self._synthesizer, "provider_name", None)
+        return provider if isinstance(provider, str) and provider else "bedrock"
 
     async def _synthesize(
         self,
