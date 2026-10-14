@@ -397,6 +397,35 @@ def _handle_query(namespace: str, event: dict) -> dict:
     )
 
 
+def _handle_semantic_plan(namespace: str, event: dict) -> dict:
+    body = _parse_body(event) or {}
+    try:
+        query = _parse_query(body)
+    except ValueError as exc:
+        return _error_response(400, str(exc))
+
+    result = _invoke_context_manager(
+        {
+            "action": "semanticPlan",
+            "query": query,
+            "namespace": namespace,
+            "profile": _get_caller_profile(event),
+        },
+        _get_bearer_token(event),
+    )
+    status_code = result.get("statusCode", 200)
+    if status_code >= 400:
+        return _error_response(status_code, result.get("message", "Internal error"))
+    return _success_response(
+        200,
+        {
+            "plan": result.get("plan", {}),
+            "trace": result.get("trace", []),
+            "requestId": result.get("requestId"),
+        },
+    )
+
+
 def _handle_translate(namespace: str, event: dict) -> dict:
     body = _parse_body(event) or {}
     try:
@@ -638,6 +667,7 @@ def _client_safe_upstream_error(resp_body: str, status_code: int) -> tuple[str, 
 
 _ROUTE_MAP = {
     ("POST", "/namespaces/{namespaceId}/query"): _handle_query,
+    ("POST", "/namespaces/{namespaceId}/semantic-plan"): _handle_semantic_plan,
     ("POST", "/namespaces/{namespaceId}/translate"): _handle_translate,
     ("POST", "/namespaces/{namespaceId}/kb/search"): _handle_kb_search,
     ("POST", "/namespaces/{namespaceId}/graph/traverse"): _handle_graph_traverse,

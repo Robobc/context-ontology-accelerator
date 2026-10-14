@@ -16,6 +16,8 @@ from typing import Any
 
 import structlog
 from coa_common.dao import DynamoDBDAO
+from coa_common.integration_profiles import IntegrationProfileError
+
 from coa_common.idempotency import idempotent_create
 from coa_common.language_tags import LanguageTagError
 from coa_common.logging import setup_logging
@@ -90,6 +92,8 @@ def _create(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return api_response(400, {"message": f"Invalid language: {exc}"})
     except ConflictError as exc:
         return api_response(409, {"message": str(exc)})
+    except IntegrationProfileError as exc:
+        return api_response(400, {"message": str(exc)})
     except MetadataStoreError as exc:
         logger.exception("datazone_error", error=str(exc))
         return api_response(

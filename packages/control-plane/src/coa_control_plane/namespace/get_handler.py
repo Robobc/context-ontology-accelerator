@@ -9,6 +9,7 @@ import os
 from typing import Any
 
 import structlog
+from coa_common import default_namespace_integration_profile
 from coa_common.constants import datasource_external_id, validate_namespace_id
 from coa_common.dao import DynamoDBDAO
 from coa_common.language_tags import effective_namespace_language
@@ -66,6 +67,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "datasourceExternalId": datasource_external_id(namespace_id),
             "vkgHealth": _vkg_health,
             "vkgHealthReason": _vkg_health_reason,
+            "integrationProfile": item.get("integrationProfile") or default_namespace_integration_profile(),
         }
     }
     response["namespace"] = {k: v for k, v in response["namespace"].items() if v is not None}

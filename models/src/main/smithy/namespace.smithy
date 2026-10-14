@@ -104,6 +104,98 @@ enum VkgHealthStatus {
     UNKNOWN
 }
 
+/// Domain onboarding posture. The profile changes how semantic assets are
+/// onboarded and planned; it never transfers source authorization to COA.
+enum NamespaceProfileMode {
+    /// Induce and review a new ontology for a greenfield domain.
+    ACCELERATE
+
+    /// Import and govern an existing ontology while preserving source systems.
+    ADOPT
+
+    /// Use a team-owned semantic graph through its governed query boundary.
+    FEDERATE
+}
+
+/// A source-native execution boundary that a semantic plan may target.
+enum IntegrationTargetKind {
+    /// An administrator-bound Amazon Bedrock Managed Knowledge Base.
+    MANAGED_KB
+
+    /// A governed read-only query tool over any structured or API-backed source.
+    GOVERNED_QUERY
+
+    /// A team-owned graph reached through a governed read-only query boundary.
+    EXTERNAL_GRAPH
+
+    /// The namespace-scoped graph managed by COA.
+    COA_GRAPH
+}
+
+/// All source directives emitted by COA are read-only. Source systems still
+/// authorize and execute each directive under their own policy.
+enum IntegrationAccessMode {
+    /// Permit only operations that cannot mutate source state.
+    READ_ONLY
+}
+
+/// Logical registry key for a source, generation target, or policy scope.
+@pattern("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+@length(min: 1, max: 128)
+string IntegrationTargetId
+
+/// Version identifier for a namespace profile or approved ontology snapshot.
+@pattern("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+@length(min: 1, max: 64)
+string IntegrationProfileVersion
+
+/// Logical target configuration. Endpoints, role ARNs, tokens and credentials
+/// are deliberately excluded and resolved server-side by the owning adapter.
+structure NamespaceIntegrationTarget {
+    /// Logical target registry key selected by a semantic plan.
+    @required
+    targetId: IntegrationTargetId
+
+    /// Source adapter contract required to execute the target.
+    @required
+    kind: IntegrationTargetKind
+
+    /// Mutation capability permitted through this semantic boundary.
+    @required
+    accessMode: IntegrationAccessMode
+
+    /// Logical reference to a server-side graph/data policy scope.
+    scopeRef: IntegrationTargetId
+}
+
+/// One or more logical source boundaries available to a namespace.
+@length(min: 1, max: 8)
+list NamespaceIntegrationTargetList {
+    member: NamespaceIntegrationTarget
+}
+
+/// Versioned source and generation routing for one namespace.
+structure NamespaceIntegrationProfile {
+    /// Domain onboarding posture.
+    @required
+    mode: NamespaceProfileMode
+
+    /// Version of this routing and integration configuration.
+    @required
+    profileVersion: IntegrationProfileVersion
+
+    /// Immutable published ontology or semantic-snapshot version used to compile plans.
+    @required
+    ontologyVersion: IntegrationProfileVersion
+
+    /// Logical, read-only source targets a plan may select.
+    @required
+    sourceTargets: NamespaceIntegrationTargetList
+
+    /// Logical final-generation target selected after authorized evidence assembly.
+    generationTarget: IntegrationTargetId
+}
+
 // ──────────────────────────────────────────────
 // Structures
 // ──────────────────────────────────────────────
@@ -127,6 +219,9 @@ structure NamespaceSummary {
 
     /// Number of data sources registered in the namespace.
     sourceCount: Integer
+
+    /// Domain onboarding posture used by semantic planning.
+    profileMode: NamespaceProfileMode
 
     /// Creation timestamp (RFC 3339).
     createdAt: String
@@ -200,6 +295,9 @@ structure NamespaceDetail {
     /// HEALTHY. Coarse by design — the precise container-side cause is in the
     /// VKG service /health response and its CloudWatch logs.
     vkgHealthReason: String
+
+    /// Versioned logical routing for semantic planning and source-native execution.
+    integrationProfile: NamespaceIntegrationProfile
 }
 
 list NamespaceSummaryList {
@@ -228,6 +326,10 @@ operation CreateNamespace {
         /// namespace will hold. Defaults to `en` when omitted. Cannot be
         /// changed after creation.
         language: LanguageTag
+
+        /// Optional source-native routing. Omitted namespaces receive the
+        /// backwards-compatible Accelerate/read-only COA profile.
+        integrationProfile: NamespaceIntegrationProfile
 
         /// Optional idempotency token. A retry with the same token and the same
         /// parameters within 24 hours returns the original result instead of creating
@@ -335,6 +437,10 @@ operation UpdateNamespace {
         @pattern("^[^<>\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]*$")
         @length(max: 1024)
         description: String
+
+        /// Full replacement for source-native routing. Logical targets only;
+        /// deployment endpoints and credentials remain server-side.
+        integrationProfile: NamespaceIntegrationProfile
     }
 
     output: UpdateNamespaceOutput

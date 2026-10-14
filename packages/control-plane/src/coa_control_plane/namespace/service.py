@@ -13,7 +13,10 @@ from datetime import UTC, datetime
 import boto3
 import structlog
 from botocore.exceptions import ClientError
-from coa_common import sanitize_principal_key
+from coa_common import (
+    normalize_namespace_integration_profile,
+    sanitize_principal_key,
+)
 from coa_common.authnz_types import PrincipalType, ResourceType
 from coa_common.dao import DynamoDBDAO, QueryParams
 from coa_common.language_tags import DEFAULT_LANGUAGE, canonicalize_language_tag
@@ -85,6 +88,7 @@ class NamespaceService:
         # canonical value is the only one the namespace will ever carry.
         language = DEFAULT_LANGUAGE if request.language is None else canonicalize_language_tag(request.language)
 
+        integration_profile = normalize_namespace_integration_profile(request.integration_profile)
         namespace_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
 
@@ -130,7 +134,15 @@ class NamespaceService:
         workgroup_name = self._create_athena_workgroup(namespace_id)
 
         # Step 3: Write namespace record, roles, mappings, and confirm reservation.
-        self._finalize(namespace_id, request, language, project.project_id, workgroup_name, now)
+        self._finalize(
+            namespace_id,
+            request,
+            language,
+            project.project_id,
+            workgroup_name,
+            integration_profile,
+            now,
+        )
 
         return NamespaceDetail.model_construct(
             namespace_id=namespace_id,
@@ -145,6 +157,7 @@ class NamespaceService:
             created_at=now,
             updated_at=now,
             athena_workgroup_name=workgroup_name,
+            integration_profile=integration_profile,
         )
 
     # ── Helpers ───────────────────────────────────────────────────
@@ -272,6 +285,7 @@ class NamespaceService:
         language: str,
         datazone_project_id: str,
         athena_workgroup_name: str | None,
+        integration_profile: dict[str, object],
         now: str,
     ) -> None:
         """Write namespace record, roles, mappings, and confirm the reservation.
@@ -294,6 +308,7 @@ class NamespaceService:
             "language": language,
             "dataZoneProjectId": datazone_project_id,
             "sourceCount": 0,
+            "integrationProfile": integration_profile,
         }
         if athena_workgroup_name:
             ns_item["athenaWorkgroupName"] = athena_workgroup_name

@@ -116,6 +116,7 @@ class TestNaturalLanguageQueryBoundary:
         "resource",
         [
             "/namespaces/{namespaceId}/query",
+            "/namespaces/{namespaceId}/semantic-plan",
             "/namespaces/{namespaceId}/translate",
             "/namespaces/{namespaceId}/kb/search",
         ],
@@ -496,6 +497,41 @@ class TestKbSearchSuccess:
         assert body["chunks"] == [{"id": "c1"}]
         assert body["queryEmbeddingModel"] == "m1"
         assert captured["payload"]["options"]["topK"] == 3
+
+
+@pytest.mark.unit
+class TestSemanticPlanSuccess:
+    """Semantic plan endpoint returns instructions without source execution."""
+
+    def test_semantic_plan_forwards_plan_only_action(self):
+        captured: dict = {}
+
+        def _fake_invoke(payload: dict, token: str) -> dict:
+            captured["payload"] = payload
+            captured["token"] = token
+            return {
+                "statusCode": 200,
+                "plan": {"planVersion": "1.0", "sourceDirectives": []},
+                "trace": [],
+                "requestId": "req-plan",
+            }
+
+        with patch.object(handler_module, "_invoke_context_manager", side_effect=_fake_invoke):
+            event = _api_event(
+                "POST",
+                "/namespaces/{namespaceId}/semantic-plan",
+                body={"query": "Trace project P-123"},
+                namespace="11111111-1111-4111-8111-111111111111",
+            )
+            result = handler(event, None)
+
+        assert result["statusCode"] == 200
+        assert captured["payload"]["action"] == "semanticPlan"
+        assert captured["payload"]["namespace"] == "11111111-1111-4111-8111-111111111111"
+        assert captured["token"] == "test-token"
+        body = json.loads(result["body"])
+        assert body["plan"]["planVersion"] == "1.0"
+        assert body["requestId"] == "req-plan"
 
 
 @pytest.mark.unit

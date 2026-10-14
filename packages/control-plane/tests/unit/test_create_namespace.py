@@ -703,3 +703,41 @@ class TestNamespaceLanguage:
         mock_get_svc.return_value.create.side_effect = ConflictError("Namespace 'sales' already exists")
         resp = handler(_event({**VALID_BODY, "language": "ja"}), None)
         assert resp["statusCode"] == 409
+
+
+@pytest.mark.unit
+class TestIntegrationProfileCreation:
+    @patch("coa_control_plane.namespace.service.boto3")
+    def test_default_profile_is_persisted_and_returned(self, mock_boto3):
+        mock_boto3.client.return_value = MagicMock(
+            get_parameter=MagicMock(return_value={"Parameter": {"Value": "arn:aws:iam::123:role/access"}})
+        )
+        svc = TestNamespaceService()._make_service()
+        result = svc.create(CreateNamespaceRequestContent(name="sales", owner="alice@co.com"))
+        assert result.integration_profile["ontologyVersion"] == "legacy-unversioned"
+        persisted = next(
+            call.args[0] for call in svc._ns_dao.put.call_args_list if call.args[0].get("SK") == "METADATA"
+        )
+        assert persisted["integrationProfile"]["mode"] == "ACCELERATE"
+
+    def test_invalid_explicit_profile_fails_before_provisioning(self):
+        svc = TestNamespaceService()._make_service()
+        request = CreateNamespaceRequestContent.model_construct(
+            name="sales",
+            owner="alice@co.com",
+            integration_profile={
+                "mode": "FEDERATE",
+                "profileVersion": "v1",
+                "ontologyVersion": "ontology-v1",
+                "sourceTargets": [
+                    {
+                        "targetId": "external-graph",
+                        "kind": "EXTERNAL_GRAPH",
+                        "accessMode": "READ_WRITE",
+                    }
+                ],
+            },
+        )
+        with pytest.raises(ValueError, match="READ_ONLY"):
+            svc.create(request)
+        svc._metadata_store.create_project.assert_not_called()

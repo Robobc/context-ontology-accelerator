@@ -10,6 +10,8 @@ import os
 from typing import Any
 
 import structlog
+from coa_common import default_namespace_integration_profile
+
 from coa_common.constants import validate_namespace_id
 from coa_common.dao import DynamoDBDAO
 from coa_common.language_tags import effective_namespace_language
@@ -111,6 +113,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "createdAt": updated.get("createdAt"),
         "updatedAt": updated.get("updatedAt"),
         "athenaWorkgroupName": updated.get("athenaWorkgroupName"),
+        "integrationProfile": updated.get("integrationProfile") or default_namespace_integration_profile(),
     }
     ns = {k: v for k, v in ns.items() if v is not None}
 
