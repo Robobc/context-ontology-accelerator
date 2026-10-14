@@ -620,6 +620,40 @@ describe("MetricServiceStack", () => {
     });
   });
 
+  test("keeps the AOSS policy name valid with a long deployment prefix", () => {
+    const app = new cdk.App({
+      context: {
+        ...TEST_CONTEXT,
+        resource_prefix: "enterprise-poc",
+        env: "dev",
+      },
+    });
+    const network = new NetworkStack(app, "EnterpriseNetwork", {
+      env: TEST_ENV,
+    });
+    const customerPrefixTemplate = Template.fromStack(
+      new MetricServiceStack(app, "EnterpriseMetricService", {
+        vpc: network.vpc,
+        lambdaSecurityGroup: network.lambdaSecurityGroup,
+        aossSecurityGroup: network.aossSecurityGroup,
+        neptuneEndpoint:
+          "test-neptune.cluster-abc.us-east-1.neptune.amazonaws.com",
+        neptuneClusterArn:
+          "arn:aws:neptune-db:us-east-1:123456789012:cluster-abc123/*",
+        env: TEST_ENV,
+      }),
+    );
+    const policies = customerPrefixTemplate.findResources(
+      "AWS::OpenSearchServerless::AccessPolicy",
+    );
+    const names = Object.values(policies).map(
+      (policy) => policy.Properties.Name as string,
+    );
+
+    expect(names).toContain("enterprise-poc-dev-metric-access");
+    expect(names.every((name) => name.length <= 32)).toBe(true);
+  });
+
   // ── S3 Bucket (OSI import/export) ───────────────────────────────
 
   test("creates OSI S3 bucket with encryption and block public access", () => {

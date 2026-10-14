@@ -143,6 +143,47 @@ import { Paths, fromRoot } from "../paths";
 Paths.controlPlane; // packages/control-plane
 Paths.controlPlaneOpenApiSpec; // models/build/.../ControlPlaneService.openapi.json
 
+
+## Optional source-native outer agent
+
+Set `outerAgent` in the SSM deployment configuration to deploy the optional
+JWT-authenticated AgentCore Runtime. It consumes COA's versioned semantic plan,
+executes administrator-bound native sources, assembles bounded evidence, and
+uses the existing Portkey secret for one final generation.
+
+```json
+{
+  "generationBackend": "portkey",
+  "portkeyModelId": "<approved-model-alias>",
+  "portkeySecretArn": "<secrets-manager-arn>",
+  "outerAgent": {
+    "sourceTargets": {
+      "domain-kb": {
+        "kind": "MANAGED_KB",
+        "knowledgeBaseIds": ["ABCDEFGHIJ"],
+        "maxAgentIterations": 5
+      },
+      "domain-sql": { "kind": "GOVERNED_QUERY" },
+      "domain-graph": { "kind": "EXTERNAL_GRAPH" }
+    },
+    "maxEvidenceItems": 12,
+    "maxEvidenceCharacters": 30000
+  }
+}
+```
+
+`sourceTargets` is a deployment allowlist. Namespace profiles contain only
+logical target IDs. The stack scopes `GetKnowledgeBase`/`Retrieve` to configured
+KB ARNs; `AgenticRetrieveStream` remains `Resource: *` because the action has no
+resource-level IAM support, while the runtime still cannot retrieve from an
+unconfigured KB. Governed query and external graph targets intentionally fail closed
+until their governed OBO/query adapters are supplied.
+
+The outer runtime validates inbound JWTs, forwards only `Authorization`, reads
+one imported Portkey secret, applies Bedrock Guardrails, and emits no source
+credentials or endpoints into model context. Run
+`pnpm --filter coa-infra exec jest --runInBand test/services/outer-agent-stack.test.ts`
+before deployment.
 // Custom one-off path
 fromRoot("packages/my-new-package");
 ```

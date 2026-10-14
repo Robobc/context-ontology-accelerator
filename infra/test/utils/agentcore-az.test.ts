@@ -5,10 +5,42 @@ import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import {
   AGENTCORE_RESTRICTED_AZ_IDS,
+  parseAgentCoreAzNames,
   resolveAgentCoreAzNames,
   resolveEndpointServiceAzNames,
   agentCoreSupportedSubnets,
 } from "../../lib/utils/agentcore-az";
+
+describe("parseAgentCoreAzNames", () => {
+  it("parses the existing deployment's standard AZs", () => {
+    expect(
+      parseAgentCoreAzNames("us-east-1b, us-east-1c", "us-east-1"),
+    ).toEqual(["us-east-1b", "us-east-1c"]);
+  });
+
+  it("returns undefined when no override is configured", () => {
+    expect(parseAgentCoreAzNames(undefined, "us-east-1")).toBeUndefined();
+    expect(parseAgentCoreAzNames("", "us-east-1")).toBeUndefined();
+  });
+
+  it("rejects fewer than two AZs", () => {
+    expect(() => parseAgentCoreAzNames("us-east-1b", "us-east-1")).toThrow(
+      /at least 2 AZs/,
+    );
+  });
+
+  it("rejects duplicates", () => {
+    expect(() =>
+      parseAgentCoreAzNames("us-east-1b,us-east-1b", "us-east-1"),
+    ).toThrow(/must not contain duplicates/);
+  });
+
+  it("rejects another region and local zones", () => {
+    expect(() =>
+      parseAgentCoreAzNames("us-east-1b,us-east-1-bos-1a", "us-east-1"),
+    ).toThrow(/standard AZs in us-east-1/);
+  });
+});
 
 function fakeEc2(pairs: Array<[string, string]>) {
   return {
