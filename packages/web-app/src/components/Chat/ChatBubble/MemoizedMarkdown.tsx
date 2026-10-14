@@ -9,10 +9,9 @@
  * Pattern from Vercel AI SDK cookbook.
  */
 import { memo, useMemo } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import TextContent from "@cloudscape-design/components/text-content";
 import { marked } from "marked";
+import { SafeModelMarkdown } from "./SafeModelMarkdown";
 
 interface MemoizedMarkdownBlockProps {
   content: string;
@@ -22,7 +21,7 @@ const MemoizedMarkdownBlock = memo(
   ({ content }: MemoizedMarkdownBlockProps) => {
     return (
       <TextContent>
-        <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+        <SafeModelMarkdown>{content}</SafeModelMarkdown>
       </TextContent>
     );
   },
