@@ -10,6 +10,14 @@ The system follows a **Scan → Model → Serve** workflow:
 - **Model** — Induce and manage ontologies, define metrics, build a unified semantic graph
 - **Serve** — Query via SPARQL federation (VKG), traverse the knowledge graph, serve context to AI agents via MCP
 
+For brownfield domains, COA can also operate as a governed semantic control
+plane: `semantic_execution_plan` returns a versioned, non-executing plan while
+an optional outer/domain agent invokes administrator-configured native sources
+and performs one evidence-cited generation. Per-namespace Accelerate, Adopt, and
+Federate profiles keep existing knowledge bases, structured platforms, and
+production graphs authoritative. See
+[Semantic control plane and source-native execution](docs/architecture/semantic-control-plane.md).
+
 Access is governed by namespace isolation and role-based access control: namespace-scoped roles (owner, maintainer, data-steward, data-analyst) plus **platform-level roles** (`platform-admin`, `platform-viewer`) that apply across all namespaces. See the [control-plane docs](packages/control-plane/README.md) for the grants and authorization model.
 
 ## Quick Start
@@ -62,6 +70,7 @@ semantic-context/
 │   ├── vkg/                     # Virtual Knowledge Graph (Ontop)
 │   ├── mcp-server/              # MCP tools for AI agents
 │   ├── context-manager/         # Serve layer Context Manager (query orchestration, upstream clients)
+│   ├── outer-agent/             # Optional semantic-plan + source-native execution runtime
 │   └── web-app/                 # React + Cloudscape frontend
 ├── libs/common/         # Shared Python config, logging, exceptions
 ├── libs/ts-shared/      # Shared TypeScript interfaces and constants
