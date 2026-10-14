@@ -13,6 +13,8 @@
 # Allow context-manager package
 !packages/context-manager/Dockerfile
 !packages/context-manager/pyproject.toml
+!packages/outer-agent/
+!packages/outer-agent/**
 !packages/context-manager/src/
 
 # Allow MCP server package (same image, different entrypoint)
