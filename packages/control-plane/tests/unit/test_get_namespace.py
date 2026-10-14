@@ -241,6 +241,21 @@ class TestGetNamespace:
         # Field should be filtered out (not None) when not stored on the record
         assert "athenaWorkgroupName" not in body["namespace"]
 
+    def test_legacy_namespace_gets_explicit_unversioned_profile(self):
+        with patch(f"{MODULE}._get_ns_dao") as mock:
+            dao = MagicMock()
+            mock.return_value = dao
+            dao.get.return_value = _NS_ITEM
+            from coa_control_plane.namespace.get_handler import handler
+
+            result = handler(
+                {"pathParameters": {"namespaceId": "ns-123"}},
+                None,
+            )
+        profile = json.loads(result["body"])["namespace"]["integrationProfile"]
+        assert profile["mode"] == "ACCELERATE"
+        assert profile["ontologyVersion"] == "legacy-unversioned"
+
 
 @pytest.mark.unit
 class TestNamespaceLanguage:

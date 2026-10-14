@@ -16,13 +16,20 @@ import os
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 import boto3
 import structlog
-from coa_common import resolve_namespace_id, resolve_region, sync_boto_config
+from coa_common import (
+    normalize_namespace_integration_profile,
+    resolve_namespace_id,
+    resolve_region,
+    sync_boto_config,
+)
+from coa_common.integration_profiles import IntegrationProfileError
 from coa_common.language_tags import LanguageTagError, canonicalize_language_tag, effective_namespace_language
 
 from ..query_utils import validate_namespace
@@ -108,25 +115,34 @@ class SourcesRegistry:
         namespaces_table: str | None = None,
         region: str | None = None,
         executor: ThreadPoolExecutor | None = None,
+        external_document_namespaces: Collection[str] | None = None,
+        external_document_default: bool = False,
     ):
-        """Configure the DynamoDB tables, region, and executor for cached reads.
+        """Configure DynamoDB access and externally managed document sources.
 
         Args:
             table_name: Sources table name. Defaults to the ``DATA_SOURCES_TABLE`` env var.
             namespaces_table: Namespaces table name. Defaults to ``NAMESPACES_TABLE``.
             region: AWS region. Defaults to the resolved region.
             executor: Thread pool for running blocking boto3 calls off the event loop.
+            external_document_namespaces: Namespace IDs routed to an external
+                document retriever such as a managed Bedrock Knowledge Base.
+            external_document_default: Whether every namespace uses an external
+                document retriever by default.
         """
         self._table_name = table_name or os.environ.get("DATA_SOURCES_TABLE", "")
         self._namespaces_table = namespaces_table or os.environ.get("NAMESPACES_TABLE", "")
         self._region = region or resolve_region()
         self._executor = executor
+        self._external_document_namespaces = frozenset(external_document_namespaces or ())
+        self._external_document_default = external_document_default
         if self._table_name or self._namespaces_table:
             self._dynamodb = boto3.resource("dynamodb", region_name=self._region, config=sync_boto_config())
         else:
             self._dynamodb = None
         self._db_cache: dict[str, tuple[str, float]] = {}
         self._ns_cache: dict[str, tuple[str, float]] = {}
+        self._profile_cache: dict[str, tuple[dict[str, Any], float]] = {}
         # Single source-of-truth cache for the raw SRC# records of a namespace,
         # keyed by namespace. All derived signals (sole DATABASE source, source
         # composition) read from here, so one request no longer fires the same
@@ -165,6 +181,15 @@ class SourcesRegistry:
             return resolve_namespace_id(namespace, table)
         except (ValueError, Exception):
             return namespace
+
+    def _has_external_documents(self, namespace: str) -> bool:
+        """Return whether configuration positively routes this namespace externally."""
+        resolved_namespace = self._resolve_ns(namespace)
+        return (
+            self._external_document_default
+            or namespace in self._external_document_namespaces
+            or resolved_namespace in self._external_document_namespaces
+        )
 
     async def namespace_exists(self, namespace: str) -> bool | None:
         """Return whether a namespace exists in the namespaces table.
@@ -264,6 +289,59 @@ class SourcesRegistry:
             raise NamespaceLanguageUnavailableError(f"namespace {namespace!r} has an invalid language") from exc
         self._remember_language(namespace, item)
         return language
+
+    async def get_namespace_integration_profile(self, namespace: str) -> dict[str, Any] | None:
+        """Return validated logical source routing, or ``None`` if unverifiable.
+
+        A namespace created before profiles existed receives the safe Accelerate
+        default. A DynamoDB failure or malformed stored profile is not treated as
+        that default: planning fails closed instead of routing to an unintended
+        source.
+        """
+        if not self.namespaces_configured:
+            return None
+
+        cached = self._profile_cache.get(namespace)
+        if cached and time.monotonic() - cached[1] < _CACHE_TTL_S:
+            return normalize_namespace_integration_profile(cached[0])
+
+        validate_namespace(namespace)
+        ns_id = self._resolve_ns(namespace)
+        loop = asyncio.get_running_loop()
+        table = self._dynamodb.Table(self._namespaces_table)
+        try:
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._executor,
+                    lambda: table.get_item(
+                        Key={"PK": f"NS#{ns_id}", "SK": "METADATA"},
+                        ProjectionExpression="integrationProfile",
+                    ),
+                ),
+                timeout=_RESOLVE_TIMEOUT_S,
+            )
+        except Exception:
+            logger.warning(
+                "integration_profile_lookup_failed",
+                namespace=namespace,
+                exc_info=True,
+            )
+            return None
+
+        item = response.get("Item")
+        if not isinstance(item, dict):
+            return None
+        try:
+            profile = normalize_namespace_integration_profile(item.get("integrationProfile"))
+        except IntegrationProfileError:
+            logger.error("integration_profile_invalid", namespace=namespace)
+            return None
+
+        self._profile_cache[namespace] = (profile, time.monotonic())
+        if len(self._profile_cache) > _ITEMS_CACHE_MAX:
+            oldest = min(self._profile_cache, key=lambda key: self._profile_cache[key][1])
+            self._profile_cache.pop(oldest, None)
+        return normalize_namespace_integration_profile(profile)
 
     async def get_source(self, namespace: str, data_source_id: str) -> dict[str, Any]:
         """Fetch a single source record by namespace + source ID."""
@@ -513,7 +591,8 @@ class SourcesRegistry:
             # request retries rather than being pinned to "run everything".
             return SourceComposition.unknown_composition()
 
-        if not items:
+        has_external_documents = self._has_external_documents(namespace)
+        if not items and not has_external_documents:
             # No SRC# records at all — an empty or not-yet-provisioned namespace, or a
             # name that does not resolve. This is NOT a reliable "namespace has zero
             # DATABASE and zero DOCUMENTS sources" signal (that would skip every tier);
@@ -522,7 +601,14 @@ class SourcesRegistry:
             return SourceComposition.unknown_composition()
 
         has_structured_source = any(item.get("sourceType") == _SOURCE_TYPE_DATABASE for item in items)
-        has_unstructured_source = any(item.get("sourceType") == _SOURCE_TYPE_DOCUMENTS for item in items)
+        # A managed KB is a real unstructured source even though it has no SRC#
+        # row and no COA chunk index. Count the exact namespace route (or a
+        # deployment-wide external default) so standard and deep-reasoning
+        # retrieval do not hide the external document backend after, for
+        # example, a DATABASE source is added to the same namespace.
+        has_unstructured_source = has_external_documents or any(
+            item.get("sourceType") == _SOURCE_TYPE_DOCUMENTS for item in items
+        )
         return SourceComposition(
             has_structured_source=has_structured_source, has_unstructured_source=has_unstructured_source
         )
