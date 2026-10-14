@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from coa_common.constants import GRAPH_BASE_URI
-from rdflib import OWL, RDF, RDFS, Graph, Literal, Namespace, URIRef
+from rdflib import OWL, RDF, RDFS, BNode, Graph, Literal, Namespace, URIRef
 
 RR = Namespace("http://www.w3.org/ns/r2rml#")
 SCL = Namespace(f"{GRAPH_BASE_URI}/vocab/coa#")
@@ -32,6 +32,28 @@ def _build_r2rml_graph_with_datasource(class_uri: str, datasource_id: str) -> Gr
     g.add((URIRef(class_uri), RDFS.label, Literal("TestClass")))
 
     return g
+
+
+def _build_r2rml_graph_with_sql_names() -> Graph:
+    """Build one mapping whose business labels differ from physical SQL names."""
+    graph = Graph()
+    triples_map = EX.TriplesMap_ConnectionDemo
+    logical_table = BNode()
+    subject_map = BNode()
+    predicate_object_map = BNode()
+    object_map = BNode()
+
+    graph.add((triples_map, RDF.type, RR.TriplesMap))
+    graph.add((triples_map, SCL.datasourceId, Literal("source-1")))
+    graph.add((triples_map, RR.logicalTable, logical_table))
+    graph.add((logical_table, RR.tableName, Literal('"coa_connection_demo"')))
+    graph.add((triples_map, RR.subjectMap, subject_map))
+    graph.add((subject_map, RR["class"], EX.ConnectionDemo))
+    graph.add((triples_map, RR.predicateObjectMap, predicate_object_map))
+    graph.add((predicate_object_map, RR.predicate, EX.category))
+    graph.add((predicate_object_map, RR.objectMap, object_map))
+    graph.add((object_map, RR.column, Literal('"category"')))
+    return graph
 
 
 def _build_r2rml_graph_multi_datasource() -> Graph:
@@ -164,6 +186,61 @@ class TestAccumulateEmbeddingsDataSourceExtraction:
         assert "data_source_id" not in items_by_uri[str(EX.Product)]
         # Property → no datasourceId (properties don't get data_source_id)
         assert "data_source_id" not in items_by_uri[str(EX.hasName)]
+
+
+@pytest.mark.unit
+class TestSqlNamesFromR2rml:
+    def test_derives_physical_table_and_column_names(self):
+        from coa_ontology.catalog.ingest import _sql_names_from_r2rml
+
+        tables, columns = _sql_names_from_r2rml(
+            _build_r2rml_graph_with_sql_names().serialize(format="turtle")
+        )
+
+        assert tables == {str(EX.ConnectionDemo): "coa_connection_demo"}
+        assert columns == {str(EX.category): "category"}
+
+    @patch("coa_ontology.bedrock_embeddings.BedrockEmbeddingClient")
+    def test_business_labels_remain_searchable_but_not_executable_names(self, mock_bedrock_cls):
+        from coa_ontology.catalog.ingest import _accumulate_embeddings, _sql_names_from_r2rml
+
+        mock_bedrock = MagicMock()
+        mock_bedrock.model_id = "amazon.titan-embed-text-v2:0"
+        mock_bedrock.embed_texts.return_value = [[0.1] * 1024, [0.2] * 1024]
+        mock_bedrock_cls.return_value = mock_bedrock
+        vector_store = MagicMock()
+
+        ontology = Graph()
+        ontology.add((EX.ConnectionDemo, RDF.type, OWL.Class))
+        ontology.add((EX.ConnectionDemo, RDFS.label, Literal("Connection demo record")))
+        ontology.add((EX.category, RDF.type, OWL.DatatypeProperty))
+        ontology.add((EX.category, RDFS.domain, EX.ConnectionDemo))
+        ontology.add((EX.category, RDFS.label, Literal("Category")))
+        ontology.add((EX.category, RDFS.range, URIRef("http://www.w3.org/2001/XMLSchema#string")))
+        tables, columns = _sql_names_from_r2rml(
+            _build_r2rml_graph_with_sql_names().serialize(format="turtle")
+        )
+
+        _accumulate_embeddings(
+            vector_store=vector_store,
+            graph=ontology,
+            ontology_id="http://example.org/ontology#",
+            classes={EX.ConnectionDemo},
+            obj_props=set(),
+            dt_props={EX.category},
+            namespace="test-ns",
+            class_to_datasource={str(EX.ConnectionDemo): "source-1"},
+            class_to_sql_table=tables,
+            property_to_sql_column=columns,
+        )
+
+        items = vector_store.store_embeddings_batch.call_args[0][0]
+        class_item = next(item for item in items if item["entity_type"] == "class")
+        assert class_item["text"].startswith("Table: coa_connection_demo")
+        assert "Business name: Connection demo record" in class_item["text"]
+        assert "category [business label: Category]" in class_item["text"]
+        assert "Table: Connection demo record" not in class_item["context_text"]
+        assert "category:string [business label: Category]" in class_item["context_text"]
 
 
 @pytest.mark.unit

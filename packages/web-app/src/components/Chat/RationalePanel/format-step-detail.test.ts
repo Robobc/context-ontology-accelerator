@@ -209,6 +209,14 @@ describe("formatStepDetail", () => {
       const result = formatStepDetail("t1.execute", {});
       expect(result).toBe("0 row(s) returned.");
     });
+
+    it("does not render an execution error as a successful zero-row result", () => {
+      const result = formatStepDetail("t2.sql.execute", {
+        error: "AthenaQueryError",
+        shot: 1,
+      });
+      expect(result).toBe("Query execution failed; no rows were returned.");
+    });
   });
 
   describe("t2.strategy_selected formatter", () => {
