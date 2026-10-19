@@ -15,6 +15,7 @@ from coa_common.bedrock import (
     BedrockClient,
     BedrockInvocationResult,
     BedrockTruncationError,
+    clamp_max_tokens,
     GuardrailBlockedError,
     InputTooLargeError,
     extract_text_blocks,
@@ -618,3 +619,38 @@ class TestGuardrailDecisionMetrics:
             mock_logger.info.side_effect = RuntimeError("stdout closed")
             mock_logger.warning.side_effect = RuntimeError("stdout closed")
             client.invoke("sys", "usr")
+
+
+class TestClampMaxTokens:
+    """Nova rejects maxTokens above its ceiling with a ValidationException
+    instead of truncating, which failed Pass-2 relationship inference on every
+    scan (callers request 16384, tuned for Claude). The clamp lives in the one
+    place every caller passes through, so no caller needs to know the model.
+    """
+
+    @pytest.mark.parametrize(
+        ("model_id", "requested", "expected"),
+        [
+            ("us.amazon.nova-lite-v1:0", 16384, 10000),
+            ("us.amazon.nova-pro-v1:0", 10001, 10000),
+            ("eu.amazon.nova-micro-v1:0", 4096, 4096),  # under the ceiling: untouched
+            ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 16384, 16384),  # unlisted: pass-through
+            ("us.openai.gpt-5.4", 32000, 32000),
+        ],
+    )
+    def test_clamp(self, model_id, requested, expected):
+        assert clamp_max_tokens(model_id, requested) == expected
+
+    @patch("coa_common.bedrock.boto3")
+    def test_invoke_sends_clamped_max_tokens_for_nova(self, mock_boto3):
+        mock_client = MagicMock()
+        mock_boto3.client.return_value = mock_client
+        mock_client.converse.return_value = {
+            "output": {"message": {"content": [{"text": "{}"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+        }
+
+        BedrockClient(region="us-east-1", model_id="us.amazon.nova-lite-v1:0").invoke("s", "u", max_tokens=16384)
+
+        assert mock_client.converse.call_args.kwargs["inferenceConfig"] == {"maxTokens": 10000}
