@@ -98,6 +98,30 @@ semantic-context/
 
 This repository is published as a read-only mirror. We are not accepting pull requests at this time. You are welcome to report bugs and share feedback through GitHub Issues. See [CONTRIBUTING.md](CONTRIBUTING.md) for details including direction for Amazon employees.
 
+## What this fork changes
+
+This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/context-ontology-accelerator) `main` (last sync `052b5a2`) and adds one feature plus a short list of fixes found while running the accelerator against a 35-table Databricks catalog on Amazon Nova models. Upstream does not accept pull requests, so each fix is a separate, revertable commit that will be dropped on rebase once upstream ships its own; every one is also filed as an upstream issue. Deploy from a tag, not from the branch tip.
+
+**Feature:** semantic control plane integrations (`397a0f9`, `be876ae`) — typed `SemanticExecutionPlan` contract for outer agents, structured query mappings preserved through acceptance.
+
+**Fixes (behaviour-neutral for Claude deployments):**
+
+| Commit | Change | Why |
+|---|---|---|
+| `bd32f01` | `coa_common.bedrock` clamps `maxTokens` to the model's measured ceiling (Nova: 10000) | Nova rejects over-limit requests with `ValidationException`; cross-source relationship inference failed on every scan |
+| `74ee8f5` | Single-table enrichment budget 4096 → 8192 | Nova Lite overflowed on a 73-column table; written back unenriched |
+| `733b260` | Deployment docs: building with Finch | `CDK_DOCKER=finch`, ECR Public login, VM disk pruning |
+| `9872907` | `.gitignore` Maven `target/` under `connectors/` | build output |
+
+**Operator knobs (upstream default unchanged; set per deployment with `-c key=value`):**
+
+| CDK context | Default | Effect |
+|---|---|---|
+| `retrieval_guardrail_prompt_attack_input_strength` (`8a8d1ee`) | `MEDIUM` | PROMPT_ATTACK strength on the *retrieval* guardrail. Steward-authored column comments are instruction-shaped and get classified as attacks; `NONE` unblocks metadata enrichment at the cost of indirect-injection screening on Tier-3 documents |
+| `serve_nl2sql_exec_timeout_s` (`f6547d3`) | `35` | Per-statement SQL execution timeout on the AgentCore path (env `SERVE_NL2SQL_EXEC_TIMEOUT_S`, clamped 5..300). Federated Athena→Databricks statements cost 20-40 s in metadata rediscovery alone |
+
+Customer-specific material (schemas, golden question sets, onboarding kits, deployment values) is deliberately **not** in this fork.
+
 ## External Dependencies
 
 This package depends on and may incorporate or retrieve a number of third-party
