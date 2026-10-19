@@ -242,3 +242,7 @@ demos/**/*.storage.json
 # The .demo.yaml is the artifact worth committing; a 180 MB MP4 is not.
 demos/**/*.mp4
 demos/**/*.timing.json
+
+# Maven build output of the Java Athena connectors (built by CDK asset bundling
+# or `mvn package`); the jars are published to ECR/S3, never committed.
+connectors/**/target/
