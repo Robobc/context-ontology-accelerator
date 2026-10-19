@@ -84,6 +84,35 @@ If a build still fails:
    `docker buildx ls`; registration on the local default engine does not
    configure a different builder automatically.
 
+### Building with Finch instead of Docker
+
+On hosts without Docker (common on managed macOS), [Finch](https://runfinch.com/)
+works for every image build in this repository. Three things differ from the
+Docker path and each one surfaces as a confusing CDK error if missed:
+
+1. **Tell CDK which engine to use.** CDK shells out to `docker` by default and
+   fails with `spawn docker ENOENT`. Export `CDK_DOCKER=finch` for every
+   `cdk deploy`/`cdk diff` that builds assets (or put it in your shell profile).
+2. **Authenticate Finch to ECR Public before the first build.** The Lambda and
+   Ontop base images are pulled from `public.ecr.aws`; anonymous pulls are
+   rate-limited and return `403 Forbidden` on the `FROM` line (CDK reports it as
+   a Dockerfile build failure of the affected asset). `make deploy-dev` does this
+   for Docker; for Finch run it yourself with your AWS identity:
+   ```bash
+   aws ecr-public get-login-password --region us-east-1 \
+     | finch login --username AWS --password-stdin public.ecr.aws
+   ```
+3. **Watch the Finch VM disk.** Every deploy that rebuilds images leaves the
+   previous image in the VM; after a few deploys `pip install` inside a build
+   fails with `No space left on device` while the host disk is fine. Images are
+   already in ECR once deployed, so prune the local copies:
+   ```bash
+   finch system df                     # see what is occupying the VM
+   finch image prune -a --force        # drop local images not used by a container
+   ```
+   A 3 GB layer push to ECR can also drop mid-transfer on slow links; builds
+   are cached, so simply re-running the deploy only repeats the push.
+
 ## AWS Account Setup
 
 Context Ontology Accelerator deploys into a single AWS account and region. Ensure the deploying principal has `AdministratorAccess` or equivalent permissions for the initial deployment.
