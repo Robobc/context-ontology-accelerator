@@ -452,7 +452,11 @@ def _call_bedrock(
         extra_context=extra_context,
         extra_context_hint=extra_context_hint,
     )
-    max_tokens = 4096
+    # 4096 was tuned for Claude Haiku; Nova Lite writes longer per-column
+    # descriptions and a 73-column table overflowed it (stop_reason=max_tokens,
+    # table written back unenriched). 8192 fits ~80 columns (the single-call
+    # threshold) with headroom and stays under every model's clamp ceiling.
+    max_tokens = 8192
     if extra_context:
         max_tokens = 16384 if extra_context_hint else 8192
 
