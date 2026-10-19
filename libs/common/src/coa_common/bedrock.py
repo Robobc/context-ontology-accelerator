@@ -56,6 +56,31 @@ DEFAULT_MODEL_ID = resolve_chat_model_id()
 _DEFAULT_READ_TIMEOUT = 90
 _DEFAULT_GUARDRAIL_VERSION = "DRAFT"
 
+# Hard per-model output-token ceilings. Callers were tuned for Claude (16k+)
+# and request e.g. 16384; Amazon Nova rejects anything above its limit with a
+# ValidationException instead of truncating, which killed Pass-2 relationship
+# inference on every scan. Ceilings measured on 2026-10-19 in us-east-1: Nova
+# micro/lite/pro accept 10000 and reject 10001. Substring match on the model id
+# so geo prefixes (``us.``, ``eu.``, ``global.``) and version suffixes do not
+# matter. Models not listed are passed through unchanged.
+# ponytail: static table; extend when a new model family with a lower limit is adopted.
+_MODEL_MAX_OUTPUT_TOKENS: tuple[tuple[str, int], ...] = (
+    ("amazon.nova-micro", 10000),
+    ("amazon.nova-lite", 10000),
+    ("amazon.nova-pro", 10000),
+)
+
+
+def clamp_max_tokens(model_id: str, requested: int) -> int:
+    """Return ``requested`` capped to the model's documented output ceiling."""
+    for needle, ceiling in _MODEL_MAX_OUTPUT_TOKENS:
+        if needle in model_id:
+            if requested > ceiling:
+                logger.info("Clamping maxTokens %d -> %d for model %s", requested, ceiling, model_id)
+            return min(requested, ceiling)
+    return requested
+
+
 _DEFAULT_MAX_INPUT_CHARS = 200_000
 
 _GUARDRAIL_POLICY_PATHS = [
@@ -216,7 +241,7 @@ class BedrockClient:
             "modelId": self._model_id,
             "messages": [{"role": "user", "content": [{"text": user_prompt}]}],
             "system": [{"text": system_prompt}],
-            "inferenceConfig": {"maxTokens": max_tokens},
+            "inferenceConfig": {"maxTokens": clamp_max_tokens(self._model_id, max_tokens)},
         }
         if self._guardrail_id:
             kwargs["guardrailConfig"] = {
