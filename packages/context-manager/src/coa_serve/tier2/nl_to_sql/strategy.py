@@ -107,7 +107,29 @@ _MIN_USER_LITERAL_LEN = 2
 # budget for that path. On the REST path a deadline IS threaded, so
 # _exec_timeout_seconds() clamps below this to min(35, remaining - margin) — on a
 # 29s REST budget that is always < 29s; this 35 never applies there.
+#
+# Operator override: SERVE_NL2SQL_EXEC_TIMEOUT_S (seconds, clamped 5..300). Needed
+# on federated sources where a single statement costs more than the query itself:
+# the Athena->Lambda->Databricks path re-discovers table metadata on every
+# statement (4 information_schema queries + 1 connector round-trip per table), so
+# a 2-table join lands at 24-28s warm and 37-43s cold; a 3-table join exceeds 35s
+# even warm. Must stay under RESOLVE_TIMEOUT_S (the request cap) or the outer
+# wait_for cancels first and the correction shot never runs.
 _DEFAULT_EXEC_TIMEOUT_S = 35
+_MIN_EXEC_TIMEOUT_OVERRIDE_S = 5
+_MAX_EXEC_TIMEOUT_OVERRIDE_S = 300
+
+
+def _resolve_default_exec_timeout_s() -> int:
+    raw = os.environ.get("SERVE_NL2SQL_EXEC_TIMEOUT_S")
+    if raw is None or not raw.strip():
+        return _DEFAULT_EXEC_TIMEOUT_S
+    try:
+        return max(_MIN_EXEC_TIMEOUT_OVERRIDE_S, min(_MAX_EXEC_TIMEOUT_OVERRIDE_S, int(raw)))
+    except (TypeError, ValueError):
+        return _DEFAULT_EXEC_TIMEOUT_S
+
+
 # Floor for a deadline-derived execution timeout. Below this a query has no
 # realistic chance of completing, so we do not shrink the executor timeout past
 # it — the request will simply exhaust its budget and the outer wait_for handles
@@ -250,6 +272,7 @@ class NLtoSQLStrategy:
         self._graph_client = graph_client
         self._sources = sources_registry
         self._max_shots = max_shots if max_shots is not None else _resolve_max_shots()
+        self._default_exec_timeout_s = _resolve_default_exec_timeout_s()
 
     def _exec_timeout_seconds(self, context: StrategyContext) -> int:
         """Per-statement execution timeout, derived from the request deadline (A4/A6).
@@ -257,22 +280,23 @@ class NLtoSQLStrategy:
         With a deadline threaded, cap the executor at the time actually left in the
         request budget (leaving the correction margin) so a single statement cannot
         run past the point where its result could still be delivered — but never
-        below ``_MIN_EXEC_TIMEOUT_S`` and never above the historical
-        ``_DEFAULT_EXEC_TIMEOUT_S``. With no deadline (e.g. the long AgentCore path
-        or an unwired caller) the fixed 35s default is preserved exactly. Rounded
+        below ``_MIN_EXEC_TIMEOUT_S`` and never above the default (35s, or the
+        ``SERVE_NL2SQL_EXEC_TIMEOUT_S`` override). With no deadline (e.g. the long
+        AgentCore path or an unwired caller) that default is returned exactly. Rounded
         DOWN to whole seconds — conservative, never rounds up past the budget.
         """
+        default = self._default_exec_timeout_s
         if context.deadline is None:
-            return _DEFAULT_EXEC_TIMEOUT_S
+            return default
         remaining = context.deadline.remaining_s() - _CORRECTION_MARGIN_S
         # Floor at _MIN_EXEC_TIMEOUT_S even when the remaining budget is smaller: the
         # outer asyncio.wait_for owns request cancellation, so a too-generous executor
         # timeout can never cause an actual overrun (the request is cancelled first).
         # Handing the engine a floored 5s vs a literal sub-2s window changes nothing
         # about correctness but avoids a degenerate 0-1s timeout the engine cannot use.
-        clamped = min(float(_DEFAULT_EXEC_TIMEOUT_S), max(_MIN_EXEC_TIMEOUT_S, remaining))
+        clamped = min(float(default), max(_MIN_EXEC_TIMEOUT_S, remaining))
         result = int(clamped)
-        if result < _DEFAULT_EXEC_TIMEOUT_S:
+        if result < default:
             # Budget forced the executor below its historical default. Surface it so
             # a mis-tuned _CORRECTION_MARGIN_S / _MIN_EXEC_TIMEOUT_S is visible rather
             # than silently starving the engine; the normal (unclamped) path stays quiet.

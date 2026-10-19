@@ -622,6 +622,18 @@ export class ServeStack extends SCLStack {
               this.node.tryGetContext("serve_nl2sql_graph_expand_max_tables"),
             ),
           }),
+          // Per-statement SQL execution timeout on the no-deadline (AgentCore)
+          // path, clamped 5..300 in strategy.py. Unset => the shipped 35s. Raise
+          // on federated sources where metadata rediscovery dominates: via the
+          // Athena->Lambda->Databricks connector a 2-table join measures 24-28s
+          // warm / 37-43s cold, so 35s burns a correction shot on a statement
+          // Athena then completes anyway. Keep it under RESOLVE_TIMEOUT_S below.
+          ...(this.node.tryGetContext("serve_nl2sql_exec_timeout_s") !==
+            undefined && {
+            SERVE_NL2SQL_EXEC_TIMEOUT_S: String(
+              this.node.tryGetContext("serve_nl2sql_exec_timeout_s"),
+            ),
+          }),
           // Deep-reasoning Tier-3 budgets. The 30s code default squeezes later tools
           // below their runtime (graphrag strategy calls take 10-40s); much above this
           // the AgentCore endpoint returns an empty envelope. MUST stay under
