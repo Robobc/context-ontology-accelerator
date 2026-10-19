@@ -143,6 +143,21 @@ export class GuardrailStack extends SCLStack {
     this.addComponentTag("foundation");
 
     const { ssmPrefix } = resolveContext(this.node);
+    // See the PROMPT_ATTACK filter on the retrieval guardrail below.
+    const retrievalPromptAttackInputStrength = String(
+      this.node.tryGetContext(
+        "retrieval_guardrail_prompt_attack_input_strength",
+      ) ?? "MEDIUM",
+    ).toUpperCase();
+    if (
+      !["NONE", "LOW", "MEDIUM", "HIGH"].includes(
+        retrievalPromptAttackInputStrength,
+      )
+    ) {
+      throw new Error(
+        `retrieval_guardrail_prompt_attack_input_strength must be NONE|LOW|MEDIUM|HIGH, got "${retrievalPromptAttackInputStrength}"`,
+      );
+    }
 
     // ── Primary guardrail: HIGH sensitivity for user queries ─────────────
     const guardrail = new bedrock.CfnGuardrail(this, "BedrockGuardrail", {
@@ -232,7 +247,19 @@ export class GuardrailStack extends SCLStack {
             },
             {
               type: "PROMPT_ATTACK",
-              inputStrength: "MEDIUM",
+              // Operator knob (context `retrieval_guardrail_prompt_attack_input_strength`,
+              // default MEDIUM = upstream). This guardrail also screens INGESTED
+              // METADATA: steward-authored column comments ("NA = North America,
+              // never not-applicable", "default cost basis") are instruction-shaped
+              // business text, and the enrichment prompt wraps them in a
+              // <user_input> block followed by a "Remember:" instruction, so the
+              // classifier flags them PROMPT_ATTACK at HIGH confidence — even LOW
+              // blocked enrichment on every table of a 35-table catalog. NONE is
+              // the documented escape hatch for metadata-heavy deployments; note it
+              // also disables indirect-injection screening on Tier-3 retrieved
+              // documents, so weigh that per deployment. The primary (user-query)
+              // guardrail above is unaffected and stays HIGH.
+              inputStrength: retrievalPromptAttackInputStrength,
               outputStrength: "NONE",
             },
           ],
