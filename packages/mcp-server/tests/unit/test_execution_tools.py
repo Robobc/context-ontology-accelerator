@@ -18,6 +18,7 @@ from coa_mcp.tools.execution import (
     execute_rag_retrieval,
     execute_semantic_plan,
     execute_translate_sparql,
+    execute_translate_sql,
 )
 
 
@@ -263,6 +264,136 @@ class TestExecuteTranslateSparql:
         result = await execute_translate_sparql(mock_cm, "test", "ns", profile, "tok")
         assert result["sparqlQuery"] == "SELECT ?x WHERE { ?x a :Thing }"
         assert result["confidence"]["score"] == 0.9
+
+
+@pytest.mark.unit
+class TestExecuteTranslateSql:
+    """Tests for the translate_sql tool delegate."""
+
+    def _cm_sql_result(self, **overrides):
+        base = {
+            "sql": "SELECT 1",
+            "dialect": "athena",
+            "executionTarget": {
+                "kind": "ATHENA",
+                "engine": "ATHENA",
+                "sourceIds": ["s1"],
+                "catalog": None,
+                "workgroup": "wg",
+            },
+            "tablesTouched": ["project"],
+            "confidence": {"score": 0.8, "rationale": ""},
+            "ontologyVersion": None,
+            "firewall": {"allowed": True, "principal": "user1"},
+            "trace": [{"step": "generate", "status": "success"}],
+        }
+        base.update(overrides)
+        return base
+
+    @pytest.mark.asyncio
+    async def test_invokes_translate_sql_action(self, mock_cm, profile):
+        mock_cm.invoke.return_value = {"result": self._cm_sql_result()}
+        await execute_translate_sql(mock_cm, "count projects", "sales", profile, "tok")
+        payload, token = mock_cm.invoke.call_args[0]
+        assert payload["action"] == "translateSql"
+        assert payload["query"] == "count projects"
+        assert payload["namespace"] == "sales"
+        assert payload["profile"] == {"userId": "user1", "groups": ["viewer"], "namespace": "sales"}
+        assert token == "tok"
+
+    @pytest.mark.asyncio
+    async def test_options_omitted_when_defaults(self, mock_cm, profile):
+        """No dataSourceId and default target → no ``options`` key at all, so a
+        plain caller's request stays byte-identical."""
+        mock_cm.invoke.return_value = {"result": self._cm_sql_result()}
+        await execute_translate_sql(mock_cm, "q", "ns", profile, "tok")
+        payload = mock_cm.invoke.call_args[0][0]
+        assert "options" not in payload
+
+    @pytest.mark.asyncio
+    async def test_options_data_source_id_only(self, mock_cm, profile):
+        mock_cm.invoke.return_value = {"result": self._cm_sql_result()}
+        await execute_translate_sql(mock_cm, "q", "ns", profile, "tok", data_source_id="ds-42")
+        payload = mock_cm.invoke.call_args[0][0]
+        assert payload["options"] == {"dataSourceId": "ds-42"}
+
+    @pytest.mark.asyncio
+    async def test_options_target_native_only(self, mock_cm, profile):
+        """``target`` is sent only when non-default; ``default`` stays omitted."""
+        mock_cm.invoke.return_value = {"result": self._cm_sql_result()}
+        await execute_translate_sql(mock_cm, "q", "ns", profile, "tok", target="native")
+        payload = mock_cm.invoke.call_args[0][0]
+        assert payload["options"] == {"target": "native"}
+
+    @pytest.mark.asyncio
+    async def test_options_both_keys_set(self, mock_cm, profile):
+        mock_cm.invoke.return_value = {"result": self._cm_sql_result()}
+        await execute_translate_sql(mock_cm, "q", "ns", profile, "tok", data_source_id="ds-42", target="native")
+        payload = mock_cm.invoke.call_args[0][0]
+        assert payload["options"] == {"dataSourceId": "ds-42", "target": "native"}
+
+    @pytest.mark.asyncio
+    async def test_default_target_not_forwarded(self, mock_cm, profile):
+        """Explicit target='default' is still treated as the default: not sent."""
+        mock_cm.invoke.return_value = {"result": self._cm_sql_result()}
+        await execute_translate_sql(mock_cm, "q", "ns", profile, "tok", target="default")
+        payload = mock_cm.invoke.call_args[0][0]
+        assert "options" not in payload
+
+    @pytest.mark.asyncio
+    async def test_returns_all_response_fields_verbatim(self, mock_cm, profile):
+        cm_result = self._cm_sql_result()
+        mock_cm.invoke.return_value = {"result": cm_result}
+        result = await execute_translate_sql(mock_cm, "q", "ns", profile, "tok")
+        assert result["sql"] == "SELECT 1"
+        assert result["dialect"] == "athena"
+        assert result["executionTarget"] == cm_result["executionTarget"]
+        assert result["tablesTouched"] == ["project"]
+        assert result["confidence"] == {"score": 0.8, "rationale": ""}
+        assert result["ontologyVersion"] is None
+        assert result["firewall"] == {"allowed": True, "principal": "user1"}
+        assert result["trace"] == cm_result["trace"]
+        # nativeTranspile absent in the default path.
+        assert "nativeTranspile" not in result
+
+    @pytest.mark.asyncio
+    async def test_native_transpile_passed_through_when_present(self, mock_cm, profile):
+        native = {"applied": True, "reason": None}
+        mock_cm.invoke.return_value = {
+            "result": self._cm_sql_result(
+                dialect="databricks",
+                executionTarget={
+                    "kind": "NATIVE",
+                    "engine": "DATABRICKS_SQL_WAREHOUSE",
+                    "sourceIds": ["s1"],
+                    "catalog": "demo_catalog",
+                    "workgroup": None,
+                },
+                nativeTranspile=native,
+            )
+        }
+        result = await execute_translate_sql(mock_cm, "q", "ns", profile, "tok", target="native")
+        assert result["nativeTranspile"] == native
+        assert result["executionTarget"]["kind"] == "NATIVE"
+        assert result["dialect"] == "databricks"
+
+    @pytest.mark.asyncio
+    async def test_flat_cm_response_envelope_stripped(self, mock_cm, profile):
+        """A flat CM body (no ``result`` wrapper) is still read correctly."""
+        mock_cm.invoke.return_value = self._cm_sql_result()
+        result = await execute_translate_sql(mock_cm, "q", "ns", profile, "tok")
+        assert result["sql"] == "SELECT 1"
+        assert result["tablesTouched"] == ["project"]
+
+    @pytest.mark.asyncio
+    async def test_cm_error_raises_context_manager_error(self, mock_cm, profile):
+        from coa_mcp.tools.execution import ContextManagerError
+
+        mock_cm.invoke.return_value = {"statusCode": 403, "message": "firewall denied"}
+        with pytest.raises(ContextManagerError) as exc_info:
+            await execute_translate_sql(mock_cm, "q", "ns", profile, "tok")
+        assert exc_info.value.status_code == 403
+        assert "firewall denied" in str(exc_info.value)
 
 
 @pytest.mark.unit

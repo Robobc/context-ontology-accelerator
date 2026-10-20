@@ -57,6 +57,7 @@ Add to `.kiro/settings/mcp.json`:
         "describe_schema",
         "query",
         "translate_sparql",
+        "translate_sql",
         "rag_retrieval",
         "graph_traversal"
       ]

@@ -39,6 +39,7 @@ TOOL_CEDAR_ACTION: dict[str, str] = {
     "query": "query",
     "semantic_execution_plan": "query",
     "translate_sparql": "query",
+    "translate_sql": "query",
     "rag_retrieval": "searchDocuments",
     "graph_traversal": "viewNamespace",
 }
