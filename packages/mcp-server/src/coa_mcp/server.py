@@ -3,13 +3,13 @@
 
 """MCP Server for Context Ontology Accelerator.
 
-Exposes 7 MCP tools (2 discovery + 5 execution) via Streamable HTTP
+Exposes 8 MCP tools (2 discovery + 6 execution) via Streamable HTTP
 on AgentCore Runtime (port 8000, --protocol MCP).
 
 Architecture:
 - Discovery tools (list_metrics, describe_schema) invoke backend Lambdas
   directly via LambdaClient (bypassing API Gateway).
-- Execution tools (query, semantic_execution_plan, translate_sparql, rag_retrieval, graph_traversal)
+- Execution tools (query, semantic_execution_plan, translate_sparql, translate_sql, rag_retrieval, graph_traversal)
   delegate to the Context Manager via AgentCore InvokeAgentRuntime.
 - JWT validated by the platform; server extracts claims and forwards token.
 - Authorization against delegating USER (not agent).
@@ -556,6 +556,84 @@ async def translate_sparql(
 
 
 @mcp.tool()
+async def translate_sql(
+    ctx: Context,
+    query: str,
+    namespaceId: str,
+    dataSourceId: str | None = None,
+    target: Literal["default", "native"] = "default",
+) -> str:
+    """Return COA's governed SQL for a natural-language question WITHOUT executing it.
+
+    The statement is read-only, names only tables you may see in this namespace,
+    honours your table allowlist and column denylist, and was generated with the
+    ontology's instructions applied. Run it yourself on ``executionTarget`` under
+    your own identity; the source's own access control applies to the rows.
+
+    COA does not guarantee the statement is unmodified when you run it, nor that it
+    answers at the grain the question implies — check fan-out on 1:N joins.
+
+    ``target="native"`` returns the SQL in the source engine's own dialect and
+    catalog names for single-source statements on federated sources (e.g.
+    Databricks); when that is not possible, ``nativeTranspile.reason`` says why and
+    the Athena form is returned instead. Use the ``query`` tool instead when you
+    want COA to execute.
+
+    Args:
+        ctx: MCP request context carrying the caller's identity and bearer token.
+        query: Natural-language question to translate to SQL.
+        namespaceId: The namespace (determines ontology, grants, and sources).
+        dataSourceId: Optional COA source id to scope the statement to.
+        target: ``default`` (Athena/execution-target dialect) or ``native`` (the
+            source engine's own dialect for single-source federated statements).
+
+    Returns:
+        JSON ``{sql, dialect, executionTarget, tablesTouched, confidence,
+        ontologyVersion, firewall, trace}`` plus ``nativeTranspile`` when
+        ``target="native"``. Matches the CM ``translateSql`` output.
+    """
+    start = time.perf_counter()
+    caller = None
+    # Validate before any network call: an unknown target is a client error, not
+    # something to forward to the CM.
+    if target not in ("default", "native"):
+        raise ValueError(f"Invalid target '{target}': must be one of ('default', 'native')")
+    try:
+        caller, profile = await _resolve_caller_and_profile(
+            namespaceId, ctx, cedar_action=TOOL_CEDAR_ACTION["translate_sql"]
+        )
+        token = _extract_bearer_token(ctx)
+        cm = _get_cm_client()
+        result = await execution.execute_translate_sql(
+            cm,
+            query,
+            namespaceId,
+            profile,
+            token,
+            data_source_id=dataSourceId,
+            target=target,
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        if caller:
+            log_tool_invocation(caller, "translate_sql", namespaceId, duration_ms=duration_ms)
+        return json.dumps(result, indent=2, default=str)
+
+    except (ClaimsExtractionError, GrantResolutionError) as e:
+        if caller:
+            log_tool_invocation(caller, "translate_sql", namespaceId, success=False, error=str(e))
+        raise ValueError(str(e)) from e
+    except ContextManagerError as e:
+        if caller:
+            log_tool_invocation(caller, "translate_sql", namespaceId, success=False, error=str(e))
+        raise ValueError(f"CM {e.status_code}: {e.message}") from e
+    except Exception as e:
+        logger.error("translate_sql_failed", namespace=namespaceId, error=str(e))
+        if caller:
+            log_tool_invocation(caller, "translate_sql", namespaceId, success=False, error=str(e))
+        raise
+
+
+@mcp.tool()
 async def rag_retrieval(
     ctx: Context,
     query: str,
@@ -712,6 +790,7 @@ if __name__ == "__main__":
             "query",
             "semantic_execution_plan",
             "translate_sparql",
+            "translate_sql",
             "rag_retrieval",
             "graph_traversal",
         ],

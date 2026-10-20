@@ -28,6 +28,7 @@ Needs DynamoDB (role resolution), Lambda invoke (discovery), and HTTPS egress (t
 | `query` | Execution | End-to-end NL query with tiered resolution |
 | `semantic_execution_plan` | Planning | Return a versioned, non-executing plan for source-native tools |
 | `translate_sparql` | Execution | Translate NL to SPARQL using the published ontology |
+| `translate_sql` | Execution | Translate NL to governed SQL without executing it |
 | `rag_retrieval` | Execution | Retrieve semantically similar document chunks |
 | `graph_traversal` | Execution | Traverse the semantic graph for entity relationships |
 
@@ -185,6 +186,7 @@ Add to `.kiro/settings/mcp.json` (or Claude Desktop's `claude_desktop_config.jso
         "describe_schema",
         "query",
         "translate_sparql",
+        "translate_sql",
         "rag_retrieval",
         "graph_traversal"
       ]
@@ -231,6 +233,7 @@ the server loads Cedar policies from DynamoDB and evaluates them before tool exe
 | `describe_schema` | `viewNamespace` | data-analyst, data-steward, namespace-owner |
 | `query` | `query` | data-analyst, data-steward, namespace-owner |
 | `translate_sparql` | `query` | data-analyst, data-steward, namespace-owner |
+| `translate_sql` | `query` | data-analyst, data-steward, namespace-owner |
 | `rag_retrieval` | `searchDocuments` | data-analyst, data-steward, namespace-owner |
 | `graph_traversal` | `viewNamespace` | data-analyst, data-steward, namespace-owner |
 
