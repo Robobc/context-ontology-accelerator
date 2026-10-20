@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Execution tools — query, translate_sparql, rag_retrieval, graph_traversal.
+"""Execution tools — query, translate_sparql, translate_sql, rag_retrieval, graph_traversal.
 
 These tools delegate to the Context Manager via its AgentCore HTTP invocation
 endpoint. The MCP server is a thin protocol adapter: it handles MCP framing,
@@ -222,6 +222,61 @@ async def execute_translate_sparql(
         "trace": unwrapped.get("trace", []),
         "ontologyVersion": unwrapped.get("ontologyVersion"),
     }
+
+
+async def execute_translate_sql(
+    cm_client: ContextManagerClient,
+    query: str,
+    namespace_id: str,
+    profile: dict,
+    bearer_token: str,
+    *,
+    data_source_id: str | None = None,
+    target: str = "default",
+) -> dict[str, Any]:
+    """Translate NL to governed SQL WITHOUT executing it.
+
+    Delegates to the CM ``translateSql`` serve action and returns the CM
+    response fields verbatim: ``{sql, dialect, executionTarget, tablesTouched,
+    confidence, ontologyVersion, firewall, trace}`` plus ``nativeTranspile``
+    when the CM applied the native path (``target == "native"``).
+
+    ``options`` carries ONLY the keys the caller actually set: ``dataSourceId``
+    and ``target`` are omitted entirely when unset/default, so a plain caller's
+    request stays byte-identical and the CM applies its own defaults.
+    """
+    payload: dict[str, Any] = {
+        "action": "translateSql",
+        "query": query,
+        "namespace": namespace_id,
+        "profile": _build_cm_profile(profile),
+    }
+    options: dict[str, Any] = {}
+    if data_source_id is not None:
+        options["dataSourceId"] = data_source_id
+    if target != "default":
+        options["target"] = target
+    if options:
+        payload["options"] = options
+
+    response = await cm_client.invoke(payload, bearer_token)
+    _raise_for_cm_error(response)
+    unwrapped = _strip_envelope(response)
+
+    result: dict[str, Any] = {
+        "sql": unwrapped.get("sql", ""),
+        "dialect": unwrapped.get("dialect"),
+        "executionTarget": unwrapped.get("executionTarget"),
+        "tablesTouched": unwrapped.get("tablesTouched", []),
+        "confidence": unwrapped.get("confidence", {"score": 0.0, "rationale": ""}),
+        "ontologyVersion": unwrapped.get("ontologyVersion"),
+        "firewall": unwrapped.get("firewall"),
+        "trace": unwrapped.get("trace", []),
+    }
+    # Present only when the CM ran the native path (options.target == "native").
+    if "nativeTranspile" in unwrapped:
+        result["nativeTranspile"] = unwrapped["nativeTranspile"]
+    return result
 
 
 async def execute_rag_retrieval(

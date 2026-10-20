@@ -380,13 +380,14 @@ class TestCedarEvaluation:
         assert profile.namespace == "sales"
 
     def test_tool_cedar_action_mapping_complete(self):
-        """All 6 MCP tools have a Cedar action mapping."""
+        """All 7 MCP tools have a Cedar action mapping."""
         expected_tools = {
             "list_metrics",
             "describe_schema",
             "query",
             "semantic_execution_plan",
             "translate_sparql",
+            "translate_sql",
             "rag_retrieval",
             "graph_traversal",
         }
