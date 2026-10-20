@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import structlog
@@ -228,6 +229,29 @@ def _user_supplied_literal_in_sql(sql: str, query: str) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class CompiledSQL:
+    """Firewall-approved, execution-ready SQL produced WITHOUT executing it.
+
+    The output of :meth:`NLtoSQLStrategy.compile`, which runs resolve()'s exact
+    prefix — dialect resolution, generation, firewall authorization, cross-source
+    preparation — and then STOPS instead of executing. ``sql`` is therefore the
+    same statement resolve() would have run (qualified when cross-source); the
+    caller runs it under its own identity, so this path never touches the
+    executor. ``table_sources`` is carried so a caller can re-derive routing for
+    native transpilation (see :mod:`.native_transpile`).
+    """
+
+    sql: str
+    dialect: str
+    confidence: float
+    data_source_id: str
+    table_sources: dict[str, str]
+    retrieved_tables: list[str] = field(default_factory=list)
+    expanded_tables: list[str] = field(default_factory=list)
+    trace_steps: list[dict] = field(default_factory=list)
+
+
 class NLtoSQLStrategy:
     """StructuredQueryStrategy implementation for direct NL-to-SQL generation."""
 
@@ -339,88 +363,12 @@ class NLtoSQLStrategy:
         trace = context.trace
         profile = context.profile
         options = context.options
-        embedding = context.embedding
-
-        t_start = time.perf_counter()
-        index_name = (
-            ontology_vector_index_name(self._oss_ontology_index, namespace) if self._oss_ontology_index else None
-        )
-
-        # Resolve the target SQL dialect from the namespace's sources so the LLM
-        # generates SQL in the correct dialect for the target engine. This avoids
-        # generating Trino SQL for a PostgreSQL-only source, which would fail or
-        # produce incorrect results after transpilation.
-        dialect = "athena"
-        data_source_id = options.get("dataSourceId", "")
-        if self._query_executor and hasattr(self._query_executor, "resolve_target_dialect"):
-            try:
-                dialect = await self._query_executor.resolve_target_dialect(namespace, data_source_id)
-            except Exception as e:
-                logger.warning("dialect_resolution_failed", error=str(e), fallback="athena")
-
         evidence = options.get("evidence", "")[:500]
-        # Request-scoped: the tool caches this namespace's FK edges and named graphs
-        # for the life of the object, and that cache must not outlive a request (a
-        # namespace can be re-ingested between two of them). No catalog is passed —
-        # there is no agent here, so seeds are the retrieved classes' IRIs rather
-        # than a table name needing resolution.
-        graph_expander = (
-            OntologyGraphTool(self._graph_client, namespace=namespace)
-            if (_graph_expand_enabled(options) and self._graph_client is not None)
-            else None
-        )
-        nl_to_sql_result = await self._sql_generator.generate(
-            query,
-            namespace=namespace,
-            index=index_name,
-            evidence=evidence,
-            embedding=embedding,
-            model_id=context.model_id,
-            dialect=dialect,
-            graph_expander=graph_expander,
-            # Forward the declined governed definition — but only when it is safe to
-            # (a real formula, and a source that does not contradict the one resolved
-            # here). ``data_source_id`` at this point is the request pin (empty when
-            # unpinned, so pre-retrieval we forward best-effort). Empty on every
-            # non-declining path, keeping the prompt byte-identical to the baseline.
-            governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
-        )
 
-        t_ms = int((time.perf_counter() - t_start) * 1000)
-
-        if nl_to_sql_result.error or not nl_to_sql_result.sql:
-            # Consolidate all sub-steps into a single t2.sql.generate step (E10).
-            # A retrieval-backend failure (e.g. the vector proxy/index being
-            # unavailable) means this strategy could not even start — that's a
-            # graceful SKIP with fallthrough to the next strategy (VKG/Ontop),
-            # not an error. Reserve "error" for a genuine generation failure so
-            # the trace doesn't show a red step on every query when only the
-            # optional NL→SQL retrieval path is degraded.
-            err = nl_to_sql_result.error or "empty_sql"
-            skipped = isinstance(err, str) and err.startswith("retrieve_failed")
-            trace.record(
-                StepId.T2_SQL_GENERATE,
-                "skipped" if skipped else "error",
-                t_ms,
-                detail=err,
-                tool_used="bedrock",
-            )
-            logger.warning("nl_to_sql_failed", error=nl_to_sql_result.error, duration_ms=t_ms)
+        generated = await self._generate_and_authorize(query, namespace, context)
+        if generated is None:
             return None
-
-        # Consolidate sub-steps into single t2.sql.generate/success step (E10)
-        confidence = nl_to_sql_result.confidence
-        # The trace reaches the caller (SSE and the response), so list only the
-        # tables the grant lets them see: retrieval and the FK walk can surface
-        # tables outside ``tableAllowlist`` that the SQL never touches.
-        tables = tables_visible_to(nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables, profile)
-        trace.record(
-            StepId.T2_SQL_GENERATE,
-            "success",
-            t_ms,
-            detail={"confidence": confidence, "tables": tables},
-            tool_used="bedrock",
-        )
+        _dialect, nl_to_sql_result = generated
 
         if not self._query_executor:
             # Firewall-check the SQL so an unsafe/denied first shot is still
@@ -670,6 +618,165 @@ class NLtoSQLStrategy:
         # or a verified/exhausted empty — returns inside the loop). Return any
         # clean empty result we saw; otherwise None so the next strategy can try.
         return empty_fallback
+
+    async def _generate_and_authorize(
+        self, query: str, namespace: str, context: StrategyContext
+    ) -> tuple[str, NLtoSQLResult] | None:
+        """resolve()'s pre-execution prefix: resolve dialect, generate, trace.
+
+        Shared by :meth:`resolve` and :meth:`compile` so the two cannot drift on
+        how they resolve the dialect, build the generation prompt, or record the
+        ``t2.sql.generate`` step. Returns ``(dialect, nl_to_sql_result)`` on a
+        successful generation, or ``None`` in exactly the cases resolve() used to
+        return None here: a retrieval/generation failure (recorded "skipped" for a
+        retrieval-backend failure, "error" for a genuine generation failure) or an
+        empty statement. The firewall and cross-source preparation run in the
+        caller, because resolve() re-runs them per correction shot.
+        """
+        trace = context.trace
+        profile = context.profile
+        options = context.options
+        embedding = context.embedding
+
+        t_start = time.perf_counter()
+        index_name = (
+            ontology_vector_index_name(self._oss_ontology_index, namespace) if self._oss_ontology_index else None
+        )
+
+        # Resolve the target SQL dialect from the namespace's sources so the LLM
+        # generates SQL in the correct dialect for the target engine. This avoids
+        # generating Trino SQL for a PostgreSQL-only source, which would fail or
+        # produce incorrect results after transpilation.
+        dialect = "athena"
+        data_source_id = options.get("dataSourceId", "")
+        if self._query_executor and hasattr(self._query_executor, "resolve_target_dialect"):
+            try:
+                dialect = await self._query_executor.resolve_target_dialect(namespace, data_source_id)
+            except Exception as e:
+                logger.warning("dialect_resolution_failed", error=str(e), fallback="athena")
+
+        evidence = options.get("evidence", "")[:500]
+        # Request-scoped: the tool caches this namespace's FK edges and named graphs
+        # for the life of the object, and that cache must not outlive a request (a
+        # namespace can be re-ingested between two of them). No catalog is passed —
+        # there is no agent here, so seeds are the retrieved classes' IRIs rather
+        # than a table name needing resolution.
+        graph_expander = (
+            OntologyGraphTool(self._graph_client, namespace=namespace)
+            if (_graph_expand_enabled(options) and self._graph_client is not None)
+            else None
+        )
+        nl_to_sql_result = await self._sql_generator.generate(
+            query,
+            namespace=namespace,
+            index=index_name,
+            evidence=evidence,
+            embedding=embedding,
+            model_id=context.model_id,
+            dialect=dialect,
+            graph_expander=graph_expander,
+            # Forward the declined governed definition — but only when it is safe to
+            # (a real formula, and a source that does not contradict the one resolved
+            # here). ``data_source_id`` at this point is the request pin (empty when
+            # unpinned, so pre-retrieval we forward best-effort). Empty on every
+            # non-declining path, keeping the prompt byte-identical to the baseline.
+            governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
+        )
+
+        t_ms = int((time.perf_counter() - t_start) * 1000)
+
+        if nl_to_sql_result.error or not nl_to_sql_result.sql:
+            # Consolidate all sub-steps into a single t2.sql.generate step (E10).
+            # A retrieval-backend failure (e.g. the vector proxy/index being
+            # unavailable) means this strategy could not even start — that's a
+            # graceful SKIP with fallthrough to the next strategy (VKG/Ontop),
+            # not an error. Reserve "error" for a genuine generation failure so
+            # the trace doesn't show a red step on every query when only the
+            # optional NL→SQL retrieval path is degraded.
+            err = nl_to_sql_result.error or "empty_sql"
+            skipped = isinstance(err, str) and err.startswith("retrieve_failed")
+            trace.record(
+                StepId.T2_SQL_GENERATE,
+                "skipped" if skipped else "error",
+                t_ms,
+                detail=err,
+                tool_used="bedrock",
+            )
+            logger.warning("nl_to_sql_failed", error=nl_to_sql_result.error, duration_ms=t_ms)
+            return None
+
+        # Consolidate sub-steps into single t2.sql.generate/success step (E10)
+        confidence = nl_to_sql_result.confidence
+        # The trace reaches the caller (SSE and the response), so list only the
+        # tables the grant lets them see: retrieval and the FK walk can surface
+        # tables outside ``tableAllowlist`` that the SQL never touches.
+        tables = tables_visible_to(nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables, profile)
+        trace.record(
+            StepId.T2_SQL_GENERATE,
+            "success",
+            t_ms,
+            detail={"confidence": confidence, "tables": tables},
+            tool_used="bedrock",
+        )
+        return dialect, nl_to_sql_result
+
+    async def compile(self, query: str, namespace: str, context: StrategyContext) -> CompiledSQL | None:
+        """resolve() without execution: generate, authorize, prepare, STOP.
+
+        An EXACT prefix of :meth:`resolve` — it shares the generation/trace prefix
+        (:meth:`_generate_and_authorize`), the firewall gate (:meth:`_firewall_check`),
+        and the cross-source preparation (:meth:`_prepare_sql`) — but returns the
+        prepared statement instead of running it. Used by the ``translateSql``
+        serve action so a caller can execute COA's governed SQL under its own
+        identity.
+
+        Returns ``None`` in exactly the cases resolve() returns None before
+        execution — a generation failure/skip or structurally unsafe SQL — and
+        raises the same terminal errors: :class:`AccessDeniedError` on a policy
+        deny, :class:`AmbiguousReferenceError` on an unattributable reference. It
+        does NOT require an executor for execution, but still uses it for
+        ``resolve_target_dialect`` when present (via the shared prefix). Records
+        the same trace steps resolve() does up to this point, plus a
+        ``T2_SQL_EXECUTE`` "skipped" step with detail ``"translate_only"`` so the
+        trace shows generation was authorized but deliberately not executed.
+        """
+        trace = context.trace
+        profile = context.profile
+
+        generated = await self._generate_and_authorize(query, namespace, context)
+        if generated is None:
+            return None
+        dialect, nl_to_sql_result = generated
+
+        # Firewall: unsafe → None (abandon, same as resolve's first shot); denied
+        # → AccessDeniedError (raised inside _firewall_check).
+        fw_result = self._firewall_check(nl_to_sql_result.sql, profile, namespace, trace)
+        if fw_result is None:
+            return None
+
+        # Cross-source qualification, exactly as resolve() does post-authorization:
+        # a single-source statement is returned untouched; an unattributable or
+        # ambiguous reference raises AmbiguousReferenceError (never executes bare).
+        prepared = await self._prepare_sql(fw_result.authorized_sql, nl_to_sql_result, namespace)
+        if prepared.error:
+            trace.record(StepId.T2_SQL_EXECUTE, "error", 0, detail=prepared.error)
+            logger.warning("nl_to_sql_ambiguous_reference", namespace=namespace, error=prepared.error)
+            raise AmbiguousReferenceError(prepared.error)
+
+        # Generation was authorized and prepared, but deliberately not executed —
+        # record the skip so the trace reflects the translate-only contract.
+        trace.record(StepId.T2_SQL_EXECUTE, "skipped", 0, detail="translate_only")
+
+        return CompiledSQL(
+            sql=prepared.sql,
+            dialect=dialect,
+            confidence=nl_to_sql_result.confidence,
+            data_source_id=nl_to_sql_result.data_source_id or context.options.get("dataSourceId", ""),
+            table_sources=nl_to_sql_result.table_sources,
+            retrieved_tables=nl_to_sql_result.retrieved_tables,
+            expanded_tables=nl_to_sql_result.expanded_tables,
+            trace_steps=nl_to_sql_result.trace_steps,
+        )
 
     async def _prepare_sql(self, sql: str, nl_result: NLtoSQLResult, namespace: str) -> PreparedSQL:
         """Make ``sql`` executable, qualifying to ``catalog.schema.table`` if cross-source.
