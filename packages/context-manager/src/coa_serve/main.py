@@ -39,7 +39,7 @@ from .exceptions import (
     ServeError,
 )
 from .guardrail_config import GuardrailConfigProvider, build_guardrail_config_provider
-from .identity import extract_jwt_identity, resolve_principal, resolve_user_id
+from .identity import display_principal, extract_jwt_identity, resolve_principal, resolve_user_id
 from .models import InvokeRequest, TraceStep
 from .namespace_language import bind_label_preference
 from .orchestrator import Orchestrator
@@ -57,15 +57,17 @@ from .sse_emitter import SSEEmitter
 from .step_ids import StepId
 from .tier1.metric_resolver import MetricResolver
 from .tier2.nl_to_sql.agentic_strategy import AgenticStrategy
-from .tier2.nl_to_sql.sql_generator import SQLGenerator
+from .tier2.nl_to_sql.native_transpile import to_native
+from .tier2.nl_to_sql.sql_generator import SQLGenerator, sql_table_routing
 from .tier2.nl_to_sql.strategy import NLtoSQLStrategy
 from .tier2.ontop.nl_to_sparql import NLtoSPARQL
 from .tier2.ontop.sparql_example_loader import FewShotExampleLoader
 from .tier2.ontop.strategy import OntopStrategy
 from .tier2.ontop.vkg_translator import VKGTranslator
 from .tier2.skip.aoss_provenance import AossProvenanceEvaluator
-from .tier2.sql_firewall import SQLFirewall
-from .tier2.strategy import StructuredQueryTier
+from .tier2.sql_firewall import SQLFirewall, tables_visible_to
+from .tier2.strategy import StrategyContext, StructuredQueryTier
+from .tier2.table_qualifier import distinct_datasources
 from .tier3.graph_traverser import GraphTraverser
 from .tier3.knowledge_retriever import KnowledgeRetriever
 from .tier3.synthesizer import Synthesizer
@@ -88,6 +90,7 @@ _session_manager: SessionManager | None = None
 _session_metadata: SessionMetadataStore | None = None
 _sources_registry: SourcesRegistry | None = None
 _nl_to_sparql: NLtoSPARQL | None = None
+_nl_to_sql_strategy: NLtoSQLStrategy | None = None
 _init_lock = asyncio.Lock()
 
 # Hard upper bound on the per-request transport budget: max(10, min(env, 300)).
@@ -128,7 +131,7 @@ _NAMESPACE_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 async def _ensure_initialized():
     """Initialize config and orchestrator on first request."""
     global _config, _guardrail_provider, _orchestrator, _session_manager
-    global _session_metadata, _sources_registry, _nl_to_sparql
+    global _session_metadata, _sources_registry, _nl_to_sparql, _nl_to_sql_strategy
     if _orchestrator is not None:
         return
     async with _init_lock:
@@ -346,6 +349,10 @@ async def _ensure_initialized():
             graph_client=neptune_client,
             sources_registry=sources_registry,
         )
+        # Keep a module-level handle to the startup NLtoSQLStrategy so the
+        # translateSql serve action can compile governed SQL without executing it,
+        # reusing the same generator/firewall/registry wiring the query path uses.
+        _nl_to_sql_strategy = nl_to_sql_strategy
         # Bounded tool-use agent (iterative schema discovery → generate → execute →
         # self-correct). OPT-IN only: it runs solely when a request pins
         # options.strategy="deep-reasoning" — never as a fallback (see
@@ -565,6 +572,185 @@ async def _handle_translate(payload: dict, request_id: str) -> dict:
         "requestId": request_id,
         "statusCode": 200,
     }
+
+
+# Direct-JDBC sqlglot dialects COA generates natively — the executionTarget for
+# one of these is a direct database connection, not Athena federation. Mirrors
+# db_adapters' per-engine ``sqlglot_dialect`` values; the ``engine`` name returned
+# to the caller is read from the source's own ``configuration.engine``.
+_DIRECT_JDBC_DIALECTS: frozenset[str] = frozenset({"postgres", "redshift", "mysql", "tsql"})
+
+
+async def _handle_translate_sql(payload: dict, request_id: str, resolved_profile: ResolvedProfile | None) -> dict:
+    """Return COA's governed SQL for a question WITHOUT executing it (translateSql).
+
+    Compiles the NL→SQL statement through the SAME generate→firewall→prepare
+    prefix the ``query`` path runs (``NLtoSQLStrategy.compile``), then derives the
+    execution target the caller should run it on under its own identity. Never
+    executes, and never returns SQL that did not pass the firewall.
+    """
+    namespace = payload.get("namespace", "")
+    options = payload.get("options", {}) or {}
+    try:
+        query = validate_query_text(payload.get("query"))
+    except ValueError:
+        return _error(400, "invalid query", request_id)
+    if not namespace:
+        return _error(400, "namespace required", request_id)
+    if _nl_to_sql_strategy is None:
+        raise DataSourceUnavailableError("SQL translation is not configured")
+
+    # Build the profile the firewall/Cedar gate read, from the admission-gate
+    # resolution (authoritative principal + grants). Empty when no namespace was
+    # resolved — the caller cannot reach here without a namespace, so this is the
+    # resolved profile in practice.
+    profile: dict[str, Any] = {}
+    if resolved_profile is not None:
+        resolved_profile.inject_into(profile)
+
+    # Same embedding path the orchestrator uses for Tier 2: embed via the shared
+    # Bedrock client when available, else None (the generator embeds internally).
+    embedding = None
+    bedrock_client = getattr(_orchestrator, "_bedrock_client", None)
+    if bedrock_client is not None:
+        try:
+            embedding = await bedrock_client.embed(query)
+        except Exception as e:
+            logger.warning("translate_sql_embed_failed", error=type(e).__name__, request_id=request_id)
+
+    trace = TraceCollector()
+    context = StrategyContext(
+        embedding=embedding,
+        profile=profile,
+        options=options,
+        trace=trace,
+        model_id=options.get("modelId"),
+    )
+
+    try:
+        compiled = await asyncio.wait_for(
+            _nl_to_sql_strategy.compile(query, namespace, context),
+            timeout=RESOLVE_TIMEOUT_S,
+        )
+    except TimeoutError as e:
+        raise QueryTranslationError("SQL translation timed out") from e
+    # AccessDeniedError (403) and AmbiguousReferenceError (400) are terminal
+    # ServeError subclasses — let them propagate to the entrypoint's handler.
+
+    if compiled is None:
+        raise QueryTranslationError("Could not generate SQL for this query")
+
+    routing = sql_table_routing(compiled.sql, compiled.table_sources)
+
+    # Source ids the statement touches: the routed datasources, plus the compiled
+    # source when routing named none (the common single-source, retrieval-pinned
+    # case, whose bare SQL carries no cross-source routing entries).
+    source_ids = set(distinct_datasources(routing))
+    if compiled.data_source_id:
+        source_ids.add(compiled.data_source_id)
+
+    sql = compiled.sql
+    dialect = compiled.dialect
+    principal_id = display_principal(profile) or "unknown"
+
+    native_transpile: dict[str, Any] | None = None
+    catalog: str | None = None
+    workgroup: str | None = None
+
+    if dialect in _DIRECT_JDBC_DIALECTS:
+        kind = "DIRECT_JDBC"
+        engine = await _resolve_direct_jdbc_engine(namespace, compiled.data_source_id)
+    else:
+        kind = "ATHENA"
+        engine = "ATHENA"
+        workgroup = (await _sources_registry.resolve_workgroup(namespace)) or None if _sources_registry else None
+
+    if options.get("target") == "native":
+        sources: dict[str, dict] = {}
+        if _sources_registry is not None:
+            for ds_id in sorted(source_ids):
+                record = await _sources_registry.get_source(namespace, ds_id)
+                if record:
+                    # to_native reads configuration as a dict; parse the JSON blob.
+                    record = {**record, "configuration": _sources_registry.parse_configuration(record)}
+                    sources[ds_id] = record
+        result = to_native(sql, dialect=dialect, routing=routing, sources=sources)
+        native_transpile = {"applied": result.applied, "reason": result.reason}
+        if result.applied:
+            sql = result.sql
+            dialect = result.dialect
+            catalog = result.catalog
+            kind = "NATIVE"
+            engine = _native_engine_for(sources, source_ids)
+        elif result.is_direct_jdbc:
+            # Already the source engine's own dialect — report it as directly
+            # addressable rather than Athena federation.
+            kind = "DIRECT_JDBC"
+
+    tables_touched = tables_visible_to(SQLFirewall.extract_tables(sql), profile)
+
+    if compiled.trace_steps:
+        trace.add_dicts(compiled.trace_steps)
+
+    execution_target: dict[str, Any] = {
+        "kind": kind,
+        "engine": engine,
+        "sourceIds": sorted(source_ids),
+        "catalog": catalog,
+        "workgroup": workgroup,
+    }
+
+    response: dict[str, Any] = {
+        "sql": sql,
+        "dialect": dialect,
+        "executionTarget": execution_target,
+        "tablesTouched": tables_touched,
+        "confidence": {"score": compiled.confidence, "rationale": ""},
+        # Null BY DESIGN, same reasoning as _handle_translate (#986): translation
+        # never names the ontology snapshot it ran against.
+        "ontologyVersion": None,
+        "firewall": {"allowed": True, "principal": principal_id},
+        "trace": trace.steps_serializable,
+        "requestId": request_id,
+        "statusCode": 200,
+    }
+    if native_transpile is not None:
+        response["nativeTranspile"] = native_transpile
+    return response
+
+
+async def _resolve_direct_jdbc_engine(namespace: str, data_source_id: str) -> str:
+    """Engine name for a direct-JDBC executionTarget (``configuration.engine``).
+
+    Reads the source's configured engine (POSTGRESQL / REDSHIFT / MYSQL /
+    SQLSERVER). Falls back to ``"DIRECT_JDBC"`` when the source or engine cannot be
+    resolved, so the kind is still honest even if the specific engine is unknown.
+    """
+    if not data_source_id or _sources_registry is None:
+        return "DIRECT_JDBC"
+    try:
+        source = await _sources_registry.get_source(namespace, data_source_id)
+    except Exception as e:
+        logger.warning("translate_sql_engine_lookup_failed", error=type(e).__name__)
+        return "DIRECT_JDBC"
+    if not source:
+        return "DIRECT_JDBC"
+    engine = str(_sources_registry.parse_configuration(source).get("engine", "")).upper()
+    return engine or "DIRECT_JDBC"
+
+
+def _native_engine_for(sources: dict[str, dict], source_ids: set[str]) -> str:
+    """Engine name for a NATIVE executionTarget — the source's own sub-type.
+
+    A native transpile applies only to a single federated source, so the engine is
+    that source's ``sourceSubType`` (e.g. ``DATABRICKS_SQL_WAREHOUSE``). Falls back
+    to ``"NATIVE"`` when the record is unavailable.
+    """
+    for ds_id in sorted(source_ids):
+        record = sources.get(ds_id)
+        if record and record.get("sourceSubType"):
+            return str(record["sourceSubType"])
+    return "NATIVE"
 
 
 async def _handle_kb_search(payload: dict, request_id: str) -> dict:
@@ -1225,6 +1411,9 @@ async def invoke(payload: dict, context=None):
             return
         if action == "translate":
             yield await _handle_translate(payload, request_id)
+            return
+        if action == "translateSql":
+            yield await _handle_translate_sql(payload, request_id, resolved_profile)
             return
         if action == "kbSearch":
             yield await _handle_kb_search(payload, request_id)
