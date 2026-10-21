@@ -100,39 +100,52 @@ This repository is published as a read-only mirror. We are not accepting pull re
 
 ## What this fork changes
 
-This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/context-ontology-accelerator) `main` (last sync `052b5a2`) and adds one feature plus a short list of fixes found while running the accelerator against a 35-table Databricks catalog on Amazon Nova models. Upstream does not accept pull requests, so each fix is a separate, revertable commit that will be dropped on rebase once upstream ships its own; every one is also filed as an upstream issue. Deploy from a tag, not from the branch tip.
+This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/context-ontology-accelerator) and adds two features plus a short list of fixes found while running the accelerator against a 35-table Databricks catalog on Amazon Nova models. Upstream does not accept pull requests, so each change is a separate, revertable commit filed as an upstream issue and dropped on the next rebase once upstream ships its own.
 
-**Feature:** semantic control plane integrations (`397a0f9`, `be876ae`) — typed `SemanticExecutionPlan` contract for outer agents, structured query mappings preserved through acceptance.
+**Branch model** (one release branch per upstream tag; `main` is an unmodified mirror of upstream):
 
-**Feature:** `translate_sql` — governed SQL without execution (`1103c9e` serve, `be3e332` MCP). An agent calls the MCP tool `translate_sql(query, namespaceId, dataSourceId?, target)` and receives the statement COA would have run — ontology-grounded, firewall-checked (read-only, namespace-scoped, per-principal table allowlist / column denylist, Cedar) — together with `dialect`, `executionTarget`, `tablesTouched`, `confidence`, the firewall decision and the trace. COA never executes it; the agent runs it on the source under the end user's own identity, so the source's row-level controls apply to that user. `target: native` rewrites a single-source Athena-federated statement into the engine's own dialect and three-part name (Databricks today) and fails closed otherwise (`cross_source`, `engine_not_transpilable`). `compile()` is the exact pre-execution prefix of the `query` path (shared helper), so the two cannot drift; `query` is unchanged and remains available. Not carried over from `query`: the execution-error correction shot (a `correct_sql` tool is the planned follow-up).
-
-**Fixes (behaviour-neutral for Claude deployments):**
-
-| Commit | Change | Why |
+| Branch | Upstream base | Status |
 |---|---|---|
-| `bd32f01` | `coa_common.bedrock` clamps `maxTokens` to the model's measured ceiling (Nova: 10000) | Nova rejects over-limit requests with `ValidationException`; cross-source relationship inference failed on every scan |
-| `74ee8f5` | Single-table enrichment budget 4096 → 8192 | Nova Lite overflowed on a 73-column table; written back unenriched |
-| `733b260` | Deployment docs: building with Finch | `CDK_DOCKER=finch`, ECR Public login, VM disk pruning |
-| `9872907` | `.gitignore` Maven `target/` under `connectors/` | build output |
-| `125bc44` | VKG: alias dotted column names before handing the R2RML to Ontop (`packages/vkg/r2rml-ontop-compat.py`) | Ontop 5.x rejects `rr:column` / template / join columns whose name contains a dot even as delimited identifiers (`Fully qualified columns as "..." are not accepted`), so a mapping with one such column left the namespace's VKG permanently DEGRADED. Real ERP exports have such columns. The published mapping is untouched; only Ontop sees the rewritten copy |
-| `c69016d` | `StartInduction` gains `force` (skip the structural-duplicate short-circuit); the Ontology page's "already inducted" alert offers *Induce anyway* | The duplicate check fingerprints table names, column types and FKs only, so steward edits to source metadata never change it: once a proposal was accepted it could not be superseded without a schema change (re-induce returned `duplicate_of`, `UpdateProposal`/`RejectProposals` refuse accepted proposals). Default unchanged |
+| `release/v0.3.6-eba` | `v0.3.6` (`00fed8d`) | current; patch series rebased, all suites green |
+| `release/v0.3.5-eba` | `v0.3.5` (`052b5a2`) | frozen except hotfixes; `feature/semantic-control-plane-v035` is an alias of its handover tag |
 
-**Operator knobs (upstream default unchanged; set per deployment with `-c key=value`):**
+Deploy from a tag, never from a branch tip. Each upstream release is a rebase of the patch series onto the new tag (`scripts/fork-drift-report.sh` measures the distance; `scripts/identifier-scan.sh` guards the series). Patches are listed by commit subject because hashes change on every rebase; `git log <upstream-tag>..release/<x>` lists the series in order.
+
+**Features**
+
+- *Semantic control plane integrations* (nine commits: Entra OIDC with app roles; integration profiles and model-text helpers; Portkey generation and managed-KB retrieval adapters; integration profile on the namespace contract; semantic execution plan action and MCP tool; source-native outer agent; infra wiring; logical vs transport sessions; architecture docs): typed `SemanticExecutionPlan` contract for outer agents, per-namespace Accelerate / Adopt / Federate profiles, structured query mappings preserved through acceptance (*preserve structured query mappings*).
+- *`translate_sql`: governed SQL without execution* (`translateSql action returns governed SQL without executing it`; `translate_sql tool exposes governed SQL to agents`). An agent calls the MCP tool `translate_sql(query, namespaceId, dataSourceId?, target)` and receives the statement COA would have run — ontology-grounded, firewall-checked (read-only, namespace-scoped, per-principal table allowlist / column denylist, Cedar) — together with `dialect`, `executionTarget`, `tablesTouched`, `confidence`, the firewall decision and the trace. COA never executes it; the agent runs it on the source under the end user's own identity, so the source's row-level controls apply to that user. `target: native` rewrites a single-source Athena-federated statement into the engine's own dialect and three-part name (Databricks today) and fails closed otherwise (`cross_source`, `engine_not_transpilable`). `compile()` is the exact pre-execution prefix of the `query` path (shared helper), so the two cannot drift; `query` is unchanged. Not carried over from `query`: the execution-error correction shot (a `correct_sql` tool is the planned follow-up).
+
+**Fixes (behaviour-neutral for Claude deployments)**
+
+| Commit subject | Change | Why | Status |
+|---|---|---|---|
+| `fix(common): clamp maxTokens to the model's output ceiling` | `coa_common.bedrock` clamps `maxTokens` to the model's measured ceiling (Nova: 10000) | Nova rejects over-limit requests with `ValidationException`; cross-source relationship inference failed on every scan | carried |
+| `fix(sources): raise single-table enrichment budget to 8192 tokens` | 4096 → 8192 | Nova Lite overflowed on a 73-column table; written back unenriched | carried |
+| `docs(deploy): building with Finch instead of Docker` | `CDK_DOCKER=finch`, ECR Public login, VM disk pruning | | carried |
+| `chore: ignore Maven target/ output of the Java connectors` | `.gitignore` | build output | carried |
+| `fix(vkg): alias dotted column names so Ontop loads the mapping` | `packages/vkg/r2rml-ontop-compat.py` rewrites the R2RML Ontop sees | Ontop 5.x rejects `rr:column` / template / join columns whose name contains a dot even as delimited identifiers (`Fully qualified columns as "..." are not accepted`), so a mapping with one such column left the namespace's VKG permanently DEGRADED. Real ERP exports have such columns. The published mapping is untouched | carried |
+| `feat(induction): force flag to re-induce after metadata-only steward edits` | `StartInduction` gains `force` (skip the structural-duplicate short-circuit); the Ontology page's "already inducted" alert offers *Induce anyway* | The duplicate check fingerprints table names, column types and FKs only, so steward edits to source metadata never change it: once a proposal was accepted it could not be superseded without a schema change (`duplicate_of`; `UpdateProposal` / `RejectProposals` refuse accepted proposals). Default unchanged | carried |
+| preflight: resumed deployment reuses its own VPC when the quota is full | was part of the infra wiring commit | upstream `v0.3.6` ships `scripts/check-vpc-limit.sh` with the same check | **absorbed in v0.3.6**, dropped |
+| `chore(fork): drift report and identifier scan for the release process` | `scripts/fork-drift-report.sh`, `scripts/identifier-scan.sh` (+ allowlist) | maintenance tooling for the rebase runbook | fork-only |
+
+**Operator knobs (upstream default unchanged; set per deployment with `-c key=value`)**
 
 | CDK context | Default | Effect |
 |---|---|---|
-| `retrieval_guardrail_prompt_attack_input_strength` (`8a8d1ee`) | `MEDIUM` | PROMPT_ATTACK strength on the *retrieval* guardrail. Steward-authored column comments are instruction-shaped and get classified as attacks; `NONE` unblocks metadata enrichment at the cost of indirect-injection screening on Tier-3 documents |
-| `serve_nl2sql_exec_timeout_s` (`f6547d3`) | `35` | Per-statement SQL execution timeout on the AgentCore path (env `SERVE_NL2SQL_EXEC_TIMEOUT_S`, clamped 5..300). Federated Athena→Databricks statements cost 20-40 s in metadata rediscovery alone |
+| `retrieval_guardrail_prompt_attack_input_strength` (`feat(infra): retrieval guardrail PROMPT_ATTACK strength as a context knob`) | `MEDIUM` | PROMPT_ATTACK strength on the *retrieval* guardrail. Steward-authored column comments are instruction-shaped and get classified as attacks; `NONE` unblocks metadata enrichment at the cost of indirect-injection screening on Tier-3 documents |
+| `serve_nl2sql_exec_timeout_s` (`feat(serve): SERVE_NL2SQL_EXEC_TIMEOUT_S override for per-statement timeout`) | `35` | Per-statement SQL execution timeout on the AgentCore path (env `SERVE_NL2SQL_EXEC_TIMEOUT_S`, clamped 5..300). Federated Athena→Databricks statements cost 20-40 s in metadata rediscovery alone |
 
 Customer-specific material (schemas, golden question sets, onboarding kits, deployment values) is deliberately **not** in this fork.
 
-**Release tags (deploy from a tag):**
+**Release tags (deploy from a tag)**
 
 | Tag | Contents |
 |---|---|
-| `v0.3.5-eba.1` | upstream `052b5a2` + semantic control plane integrations + Nova fixes + operator knobs |
+| `v0.3.5-eba.1` | upstream `v0.3.5` + semantic control plane integrations + Nova fixes + operator knobs |
 | `v0.3.5-eba.2` | `v0.3.5-eba.1` + `translate_sql` (serve action + MCP tool + native transpile) |
-| `v0.3.5-eba.3` | `v0.3.5-eba.2` + VKG dotted-column fix (Ontop) + startup-log and fixture housekeeping. **Handover release.** |
+| `v0.3.5-eba.3` | `v0.3.5-eba.2` + VKG dotted-column fix (Ontop) + `force` re-induction + housekeeping. **Handover release.** |
+| `v0.3.6-eba.1` | the same series rebased onto upstream `v0.3.6` (namespace language, revisioned proposal uploads, ENI pre-warming, VPC-limit preflight, …); the big integrations commit split into nine topical commits; preflight VPC-reuse fix dropped as absorbed. Verified by the full suites; first deployment pending |
 
 ## External Dependencies
 
