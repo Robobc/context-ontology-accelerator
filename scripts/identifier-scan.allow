@@ -1,0 +1,20 @@
+# Allowlist for scripts/identifier-scan.sh: one extended regex per line.
+# A scan line matching any of these is dropped. Keep it to documented
+# placeholders; a real identifier never belongs here.
+#
+# AWS documentation placeholder account ids
+111122223333
+123456789012
+222233334444
+# Placeholder e-mail domains
+@[A-Za-z0-9.-]*example\.(com|org|net|co\.uk)
+@contoso\.com
+@co\.com
+# Placeholder GUIDs (RFC 4122 example, repeated digits, hex-alphabet samples)
+123e4567-e89b-42d3-a456-426614174000
+550e8400-e29b-41d4-a716-446655440000
+(00000000|11111111|22222222|aaaaaaaa|bbbbbbbb|cccccccc|a1b2c3d4)-
+# Entra app-role ids in infra/entra/app-roles.json: arbitrary, only unique within the app
+3065fd37-ad3a-411d-92b5-5c5ac6d1115a
+af1f11b9-f0b6-4d6a-ab69-027b04e54155
+8714d782-821e-4c63-ab80-9fb9b9eea94e
