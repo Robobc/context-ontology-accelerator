@@ -64,7 +64,7 @@ if [ -z "${ONTOLOGY_FILE}" ]; then
 fi
 
 # Detect mappings file by extension (supports .obda, .r2rml)
-MAPPINGS_FILE=$(find "${ARTIFACT_DIR}" -maxdepth 1 \( -name "*.obda" -o -name "*.r2rml" \) | head -1)
+MAPPINGS_FILE=$(find "${ARTIFACT_DIR}" -maxdepth 1 \( -name "*.obda" -o -name "*.r2rml" \) ! -name "*.ontop.r2rml" | head -1)
 if [ -z "${MAPPINGS_FILE}" ]; then
   echo "[VKG] WARN: No mappings file found — starting in degraded mode"
   exec python3 /app/translate-server.py --port "${ENDPOINT_PORT}" --ontop-port "${ONTOP_PORT}" --ontology-version "none"
@@ -72,6 +72,25 @@ fi
 
 echo "[VKG] Ontology: ${ONTOLOGY_FILE}"
 echo "[VKG] Mappings: ${MAPPINGS_FILE}"
+
+# Ontop rejects column names containing a dot even as delimited identifiers
+# ("Fully qualified columns as \"Owner.Level_1\" are not accepted"), which
+# leaves the whole mapping unloadable. Hand Ontop a copy in which such columns
+# are aliased through rr:sqlQuery views; translate-server keeps reading the
+# published mapping, whose rr:tableName entries drive datasource routing.
+# A rewrite failure falls back to the published mapping (today's behaviour).
+ONTOP_MAPPINGS_FILE="${MAPPINGS_FILE}"
+case "${MAPPINGS_FILE}" in
+  *.r2rml)
+    COMPAT_FILE="${ARTIFACT_DIR}/mappings.ontop.r2rml"
+    if COMPAT_REPORT=$(python3 /app/r2rml-ontop-compat.py "${MAPPINGS_FILE}" "${COMPAT_FILE}"); then
+      echo "[VKG] Ontop-compat mapping: ${COMPAT_REPORT}"
+      ONTOP_MAPPINGS_FILE="${COMPAT_FILE}"
+    else
+      echo "[VKG] WARN: Ontop-compat rewrite failed, using the published mapping as-is: ${COMPAT_REPORT}"
+    fi
+    ;;
+esac
 
 # Detect schema file by extension (optional - for Ontop metadata extraction)
 H2_DB_PATH="/app/ontology/vkgdb"
@@ -117,7 +136,7 @@ echo "[VKG] Ontop heap args (ONTOP_JAVA_ARGS): '${ONTOP_JAVA_ARGS}'"
 echo "[VKG] Starting Ontop on port ${ONTOP_PORT}..."
 /opt/ontop/ontop endpoint \
   --ontology="${ONTOLOGY_FILE}" \
-  --mapping="${MAPPINGS_FILE}" \
+  --mapping="${ONTOP_MAPPINGS_FILE}" \
   --properties="${ARTIFACT_DIR}/ontop.properties" \
   --port="${ONTOP_PORT}" \
   --lazy \
