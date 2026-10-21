@@ -29,6 +29,7 @@ if __name__ == "__main__":
             "query",
             "semantic_execution_plan",
             "translate_sparql",
+            "translate_sql",
             "rag_retrieval",
             "graph_traversal",
         ],
