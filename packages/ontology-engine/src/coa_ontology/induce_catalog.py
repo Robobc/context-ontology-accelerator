@@ -248,6 +248,13 @@ class WorkbenchInductionRequest(BaseModel):
         default=None,
         validation_alias=AliasChoices("graph_arn", "graphArn"),
     )
+    # Skip the structural-duplicate short-circuit. The fingerprint covers table
+    # names, column types and FKs only, so a steward edit to source metadata
+    # (descriptions, synonyms, glossary terms — which become rdfs:comment /
+    # skos:altLabel in the induced ontology) never changes it; without this flag
+    # an accepted proposal can never be superseded unless the schema changes.
+    # The new proposal is still a normal pending proposal to review and accept.
+    force: bool = Field(default=False, validation_alias=AliasChoices("force", "forceReinduction"))
 
     @field_validator("ontology_uri_prefix")
     @classmethod
@@ -826,8 +833,17 @@ def _run_induction(
 
             # Duplicate detection: check if an accepted proposal with identical
             # structure already exists. Compares table names + column names/types + FKs.
+            # ``force`` skips it: metadata-only changes (steward descriptions) are
+            # invisible to the fingerprint, and this is the only way to supersede
+            # an accepted proposal without a schema change.
             fingerprint = _compute_structural_fingerprint(all_tables)
-            existing_accepted = dynamo_store.list_proposals(namespace=ns, status="accepted")
+            existing_accepted = [] if body.force else dynamo_store.list_proposals(namespace=ns, status="accepted")
+            if body.force:
+                _log.info(
+                    "induction %s: force=true, skipping structural-duplicate check (fingerprint %s)",
+                    job_id,
+                    fingerprint,
+                )
             for existing in existing_accepted:
                 e_meta = existing.get("metadata") or {}
                 if e_meta.get("structural_fingerprint") == fingerprint:
@@ -1081,6 +1097,9 @@ def _run_induction(
                     # Diagnostic snapshot of the immutable namespace language this
                     # run used; the namespace remains the authority.
                     "namespaceLanguage": namespace_language,
+                    # Audit: a forced re-induction supersedes an accepted proposal with
+                    # the same fingerprint on purpose (steward metadata changed).
+                    "forced": bool(body.force),
                 },
             )
 

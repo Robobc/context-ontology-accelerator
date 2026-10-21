@@ -263,6 +263,15 @@ operation StartInduction {
         /// Omit it to use the deployment-configured lexical source.
         @deprecated(message: "Caller-selected lexical sources are not supported; omit this field.", since: "2026-10-01")
         graphArn: String
+
+        /// Skip the structural-duplicate short-circuit and always produce a new
+        /// proposal. The duplicate check fingerprints table names, column types
+        /// and foreign keys only, so steward edits to source metadata
+        /// (descriptions, synonyms, glossary terms) never change it and an
+        /// accepted proposal could otherwise not be superseded without a schema
+        /// change. The new proposal is a normal pending proposal: review and
+        /// accept it as usual. Defaults to false.
+        force: Boolean
     }
 
     output := {
