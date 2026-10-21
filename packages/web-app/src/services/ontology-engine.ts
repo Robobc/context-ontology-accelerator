@@ -211,6 +211,8 @@ export interface TriggerInductionInput {
   strategy?: string;
   grounding_mode?: string;
   graph_arn?: string;
+  /** Skip the structural-duplicate short-circuit (metadata-only re-induction). */
+  force?: boolean;
 }
 
 export async function triggerInduction(
