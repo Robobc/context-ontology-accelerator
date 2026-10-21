@@ -108,6 +108,7 @@ This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/con
 | `733b260` | Deployment docs: building with Finch | `CDK_DOCKER=finch`, ECR Public login, VM disk pruning |
 | `9872907` | `.gitignore` Maven `target/` under `connectors/` | build output |
 | `125bc44` | VKG: alias dotted column names before handing the R2RML to Ontop (`packages/vkg/r2rml-ontop-compat.py`) | Ontop 5.x rejects `rr:column` / template / join columns whose name contains a dot even as delimited identifiers (`Fully qualified columns as "..." are not accepted`), so a mapping with one such column left the namespace's VKG permanently DEGRADED. Real ERP exports have such columns. The published mapping is untouched; only Ontop sees the rewritten copy |
+| `c69016d` | `StartInduction` gains `force` (skip the structural-duplicate short-circuit); the Ontology page's "already inducted" alert offers *Induce anyway* | The duplicate check fingerprints table names, column types and FKs only, so steward edits to source metadata never change it: once a proposal was accepted it could not be superseded without a schema change (re-induce returned `duplicate_of`, `UpdateProposal`/`RejectProposals` refuse accepted proposals). Default unchanged |
 
 **Operator knobs (upstream default unchanged; set per deployment with `-c key=value`):**
 
