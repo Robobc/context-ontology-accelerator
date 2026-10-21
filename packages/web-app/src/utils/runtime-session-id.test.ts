@@ -21,7 +21,7 @@ describe("deriveRuntimeSessionId", () => {
   });
 
   it("does not expose the OIDC subject in the transport header", () => {
-    const sub = "catalanoroberto@example.com";
+    const sub = "jane.doe@example.com";
     const result = deriveRuntimeSessionId(
       sub,
       "11111111-1111-4111-8111-111111111111",
