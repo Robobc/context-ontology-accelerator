@@ -104,6 +104,8 @@ This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/con
 
 **Feature:** semantic control plane integrations (`397a0f9`, `be876ae`) — typed `SemanticExecutionPlan` contract for outer agents, structured query mappings preserved through acceptance.
 
+**Feature:** `translate_sql` — governed SQL without execution (`1103c9e` serve, `be3e332` MCP). An agent calls the MCP tool `translate_sql(query, namespaceId, dataSourceId?, target)` and receives the statement COA would have run — ontology-grounded, firewall-checked (read-only, namespace-scoped, per-principal table allowlist / column denylist, Cedar) — together with `dialect`, `executionTarget`, `tablesTouched`, `confidence`, the firewall decision and the trace. COA never executes it; the agent runs it on the source under the end user's own identity, so the source's row-level controls apply to that user. `target: native` rewrites a single-source Athena-federated statement into the engine's own dialect and three-part name (Databricks today) and fails closed otherwise (`cross_source`, `engine_not_transpilable`). `compile()` is the exact pre-execution prefix of the `query` path (shared helper), so the two cannot drift; `query` is unchanged and remains available. Not carried over from `query`: the execution-error correction shot (a `correct_sql` tool is the planned follow-up).
+
 **Fixes (behaviour-neutral for Claude deployments):**
 
 | Commit | Change | Why |
@@ -112,6 +114,7 @@ This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/con
 | `74ee8f5` | Single-table enrichment budget 4096 → 8192 | Nova Lite overflowed on a 73-column table; written back unenriched |
 | `733b260` | Deployment docs: building with Finch | `CDK_DOCKER=finch`, ECR Public login, VM disk pruning |
 | `9872907` | `.gitignore` Maven `target/` under `connectors/` | build output |
+| `125bc44` | VKG: alias dotted column names before handing the R2RML to Ontop (`packages/vkg/r2rml-ontop-compat.py`) | Ontop 5.x rejects `rr:column` / template / join columns whose name contains a dot even as delimited identifiers (`Fully qualified columns as "..." are not accepted`), so a mapping with one such column left the namespace's VKG permanently DEGRADED. Real ERP exports have such columns. The published mapping is untouched; only Ontop sees the rewritten copy |
 
 **Operator knobs (upstream default unchanged; set per deployment with `-c key=value`):**
 
@@ -121,6 +124,14 @@ This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/con
 | `serve_nl2sql_exec_timeout_s` (`f6547d3`) | `35` | Per-statement SQL execution timeout on the AgentCore path (env `SERVE_NL2SQL_EXEC_TIMEOUT_S`, clamped 5..300). Federated Athena→Databricks statements cost 20-40 s in metadata rediscovery alone |
 
 Customer-specific material (schemas, golden question sets, onboarding kits, deployment values) is deliberately **not** in this fork.
+
+**Release tags (deploy from a tag):**
+
+| Tag | Contents |
+|---|---|
+| `v0.3.5-eba.1` | upstream `052b5a2` + semantic control plane integrations + Nova fixes + operator knobs |
+| `v0.3.5-eba.2` | `v0.3.5-eba.1` + `translate_sql` (serve action + MCP tool + native transpile) |
+| branch tip | `v0.3.5-eba.2` + VKG dotted-column fix + startup-log and fixture housekeeping; next tag once re-verified |
 
 ## External Dependencies
 
