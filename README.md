@@ -124,7 +124,7 @@ Customer-specific material (schemas, golden question sets, onboarding kits, depl
 |---|---|
 | `v0.3.5-eba.1` | upstream `052b5a2` + semantic control plane integrations + Nova fixes + operator knobs |
 | `v0.3.5-eba.2` | `v0.3.5-eba.1` + `translate_sql` (serve action + MCP tool + native transpile) |
-| branch tip | `v0.3.5-eba.2` + VKG dotted-column fix + startup-log and fixture housekeeping; next tag once re-verified |
+| `v0.3.5-eba.3` | `v0.3.5-eba.2` + VKG dotted-column fix (Ontop) + startup-log and fixture housekeeping. **Handover release.** |
 
 ## External Dependencies
 
