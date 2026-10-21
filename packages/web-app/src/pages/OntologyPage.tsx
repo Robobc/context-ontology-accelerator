@@ -533,7 +533,9 @@ export function OntologyPage() {
     };
   }, [namespaceId, apiClient, lockRefreshKey, pollingJobStatus]);
 
-  async function startInduction() {
+  // `force` skips the server's structural-duplicate short-circuit so steward
+  // metadata edits (invisible to the fingerprint) can reach a new proposal.
+  async function startInduction(force = false) {
     if (!namespaceId) return;
     if (selectedDatasources.length === 0) return;
     setInducting(true);
@@ -562,6 +564,7 @@ export function OntologyPage() {
         grounding_mode: groundingMode,
         grounding_ontology_ids:
           groundingIds.length > 0 ? groundingIds : undefined,
+        force: force || undefined,
       });
       setActiveTab("proposals");
       setPollingJobId(job.job_id);
@@ -696,9 +699,18 @@ export function OntologyPage() {
           <SpaceBetween size="xs">
             <Box>
               {t(
-                "This selection has the same structure as an existing accepted proposal, so no new proposal was created. Open the existing proposal to review or edit it.",
+                "This selection has the same structure as an existing accepted proposal, so no new proposal was created. Open the existing proposal to review it, or induce anyway if source metadata (descriptions, synonyms, glossary terms) changed since it was accepted: structure-only duplicate detection cannot see those edits.",
               )}
             </Box>
+            <Button
+              onClick={() => {
+                setDuplicateProposalId(null);
+                void startInduction(true);
+              }}
+              disabled={inducting || inductionLocked}
+            >
+              {t("Induce anyway (new proposal from current metadata)")}
+            </Button>
             <Link
               onFollow={(e) => {
                 e.preventDefault();
@@ -736,7 +748,7 @@ export function OntologyPage() {
                 </Button>
                 <Button
                   variant="primary"
-                  onClick={startInduction}
+                  onClick={() => void startInduction()}
                   disabled={selectedDatasources.length === 0 || inductionLocked}
                   disabledReason={
                     inductionLocked

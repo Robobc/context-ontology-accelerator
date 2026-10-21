@@ -273,6 +273,15 @@ operation StartInduction {
         @pattern("^(?:neptune-db|g-[a-z0-9]+|arn:aws[a-z-]*:neptune-graph:[a-z0-9-]+:[0-9]{12}:graph/g-[a-z0-9]+)$")
         graphArn: String
 
+        /// Skip the structural-duplicate short-circuit and always produce a new
+        /// proposal. The duplicate check fingerprints table names, column types
+        /// and foreign keys only, so steward edits to source metadata
+        /// (descriptions, synonyms, glossary terms) never change it and an
+        /// accepted proposal could otherwise not be superseded without a schema
+        /// change. The new proposal is a normal pending proposal: review and
+        /// accept it as usual. Defaults to false.
+        force: Boolean
+
         /// Optional idempotency token. A retry with the same token and the same
         /// parameters within 24 hours returns the original result instead of creating
         /// a duplicate; reusing the token with different parameters is rejected with
