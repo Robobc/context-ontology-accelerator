@@ -7,7 +7,7 @@
 
 ## Overview
 
-Exposes Context Ontology Accelerator capabilities as 7 discoverable MCP tools for AI agents via Streamable HTTP
+Exposes Context Ontology Accelerator capabilities as 8 discoverable MCP tools for AI agents via Streamable HTTP
 on AgentCore Runtime (`--protocol MCP`, port 8000).
 
 **Architecture**: Thin protocol adapter on a separate AgentCore Runtime.
