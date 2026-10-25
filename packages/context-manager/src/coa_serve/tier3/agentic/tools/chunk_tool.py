@@ -103,7 +103,13 @@ class ChunkExpansionTool:
     The toolkit ``GraphStore`` is built lazily on first use and cached.
     """
 
-    def __init__(self, graph_store_uri: str, *, query_timeout_s: float = _GRAPH_QUERY_TIMEOUT_S) -> None:
+    def __init__(
+        self,
+        graph_store_uri: str,
+        *,
+        query_timeout_s: float = _GRAPH_QUERY_TIMEOUT_S,
+        entitlement_gate: Any | None = None,
+    ) -> None:
         """Build the tool over a graphrag-toolkit graph-store URI.
 
         Args:
@@ -112,6 +118,7 @@ class ChunkExpansionTool:
                 toolkit ``GraphStore`` is constructed from it lazily inside the
                 first invocation (Req 12.3).
             query_timeout_s: Wall-clock cap applied around each graph query.
+            entitlement_gate: Optional :class:`DocumentEntitlementGate` (fork).
         """
         self.name = TOOL_NAME
         self.description = _DESCRIPTION
@@ -120,6 +127,9 @@ class ChunkExpansionTool:
         self._graph_store_uri = graph_store_uri
         self._query_timeout_s = query_timeout_s
         self._store: Any = None
+        # Fork: drops adjacent chunks from documents the caller may not read
+        # (namespaces whose documents live in a per-user Bedrock KB). None = off.
+        self._entitlement_gate = entitlement_gate
 
     def _get_store(self) -> Any:
         """Build (once) and return the toolkit ``GraphStore``; lazy toolkit import."""
@@ -153,6 +163,7 @@ class ChunkExpansionTool:
         chunk_ids: list[str] | None = None,
         hops: int = DEFAULT_CHUNK_WINDOW_HOPS,
         limit: int = DEFAULT_CHUNK_WINDOW_LIMIT,
+        profile: dict | None = None,
         **_: Any,
     ) -> ToolResult:
         """Return the chunks adjacent to ``chunk_ids`` in the source document.
@@ -191,12 +202,21 @@ class ChunkExpansionTool:
                 continue
             chunks.append(ChunkResult(chunk_id=str(cid), text=text, source_doc="", relevance_score=1.0))
 
+        if self._entitlement_gate is not None and chunks:
+            try:
+                chunks = await self._entitlement_gate.filter_chunks(
+                    chunks, namespace, user_id=(profile or {}).get("email") or (profile or {}).get("userId")
+                )
+            except Exception as exc:  # fail closed: no text rather than everyone's text
+                logger.warning("chunk_tool_entitlement_failed", tool=self.name, error=type(exc).__name__)
+                return ToolResult(detail=f"{self.name}: document entitlement check failed; no chunks returned")
+
         items = tuple(_chunk_item(c) for c in chunks)
         detail = f"{self.name}: expanded {len(ids)} chunk(s) -> {len(chunks)} adjacent chunk(s) (hops={hops})"
         return ToolResult(chunks=tuple(chunks), items=items, detail=detail)
 
 
-def build_chunk_expansion_tool(registry: Any, graph_store_uri: str) -> str:
+def build_chunk_expansion_tool(registry: Any, graph_store_uri: str, *, entitlement_gate: Any | None = None) -> str:
     """Register the single :class:`ChunkExpansionTool` into ``registry``.
 
     Mirrors :func:`build_graph_tool`: a thin builder the factory calls when the
@@ -205,11 +225,12 @@ def build_chunk_expansion_tool(registry: Any, graph_store_uri: str) -> str:
     Args:
         registry: The :class:`ToolRegistry` to register the tool into.
         graph_store_uri: The graphrag-toolkit graph-store URI the tool queries.
+        entitlement_gate: Optional :class:`DocumentEntitlementGate` (fork).
 
     Returns:
         The registered Tool name (``"chunk_window"``).
     """
-    tool = ChunkExpansionTool(graph_store_uri)
+    tool = ChunkExpansionTool(graph_store_uri, entitlement_gate=entitlement_gate)
     registry.register(tool)
     logger.info("chunk_tool_registered", tool_name=tool.name)
     return tool.name

@@ -160,7 +160,13 @@ class GraphTraversalTool:
     use and cached for the tool's lifetime.
     """
 
-    def __init__(self, graph_store_uri: str, *, query_timeout_s: float = _GRAPH_QUERY_TIMEOUT_S) -> None:
+    def __init__(
+        self,
+        graph_store_uri: str,
+        *,
+        query_timeout_s: float = _GRAPH_QUERY_TIMEOUT_S,
+        entitlement_gate: Any | None = None,
+    ) -> None:
         """Build the Tool over a graphrag-toolkit graph-store URI.
 
         Args:
@@ -169,6 +175,7 @@ class GraphTraversalTool:
                 toolkit ``GraphStore`` is constructed from it lazily inside the
                 first invocation (Req 12.3).
             query_timeout_s: Wall-clock cap applied around each graph query.
+            entitlement_gate: Optional :class:`DocumentEntitlementGate` (fork).
         """
         self.name = TOOL_NAME
         self.description = _DESCRIPTION
@@ -177,6 +184,9 @@ class GraphTraversalTool:
         self._graph_store_uri = graph_store_uri
         self._query_timeout_s = query_timeout_s
         self._store: Any = None
+        # Fork: drops supporting-statement text from documents the caller may not
+        # read (per-user Bedrock KB namespaces). None = off.
+        self._entitlement_gate = entitlement_gate
 
     # ── lazy toolkit wiring (Req 12.3) ─────────────────────────────────
 
@@ -231,6 +241,30 @@ class GraphTraversalTool:
     # ── dispatch ───────────────────────────────────────────────────────
 
     async def invoke(self, *, namespace: str, mode: str = "keyword", **kwargs: Any) -> ToolResult:
+        """Run a traversal scoped to ``namespace``; see :meth:`_invoke` for the modes."""
+        result = await self._invoke(namespace=namespace, mode=mode, **kwargs)
+        if self._entitlement_gate is None or not result.chunks:
+            return result
+        profile = kwargs.get("profile") or {}
+        try:
+            kept = await self._entitlement_gate.filter_statement_chunks(
+                list(result.chunks), namespace, user_id=profile.get("email") or profile.get("userId")
+            )
+        except Exception as exc:  # fail closed on the text, keep the entity structure
+            logger.warning("graph_tool_entitlement_failed", tool=self.name, error=type(exc).__name__)
+            kept = []
+        if len(kept) == len(result.chunks):
+            return result
+        items = tuple(_chunk_item(c) for c in kept) + tuple(_entity_item(e) for e in result.entities)
+        return ToolResult(
+            chunks=tuple(kept),
+            entities=result.entities,
+            items=items,
+            detail=f"{result.detail}; {len(result.chunks) - len(kept)} statement(s) withheld by document entitlement",
+            produced_directions=result.produced_directions,
+        )
+
+    async def _invoke(self, *, namespace: str, mode: str = "keyword", **kwargs: Any) -> ToolResult:
         """Run a traversal scoped to ``namespace`` and return a :class:`ToolResult`.
 
         Dispatches on ``mode`` (``keyword`` / ``uris`` / ``edge_typed``). Never
@@ -482,7 +516,7 @@ class GraphTraversalTool:
         )
 
 
-def build_graph_tool(registry: Any, graph_store_uri: str) -> str:
+def build_graph_tool(registry: Any, graph_store_uri: str, *, entitlement_gate: Any | None = None) -> str:
     """Register the single :class:`GraphTraversalTool` into ``registry``.
 
     Mirrors :func:`build_strategy_tools`: a thin builder the factory (task 17)
@@ -492,11 +526,12 @@ def build_graph_tool(registry: Any, graph_store_uri: str) -> str:
     Args:
         registry: The :class:`ToolRegistry` to register the tool into.
         graph_store_uri: The graphrag-toolkit graph-store URI the tool queries.
+        entitlement_gate: Optional :class:`DocumentEntitlementGate` (fork).
 
     Returns:
         The registered Tool name (``"graph_traversal"``).
     """
-    tool = GraphTraversalTool(graph_store_uri)
+    tool = GraphTraversalTool(graph_store_uri, entitlement_gate=entitlement_gate)
     registry.register(tool)
     logger.info("graph_tool_registered", tool_name=tool.name)
     return tool.name

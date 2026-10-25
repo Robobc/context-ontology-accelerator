@@ -140,6 +140,7 @@ def build_tool_registry(
     vector_retriever: VectorRetriever | None = None,
     ontology_source: OntologySource | None = None,
     structured_query_tier: Any | None = None,
+    document_retriever: Any | None = None,
 ) -> ToolRegistry:
     """Build the internal :class:`ToolRegistry` with endpoint-gated tools (Req 12.4-12.6).
 
@@ -161,6 +162,9 @@ def build_tool_registry(
         structured_query_tier: Optional Tier-2 structured-query tier; when supplied
             the ``nl_to_sql`` / ``nl_to_sparql`` structured tools are registered so
             the planner can query databases (omitted when ``None``).
+        document_retriever: Optional service document retriever; when it routes a
+            namespace to a per-user Bedrock KB, the graph and chunk tools get a
+            document entitlement gate (fork).
 
     Returns:
         The populated :class:`ToolRegistry`, never exposed outside the Serve_Layer
@@ -170,6 +174,18 @@ def build_tool_registry(
     has_neptune = bool(config.neptune_endpoint)
     has_opensearch = bool(config.opensearch_endpoint)
     embed_client = clients.llm
+
+    # Fork: when a namespace's documents live in a per-user Bedrock KB, graph text
+    # (adjacent chunks, supporting statements) must be gated on the caller's
+    # document entitlement; the gate is derived from the document retriever.
+    entitlement_gate = None
+    if has_neptune and document_retriever is not None:
+        from ..document_entitlement import DocumentEntitlementGate, kb_retriever_resolver
+
+        resolver = kb_retriever_resolver(document_retriever)
+        if resolver is not None:
+            entitlement_gate = DocumentEntitlementGate(_graph_store_uri(config.neptune_endpoint), resolver)
+            logger.info("agentic_document_entitlement_gate_enabled")
 
     # ── Retrieval_Strategy_Tools × 7 — neptune + opensearch (Req 2.2) ──
     # build_lexical_retriever returns None unless BOTH store endpoints are set;
@@ -196,7 +212,7 @@ def build_tool_registry(
 
     # ── Graph_Traversal_Tool — neptune (Req 2.3) ───────────────────────
     if has_neptune:
-        build_graph_tool(registry, _graph_store_uri(config.neptune_endpoint))
+        build_graph_tool(registry, _graph_store_uri(config.neptune_endpoint), entitlement_gate=entitlement_gate)
     else:
         logger.warning(
             "agentic_tool_omitted",
@@ -211,7 +227,9 @@ def build_tool_registry(
     # but NOT registered by default. Set AGENTIC_ENABLE_CHUNK_WINDOW=1 to re-enable
     # it for experiments.
     if has_neptune and os.getenv("AGENTIC_ENABLE_CHUNK_WINDOW", "") == "1":
-        build_chunk_expansion_tool(registry, _graph_store_uri(config.neptune_endpoint))
+        build_chunk_expansion_tool(
+            registry, _graph_store_uri(config.neptune_endpoint), entitlement_gate=entitlement_gate
+        )
     elif has_neptune:
         logger.info(
             "agentic_tool_disabled",
@@ -276,6 +294,7 @@ def build_agentic_retriever(
     embed_client: LLMClient | None = None,
     structured_query_tier: Any | None = None,
     guardrail_id_provider: Callable[[], str] | None = None,
+    document_retriever: Any | None = None,
 ) -> AgenticRetriever:
     """Compose the :class:`AgenticRetriever` from the registry and its collaborators.
 
@@ -310,6 +329,7 @@ def build_agentic_retriever(
             each call; forwarded to the :class:`Synthesizer` and
             :class:`DecompositionPlanner` so an operator's SSM guardrail change
             reaches the warm agentic path without a redeploy.
+        document_retriever: Forwarded to :func:`build_tool_registry` (fork).
 
     Returns:
         The composed :class:`AgenticRetriever`.
@@ -324,7 +344,11 @@ def build_agentic_retriever(
         registry
         if registry is not None
         else build_tool_registry(
-            config, clients, vector_retriever=vector_retriever, structured_query_tier=structured_query_tier
+            config,
+            clients,
+            vector_retriever=vector_retriever,
+            structured_query_tier=structured_query_tier,
+            document_retriever=document_retriever,
         )
     )
     # The agentic path synthesizes over EVERY chunk its multi-step session gathered
