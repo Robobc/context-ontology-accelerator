@@ -132,14 +132,16 @@ def build_document_retriever(config: ServiceConfig, vector_client: VectorClient)
 
     opensearch_retriever = VectorRetriever(vector_client)
     default: DocumentRetriever = opensearch_retriever
+    kb_kwargs = {
+        "region": config.bedrock_region,
+        "search_mode": config.bedrock_kb_search_mode,
+        "enforce_user_context": config.bedrock_kb_enforce_user_context,
+    }
     if config.document_retriever_backend == "bedrock-kb":
-        default = BedrockKnowledgeBaseRetriever(
-            config.bedrock_kb_id,
-            region=config.bedrock_region,
-        )
+        default = BedrockKnowledgeBaseRetriever(config.bedrock_kb_id, **kb_kwargs)
 
     routes = {
-        namespace: BedrockKnowledgeBaseRetriever(kb_id, region=config.bedrock_region)
+        namespace: BedrockKnowledgeBaseRetriever(kb_id, **kb_kwargs)
         for namespace, kb_id in config.bedrock_kb_by_namespace
     }
     if not routes:

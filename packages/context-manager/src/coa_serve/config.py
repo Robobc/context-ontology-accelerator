@@ -134,6 +134,12 @@ class ServiceConfig:
     document_retriever_backend: Literal["opensearch", "bedrock-kb"] = "opensearch"
     bedrock_kb_id: str = ""
     bedrock_kb_by_namespace: tuple[tuple[str, str], ...] = ()
+    # Fork: "vector" (vectorSearchConfiguration) or "managed" (Bedrock Managed KB,
+    # managedSearchConfiguration); and whether every Retrieve carries the caller
+    # as userContext so the KB applies its document ACL (required for the
+    # BEDROCK_MANAGED_KB document source type).
+    bedrock_kb_search_mode: Literal["vector", "managed"] = "vector"
+    bedrock_kb_enforce_user_context: bool = False
     generation_backend: Literal["bedrock", "portkey"] = "bedrock"
     portkey_base_url: str = "https://api.portkey.ai/v1"
     portkey_model_id: str = ""
@@ -331,6 +337,12 @@ def load_config() -> ServiceConfig:
             kb_map[namespace] = kb_id
     if document_retriever_backend == "bedrock-kb" and not bedrock_kb_id:
         raise ConfigurationError("BEDROCK_KNOWLEDGE_BASE_ID is required when DOCUMENT_RETRIEVER_BACKEND=bedrock-kb")
+    bedrock_kb_search_mode = os.environ.get("BEDROCK_KB_SEARCH_MODE", "vector").strip().lower() or "vector"
+    if bedrock_kb_search_mode not in ("vector", "managed"):
+        raise ConfigurationError("BEDROCK_KB_SEARCH_MODE must be 'vector' or 'managed'")
+    bedrock_kb_enforce_user_context = (
+        os.environ.get("BEDROCK_KB_ENFORCE_USER_CONTEXT", "false").strip().lower() == "true"
+    )
 
     generation_backend = os.environ.get("GENERATION_BACKEND", "bedrock")
     if generation_backend not in ("bedrock", "portkey"):
@@ -396,6 +408,8 @@ def load_config() -> ServiceConfig:
         document_retriever_backend=document_retriever_backend,
         bedrock_kb_id=bedrock_kb_id,
         bedrock_kb_by_namespace=tuple(sorted(kb_map.items())),
+        bedrock_kb_search_mode=bedrock_kb_search_mode,
+        bedrock_kb_enforce_user_context=bedrock_kb_enforce_user_context,
         generation_backend=generation_backend,
         portkey_base_url=portkey_base_url,
         portkey_model_id=portkey_model_id,

@@ -74,8 +74,13 @@ class VectorRetriever:
         query_embedding: list[float] | None = None,
         top_k: int = DEFAULT_TOP_K,
         retrieval_filter: dict[str, Any] | None = None,
+        user_id: str | None = None,
     ) -> list[ChunkResult]:
-        """Implement the text-first document contract over vector search."""
+        """Implement the text-first document contract over vector search.
+
+        ``user_id`` is accepted for protocol parity; OpenSearch has no per-user
+        view, authorization happens on the namespace grant.
+        """
         if retrieval_filter:
             # Silently ignoring an authorization filter would be a data leak.
             raise NotImplementedError("OpenSearch document filters are not implemented")

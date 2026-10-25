@@ -44,6 +44,7 @@ from .identity import display_principal, extract_jwt_identity, resolve_principal
 from .models import InvokeRequest, TraceStep
 from .namespace_language import bind_label_preference
 from .orchestrator import Orchestrator
+from .request_identity import set_request_user
 from .role_resolver import ResolvedProfile, may_view_debug_info, resolve_profile
 from .session import SessionManager
 from .session_actions import (
@@ -408,6 +409,7 @@ async def _ensure_initialized():
                 step_planner,
                 structured_query_tier=structured_query_tier,
                 guardrail_id_provider=guardrail_provider.guardrail_id,
+                document_retriever=document_retriever,  # fork: per-user KB entitlement gate
             )
         except Exception as exc:
             logger.warning("agentic_retriever_unavailable", error=type(exc).__name__, error_msg=str(exc)[:200])
@@ -1382,6 +1384,9 @@ async def _authorize_namespace_access(
         )
         return None, AccessDeniedError(decision.reason or "not permitted to query this namespace").to_dict(request_id)
 
+    # Fork: publish the caller for retrieval adapters that enforce per-user ACL
+    # (Bedrock KB userContext, document entitlement gate). Request-scoped.
+    set_request_user(resolved.email or resolved.user_id)
     return resolved, None
 
 
@@ -1632,6 +1637,7 @@ async def invoke(payload: dict, context=None):
             resolve_profile, upstream_user_id, upstream_groups, namespace=request.namespace, email=_jwt_email
         )
         resolved.inject_into(request.profile)
+        set_request_user(resolved.email or resolved.user_id)  # fork: see _authorize_namespace_access
 
     # ``includeDebugInfo`` returns the generated SQL/SPARQL, i.e. the physical
     # schema. Honour it only for a caller who already administers this

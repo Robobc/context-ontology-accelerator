@@ -30,8 +30,13 @@ class DocumentRetriever(Protocol):
         query_embedding: list[float] | None = None,
         top_k: int = DEFAULT_TOP_K,
         retrieval_filter: dict[str, Any] | None = None,
+        user_id: str | None = None,
     ) -> list[ChunkResult]:
-        """Return ranked passages for ``query`` within ``namespace``."""
+        """Return ranked passages for ``query`` within ``namespace``.
+
+        ``user_id`` names the caller for backends that answer per user (Bedrock
+        KB document ACL); backends without per-user views ignore it.
+        """
         ...
 
     def backend_name(self, namespace: str) -> str:
@@ -66,6 +71,7 @@ class RoutingDocumentRetriever:
         query_embedding: list[float] | None = None,
         top_k: int = DEFAULT_TOP_K,
         retrieval_filter: dict[str, Any] | None = None,
+        user_id: str | None = None,
     ) -> list[ChunkResult]:
         """Delegate passage retrieval to the namespace-selected backend."""
         retriever = self._resolve(namespace)
@@ -75,6 +81,7 @@ class RoutingDocumentRetriever:
             query_embedding=query_embedding,
             top_k=top_k,
             retrieval_filter=retrieval_filter,
+            user_id=user_id,
         )
 
     def backend_name(self, namespace: str) -> str:

@@ -66,6 +66,8 @@ class TestFactory:
         config.bedrock_kb_id = ""
         config.bedrock_kb_by_namespace = (("managed-docs", "ABCDEFGHIJ"),)
         config.bedrock_region = "us-east-1"
+        config.bedrock_kb_search_mode = "vector"
+        config.bedrock_kb_enforce_user_context = False
 
         retriever = build_document_retriever(config, AsyncMock(spec=VectorClient))
 
