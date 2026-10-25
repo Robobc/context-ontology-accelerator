@@ -106,7 +106,8 @@ This fork tracks [`aws/context-ontology-accelerator`](https://github.com/aws/con
 
 | Branch | Upstream base | Status |
 |---|---|---|
-| `release/v0.3.6-eba` | `v0.3.6` (`00fed8d`) | current; patch series rebased, all suites green |
+| `release/v0.3.7-eba` | `v0.3.7` (`5c432ab`) | current; patch series rebased, all suites green |
+| `release/v0.3.6-eba` | `v0.3.6` (`00fed8d`) | frozen except hotfixes; never deployed |
 | `release/v0.3.5-eba` | `v0.3.5` (`052b5a2`) | frozen except hotfixes; `feature/semantic-control-plane-v035` is an alias of its handover tag |
 
 Deploy from a tag, never from a branch tip. Each upstream release is a rebase of the patch series onto the new tag (`scripts/fork-drift-report.sh` measures the distance; `scripts/identifier-scan.sh` guards the series). Patches are listed by commit subject because hashes change on every rebase; `git log <upstream-tag>..release/<x>` lists the series in order.
@@ -128,6 +129,7 @@ Deploy from a tag, never from a branch tip. Each upstream release is a rebase of
 | `feat(induction): force flag to re-induce after metadata-only steward edits` | `StartInduction` gains `force` (skip the structural-duplicate short-circuit); the Ontology page's "already inducted" alert offers *Induce anyway* | The duplicate check fingerprints table names, column types and FKs only, so steward edits to source metadata never change it: once a proposal was accepted it could not be superseded without a schema change (`duplicate_of`; `UpdateProposal` / `RejectProposals` refuse accepted proposals). Default unchanged | carried |
 | preflight: resumed deployment reuses its own VPC when the quota is full | was part of the infra wiring commit | upstream `v0.3.6` ships `scripts/check-vpc-limit.sh` with the same check | **absorbed in v0.3.6**, dropped |
 | `chore(fork): drift report and identifier scan for the release process` | `scripts/fork-drift-report.sh`, `scripts/identifier-scan.sh` (+ allowlist) | maintenance tooling for the rebase runbook | fork-only |
+| `fix(scripts): drift report fetches upstream before comparing` | `scripts/fork-drift-report.sh` | a stale clone reported zero drift while upstream had tagged `v0.3.7` | fork-only |
 
 **Operator knobs (upstream default unchanged; set per deployment with `-c key=value`)**
 
@@ -145,7 +147,8 @@ Customer-specific material (schemas, golden question sets, onboarding kits, depl
 | `v0.3.5-eba.1` | upstream `v0.3.5` + semantic control plane integrations + Nova fixes + operator knobs |
 | `v0.3.5-eba.2` | `v0.3.5-eba.1` + `translate_sql` (serve action + MCP tool + native transpile) |
 | `v0.3.5-eba.3` | `v0.3.5-eba.2` + VKG dotted-column fix (Ontop) + `force` re-induction + housekeeping. **Handover release.** |
-| `v0.3.6-eba.1` | the same series rebased onto upstream `v0.3.6` (namespace language, revisioned proposal uploads, ENI pre-warming, VPC-limit preflight, …); the big integrations commit split into nine topical commits; preflight VPC-reuse fix dropped as absorbed. Verified by the full suites; first deployment pending |
+| `v0.3.6-eba.1` | the same series rebased onto upstream `v0.3.6` (namespace language, revisioned proposal uploads, ENI pre-warming, VPC-limit preflight, …); the big integrations commit split into nine topical commits; preflight VPC-reuse fix dropped as absorbed. Verified by the full suites; never deployed |
+| `v0.3.7-eba.1` | the same series rebased onto upstream `v0.3.7` (Japanese web console, REST contract validation, cross-source structured queries with retry, paged proposal/source lists, uv ≥ 0.13.4); fork strings registered in the i18n catalogue; `PlanSemanticExecution` covered by upstream's contract-conformance test; plus the drift-report fetch fix. Verified by the full suites; first deployment pending |
 
 ## External Dependencies
 
