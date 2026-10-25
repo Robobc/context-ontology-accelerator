@@ -13,12 +13,20 @@
 #   scripts/fork-drift-report.sh [SERIES_REF] [UPSTREAM_REF]
 #     SERIES_REF    tip of the patch series (default: HEAD)
 #     UPSTREAM_REF  upstream branch to compare against (default: origin/main)
+#   DRIFT_NO_FETCH=1 skips the fetch of the upstream remote (offline use).
 # Exit status: 0 when the dry-run merge is clean, 1 when it has conflicts,
 # so the script doubles as a check in a weekly job.
 set -euo pipefail
 
 SERIES="${1:-HEAD}"
 UPSTREAM="${2:-origin/main}"
+
+# A report against stale local refs says "0 commits since base" while upstream
+# has tagged a release (observed 2026-10-25: v0.3.7 missed for three days), so
+# refresh the upstream remote first unless explicitly told not to.
+if [ "${DRIFT_NO_FETCH:-0}" != "1" ] && [[ "$UPSTREAM" == */* ]]; then
+  git fetch --quiet --tags "${UPSTREAM%%/*}" || echo "warning: fetch of ${UPSTREAM%%/*} failed; reporting against local refs" >&2
+fi
 
 git rev-parse --verify --quiet "$UPSTREAM" >/dev/null || {
   echo "upstream ref '$UPSTREAM' not found; run: git fetch origin --tags" >&2
