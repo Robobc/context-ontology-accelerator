@@ -148,7 +148,7 @@ Customer-specific material (schemas, golden question sets, onboarding kits, depl
 | `v0.3.5-eba.2` | `v0.3.5-eba.1` + `translate_sql` (serve action + MCP tool + native transpile) |
 | `v0.3.5-eba.3` | `v0.3.5-eba.2` + VKG dotted-column fix (Ontop) + `force` re-induction + housekeeping. **Handover release.** |
 | `v0.3.6-eba.1` | the same series rebased onto upstream `v0.3.6` (namespace language, revisioned proposal uploads, ENI pre-warming, VPC-limit preflight, …); the big integrations commit split into nine topical commits; preflight VPC-reuse fix dropped as absorbed. Verified by the full suites; never deployed |
-| `v0.3.7-eba.1` | the same series rebased onto upstream `v0.3.7` (Japanese web console, REST contract validation, cross-source structured queries with retry, paged proposal/source lists, uv ≥ 0.13.4); fork strings registered in the i18n catalogue; `PlanSemanticExecution` covered by upstream's contract-conformance test; plus the drift-report fetch fix. Verified by the full suites; first deployment pending |
+| `v0.3.7-eba.1` | the same series rebased onto upstream `v0.3.7` (Japanese web console, REST contract validation, cross-source structured queries with retry, paged proposal/source lists, uv ≥ 0.13.4); fork strings registered in the i18n catalogue; `PlanSemanticExecution` covered by upstream's contract-conformance test; plus the drift-report fetch fix. Verified by the full suites; deployed to dev 2026-10-25 |
 
 ## External Dependencies
 
