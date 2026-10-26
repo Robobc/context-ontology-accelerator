@@ -70,6 +70,42 @@ def _stringify_config_value(v: object) -> object:
     return v
 
 
+# Fork: BEDROCK_MANAGED_KB sources. The state machine binds every kg-build env
+# var with JsonPath.stringAt, which fails the execution on a missing path, so
+# these fields are ALWAYS present as strings — empty for the staging modes.
+_BEDROCK_KB_FLAT_DEFAULTS: dict[str, str] = {
+    "input_mode": "STAGING",
+    "vector_store_mode": "AOSS",
+    "bedrock_kb_id": "",
+    "bedrock_kb_data_source_ids": "",
+    "bedrock_kb_region": "",
+    "bedrock_kb_extraction_role_arn": "",
+}
+
+
+def _flatten_bedrock_kb(body: dict) -> None:
+    """Add the flat ``input_mode`` / ``bedrock_kb_*`` fields the kg-build task reads.
+
+    A ``bedrock_kb`` object in the job body (sent by the sources API for a
+    BEDROCK_MANAGED_KB source) switches the task to ``INPUT_MODE=BEDROCK_KB`` and
+    ``VECTOR_STORE_MODE=DUMMY``: the Knowledge Base already holds the chunk
+    vectors, so none are written to OpenSearch for that source. Any other body
+    gets the staging defaults, which is today's behaviour unchanged.
+    """
+    flat = dict(_BEDROCK_KB_FLAT_DEFAULTS)
+    kb = body.get("bedrock_kb")
+    if isinstance(kb, dict) and kb.get("knowledgeBaseId"):
+        flat.update(
+            input_mode="BEDROCK_KB",
+            vector_store_mode="DUMMY",
+            bedrock_kb_id=str(kb["knowledgeBaseId"]),
+            bedrock_kb_data_source_ids=",".join(str(s) for s in kb.get("dataSourceIds") or []),
+            bedrock_kb_region=str(kb.get("region") or ""),
+            bedrock_kb_extraction_role_arn=str(kb.get("extractionRoleArn") or ""),
+        )
+    body.update(flat)
+
+
 def _legacy_namespace_language(namespace_id: str, message_id: str) -> str:
     """Resolve the language for a message enqueued before the API snapshotted it.
 
@@ -123,11 +159,13 @@ def handler(event: dict, context: object) -> None:
                 body["namespace_language"] = str(body["namespace_language"] or "")
             else:
                 body["namespace_language"] = _legacy_namespace_language(body["namespace_id"], message_id)
+            _flatten_bedrock_kb(body)
 
             logger.info(
                 "starting_execution",
                 namespace_id=body["namespace_id"],
                 doc_source_id=body["doc_source_id"],
+                input_mode=body["input_mode"],
                 message_id=message_id,
             )
             sfn_client.start_execution(

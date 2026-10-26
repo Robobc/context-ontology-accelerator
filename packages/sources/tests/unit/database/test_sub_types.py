@@ -20,7 +20,9 @@ from coa_sources.database.sub_types import (
 
 pytestmark = pytest.mark.unit
 
-_DOCUMENT_SUB_TYPES = frozenset({SourceSubType.S3.value, SourceSubType.LOCAL_UPLOAD.value})
+_DOCUMENT_SUB_TYPES = frozenset(
+    {SourceSubType.S3.value, SourceSubType.LOCAL_UPLOAD.value, SourceSubType.BEDROCK_MANAGED_KB.value}
+)
 _DATABASE_SUB_TYPES = frozenset(s.value for s in SourceSubType) - _DOCUMENT_SUB_TYPES
 
 

@@ -82,14 +82,17 @@ def _make_doc_req(
     role_arn=None,
     extraction_config=None,
     upload_id="11111111-1111-4111-8111-111111111111",
+    bedrock_kb=None,
 ):
     req = MagicMock()
     req.name = name
     req.source_bucket_arn = source_bucket_arn
-    req.s3_prefixes = s3_prefixes or ["uploads/"]
+    req.s3_prefixes = ["uploads/"] if s3_prefixes is None else s3_prefixes
     req.role_arn = role_arn
     req.extraction_config = extraction_config
     req.upload_id = upload_id
+    # The generated model always carries the field; None is its default.
+    req.bedrock_knowledge_base_configuration = bedrock_kb
     return req
 
 
@@ -411,6 +414,125 @@ class TestCreateDocumentSource:
         assert status == 201
         put_item = mock_dao.put.call_args[0][0]
         assert put_item["s3Prefixes"] == ["data/"]
+
+
+# ===================================================================
+# _create_document_source — BEDROCK_MANAGED_KB sub-type (fork)
+# ===================================================================
+
+_KB_ROLE = "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb"
+
+
+def _make_kb_cfg(role_arn=_KB_ROLE, kb_id="71RZ44THV5", data_source_ids=None, region=None):
+    cfg = MagicMock()
+    cfg.knowledge_base_id = kb_id
+    cfg.data_source_ids = data_source_ids
+    cfg.region = region
+    cfg.extraction_role_arn = role_arn
+    return cfg
+
+
+@pytest.mark.unit
+class TestCreateBedrockManagedKbSource:
+    """A bedrockKnowledgeBaseConfiguration selects BEDROCK_MANAGED_KB: nothing is
+    staged, the KB config rides on the item and the job body, and the extraction
+    role must be a `{prefix}-datasource-access-*` role, the only shape the kg-build
+    task is allowed to assume (same rule and helpers as Databricks registration)."""
+
+    @pytest.fixture(autouse=True)
+    def _prefix(self, monkeypatch):
+        monkeypatch.setenv("RESOURCE_PREFIX", "coa-dev-")
+
+    def _create(self, req):
+        mock_dao = MagicMock()
+        mock_dao.query.return_value = MagicMock(items=[], last_evaluated_key=None)
+        mock_sqs = MagicMock()
+        with (
+            patch(f"{_DOCR}._get_dao", return_value=mock_dao),
+            patch(f"{_DOCR}._get_sqs", return_value=mock_sqs),
+            patch(f"{_DOCR}._INGESTION_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/ingestion-queue"),
+            patch(f"{_DOCR}.get_bucket_tags") as tags,
+        ):
+            status, body = _parse(
+                _docr._create_document_source(req, _NAMESPACE_ID, _make_event(), namespace_language="en")
+            )
+        tags.assert_not_called()  # no bucket is involved
+        return status, body, mock_dao, mock_sqs
+
+    def test_happy_path_persists_config_and_enqueues_it(self):
+        req = _make_doc_req(
+            name="kb-source",
+            s3_prefixes=[],
+            upload_id=None,
+            bedrock_kb=_make_kb_cfg(data_source_ids=["IBFPVKIBZU", "EFLHLJMXMZ", "IBFPVKIBZU"], region="eu-central-1"),
+        )
+        status, _, dao, sqs = self._create(req)
+        assert status == 201
+        item = dao.put.call_args[0][0]
+        assert item["sourceSubType"] == "BEDROCK_MANAGED_KB"
+        assert item["docSourceType"] == "bedrock_kb"
+        assert item["s3Prefixes"] == []
+        assert "sourceBucketArn" not in item and "roleArn" not in item
+        assert item["bedrockKnowledgeBaseConfiguration"] == {
+            "knowledgeBaseId": "71RZ44THV5",
+            "extractionRoleArn": _KB_ROLE,
+            "dataSourceIds": ["EFLHLJMXMZ", "IBFPVKIBZU"],
+            "region": "eu-central-1",
+        }
+        job = json.loads(sqs.send_message.call_args.kwargs["MessageBody"])
+        assert job["source_type"] == "bedrock_kb"
+        assert job["s3_prefixes"] == []
+        assert job["bedrock_kb"] == item["bedrockKnowledgeBaseConfiguration"]
+
+    def test_optional_fields_are_omitted_when_absent(self):
+        req = _make_doc_req(name="kb-min", s3_prefixes=[], upload_id=None, bedrock_kb=_make_kb_cfg())
+        status, _, dao, _ = self._create(req)
+        assert status == 201
+        assert dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"] == {
+            "knowledgeBaseId": "71RZ44THV5",
+            "extractionRoleArn": _KB_ROLE,
+        }
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"source_bucket_arn": "arn:aws:s3:::b"},
+            {"upload_id": "11111111-1111-4111-8111-111111111111"},
+            {"s3_prefixes": ["x/"]},
+            {"role_arn": _KB_ROLE},
+        ],
+    )
+    def test_rejects_s3_shaped_fields_alongside_kb(self, extra):
+        kwargs = {"s3_prefixes": [], "upload_id": None, **extra}
+        req = _make_doc_req(name="kb-mixed", bedrock_kb=_make_kb_cfg(), **kwargs)
+        status, body, dao, _ = self._create(req)
+        assert status == 400
+        assert "cannot be combined" in body["error"]
+        dao.put.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "role, needle",
+        [
+            ("arn:aws:iam::222233334444:role/kb-extract", "coa-dev-datasource-access-"),
+            ("arn:aws:iam::222233334444:role/team/a/coa-dev-datasource-access-kb", "coa-dev-datasource-access-"),
+            ("arn:aws-us-gov:iam::222233334444:role/coa-dev-datasource-access-kb", "aws partition"),
+            ("arn:aws:iam::222233334444:role/coa-dev-datasource-access- kb", "aws partition"),
+        ],
+    )
+    def test_rejects_roles_outside_the_assumable_shape(self, role, needle):
+        req = _make_doc_req(name="kb-role", s3_prefixes=[], upload_id=None, bedrock_kb=_make_kb_cfg(role_arn=role))
+        status, body, dao, _ = self._create(req)
+        assert status == 400
+        assert needle in body["error"]
+        dao.put.assert_not_called()
+
+    def test_role_arn_is_stripped_before_storage(self):
+        req = _make_doc_req(
+            name="kb-strip", s3_prefixes=[], upload_id=None, bedrock_kb=_make_kb_cfg(role_arn=f"  {_KB_ROLE}  ")
+        )
+        status, _, dao, _ = self._create(req)
+        assert status == 201
+        assert dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"]["extractionRoleArn"] == _KB_ROLE
 
 
 # ===================================================================

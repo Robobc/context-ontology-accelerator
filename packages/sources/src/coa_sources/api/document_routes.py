@@ -33,6 +33,13 @@ from coa_control_plane_server.models.source_status import SourceStatus
 from coa_control_plane_server.models.source_sub_type import SourceSubType
 from coa_control_plane_server.models.source_type import SourceType
 
+from coa_sources.database.databricks import (
+    arn_has_inner_whitespace,
+    normalise_arn,
+    reserved_role_name_prefix,
+    role_arn_is_connector_assumable,
+    role_name_is_reserved,
+)
 from coa_sources.utils import merge_extraction_config
 
 from .namespace_counters import adjust_namespace_source_count
@@ -135,6 +142,60 @@ def _validate_bucket_namespace_authorization(source_bucket_arn: str | None, name
     return None
 
 
+# Attribute the sources-table item and the SQS job body carry a BEDROCK_MANAGED_KB
+# source's configuration under; the trigger Lambda flattens it into the kg-build
+# task environment (see documents/trigger/index.py).
+BEDROCK_KB_ITEM_KEY = "bedrockKnowledgeBaseConfiguration"
+BEDROCK_KB_JOB_KEY = "bedrock_kb"
+
+
+def _validate_bedrock_kb_configuration(kb_req: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Fork: shape-check a BedrockKnowledgeBaseConfiguration and return its stored form.
+
+    The generated model already pins the KB and data source ids to ``[A-Z0-9]{10}``
+    and the role to the Smithy ``IamRoleArn`` pattern. What remains is the same
+    rule the Databricks registration applies to its cross-account role, for the
+    same reason: the kg-build task's own ``sts:AssumeRole`` grant is written
+    against ``arn:aws:iam::*:role/{prefix}-datasource-access-*`` in the ``aws``
+    partition, so a role outside that shape registers cleanly and then fails
+    every extraction with an AccessDenied that reads as a policy defect. Refused
+    at submit instead, naming the prefix.
+
+    Returns ``(stored, None)`` or ``(None, error_response)``.
+    """
+    role_arn = normalise_arn(kb_req.extraction_role_arn)
+    if arn_has_inner_whitespace(role_arn) or not role_arn_is_connector_assumable(role_arn):
+        return None, api_response(
+            400,
+            {
+                "error": (
+                    "extractionRoleArn must be an IAM role ARN in the aws partition: arn:aws:iam::<account>:role/<name>"
+                )
+            },
+        )
+    if not role_name_is_reserved(role_arn):
+        return None, api_response(
+            400,
+            {
+                "error": (
+                    f"extractionRoleArn must be named '{reserved_role_name_prefix()}*' at the root IAM path; "
+                    "it is the only role shape this deployment is allowed to assume."
+                )
+            },
+        )
+    stored: dict[str, Any] = {
+        "knowledgeBaseId": kb_req.knowledge_base_id,
+        "extractionRoleArn": role_arn,
+    }
+    data_source_ids = [s for s in (kb_req.data_source_ids or []) if s]
+    if data_source_ids:
+        stored["dataSourceIds"] = sorted(set(data_source_ids))
+    region = (kb_req.region or "").strip()
+    if region:
+        stored["region"] = region
+    return stored, None
+
+
 def _create_document_source(
     doc_req: Any, namespace_id: str, event: dict[str, Any], *, namespace_language: str
 ) -> dict[str, Any]:
@@ -149,21 +210,44 @@ def _create_document_source(
 
     source_bucket_arn: str | None = doc_req.source_bucket_arn or None
     role_arn: str | None = doc_req.role_arn or None
+    kb_req: Any = doc_req.bedrock_knowledge_base_configuration
+    bedrock_kb: dict[str, Any] | None = None
 
-    # Infer sub-type: sourceBucketArn → S3, else → LOCAL_UPLOAD
-    if source_bucket_arn:
+    # Infer sub-type: bedrockKnowledgeBaseConfiguration → BEDROCK_MANAGED_KB,
+    # sourceBucketArn → S3, else → LOCAL_UPLOAD
+    if kb_req is not None:
+        sub_type = SourceSubType.BEDROCK_MANAGED_KB
+        doc_source_type = "bedrock_kb"
+    elif source_bucket_arn:
         sub_type = SourceSubType.S3
         doc_source_type = "s3"
     else:
         sub_type = SourceSubType.LOCAL_UPLOAD
         doc_source_type = "upload"
 
-    if doc_source_type == "s3":
+    if doc_source_type == "bedrock_kb":
+        # Fork: the Knowledge Base is the document store; nothing is staged, so the
+        # S3-shaped fields are contradictions rather than extras.
+        if source_bucket_arn or doc_req.upload_id or doc_req.s3_prefixes or role_arn:
+            return api_response(
+                400,
+                {
+                    "error": (
+                        "bedrockKnowledgeBaseConfiguration cannot be combined with "
+                        "sourceBucketArn, uploadId, s3Prefixes or roleArn"
+                    )
+                },
+            )
+        bedrock_kb, error = _validate_bedrock_kb_configuration(kb_req)
+        if error:
+            return error
+        s3_prefixes: list[str] = []
+    elif doc_source_type == "s3":
         # S3 sub-type: prefixes point into the caller-owned sourceBucketArn, so
         # they are legitimately caller-supplied. Drop empty/whitespace-only
         # entries (a stray "" would otherwise list the whole bucket), then
         # validate character set / traversal only.
-        s3_prefixes: list[str] = [s for s in (p.strip() for p in (doc_req.s3_prefixes or [])) if s]
+        s3_prefixes = [s for s in (p.strip() for p in (doc_req.s3_prefixes or [])) if s]
         for prefix in s3_prefixes:
             try:
                 validate_s3_prefix(prefix, "s3Prefixes")
@@ -255,6 +339,8 @@ def _create_document_source(
         item["sourceBucketArn"] = source_bucket_arn
     if role_arn:
         item["roleArn"] = role_arn
+    if bedrock_kb:
+        item[BEDROCK_KB_ITEM_KEY] = bedrock_kb
 
     try:
         _get_dao().put(item)
@@ -280,6 +366,8 @@ def _create_document_source(
             sqs_body["source_bucket_arn"] = source_bucket_arn
         if role_arn:
             sqs_body["role_arn"] = role_arn
+        if bedrock_kb:
+            sqs_body[BEDROCK_KB_JOB_KEY] = bedrock_kb
         try:
             _get_sqs().send_message(
                 QueueUrl=_INGESTION_QUEUE_URL,

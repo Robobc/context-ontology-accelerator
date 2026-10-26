@@ -344,3 +344,64 @@ class TestNamespaceLanguage:
         with pytest.raises(ClientError):
             index.handler(_make_event(_make_record(_legacy_body())), None)
         mock_sfn.start_execution.assert_not_called()
+
+
+@pytest.mark.unit
+class TestBedrockKbFlattening:
+    """Fork: every kg-build env var is bound with JsonPath.stringAt, which fails the
+    execution on a missing path, so the flat input_mode / bedrock_kb_* fields must
+    be present as strings on EVERY message, not only KB ones."""
+
+    @patch.object(index, "sfn_client")
+    def test_staging_message_carries_the_defaults(self, mock_sfn):
+        index.handler(_make_event(_make_record(_VALID_BODY)), None)
+        call_input = json.loads(mock_sfn.start_execution.call_args.kwargs["input"])
+        assert call_input["input_mode"] == "STAGING"
+        assert call_input["vector_store_mode"] == "AOSS"
+        for key in (
+            "bedrock_kb_id",
+            "bedrock_kb_data_source_ids",
+            "bedrock_kb_region",
+            "bedrock_kb_extraction_role_arn",
+        ):
+            assert call_input[key] == ""
+
+    @patch.object(index, "sfn_client")
+    def test_kb_message_switches_modes_and_flattens_config(self, mock_sfn):
+        body = {
+            **_VALID_BODY,
+            "s3_prefixes": [],
+            "bedrock_kb": {
+                "knowledgeBaseId": "71RZ44THV5",
+                "dataSourceIds": ["EFLHLJMXMZ", "IBFPVKIBZU"],
+                "region": "eu-central-1",
+                "extractionRoleArn": "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb",
+            },
+        }
+        index.handler(_make_event(_make_record(body)), None)
+        call_input = json.loads(mock_sfn.start_execution.call_args.kwargs["input"])
+        assert call_input["input_mode"] == "BEDROCK_KB"
+        assert call_input["vector_store_mode"] == "DUMMY"
+        assert call_input["bedrock_kb_id"] == "71RZ44THV5"
+        assert call_input["bedrock_kb_data_source_ids"] == "EFLHLJMXMZ,IBFPVKIBZU"
+        assert call_input["bedrock_kb_region"] == "eu-central-1"
+        assert call_input["bedrock_kb_extraction_role_arn"].endswith("coa-dev-datasource-access-kb")
+        # Every flat value is a string: ECS env values must be.
+        flat_keys = [k for k in call_input if k.startswith(("bedrock_kb_", "input_", "vector_"))]
+        assert all(isinstance(call_input[k], str) for k in flat_keys)
+
+    @patch.object(index, "sfn_client")
+    def test_kb_message_without_optional_fields(self, mock_sfn):
+        body = {**_VALID_BODY, "bedrock_kb": {"knowledgeBaseId": "71RZ44THV5", "extractionRoleArn": "arn:x"}}
+        index.handler(_make_event(_make_record(body)), None)
+        call_input = json.loads(mock_sfn.start_execution.call_args.kwargs["input"])
+        assert call_input["input_mode"] == "BEDROCK_KB"
+        assert call_input["bedrock_kb_data_source_ids"] == ""
+        assert call_input["bedrock_kb_region"] == ""
+
+    @patch.object(index, "sfn_client")
+    def test_malformed_kb_object_falls_back_to_staging(self, mock_sfn):
+        body = {**_VALID_BODY, "bedrock_kb": "not-an-object"}
+        index.handler(_make_event(_make_record(body)), None)
+        call_input = json.loads(mock_sfn.start_execution.call_args.kwargs["input"])
+        assert call_input["input_mode"] == "STAGING"

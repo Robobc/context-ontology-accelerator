@@ -574,7 +574,7 @@ def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]
     return documents, failed_count + empty_count
 
 
-def _load_bedrock_kb_documents() -> tuple[list, int]:
+def _load_bedrock_kb_documents(namespace_id: str) -> tuple[list, int]:
     """Fork: INPUT_MODE=BEDROCK_KB. Pre-chunked nodes from a Bedrock Managed Knowledge Base.
 
     Env: ``BEDROCK_KB_ID`` (required), ``BEDROCK_KB_DATA_SOURCE_IDS`` (comma list,
@@ -582,13 +582,22 @@ def _load_bedrock_kb_documents() -> tuple[list, int]:
     ``BEDROCK_KB_EXTRACTION_ROLE_ARN`` (optional; assumed for the Bedrock calls so
     extraction sees every document regardless of the task role's own grants).
 
+    The assume goes through ``assume_datasource_session`` with the namespace's
+    ExternalId, exactly like every other customer-supplied datasource role: the
+    role ARN arrived from the CreateSource caller, so the ExternalId (derived from
+    *namespace_id*, never from the request) is what binds the assume to the
+    namespace entitled to it. The target role's trust policy must therefore name
+    this ExternalId; the control plane shows it on GetNamespace.
+
     Returns ``(nodes, unloaded_count)`` like ``_load_staged_documents``: the nodes
     are the KB's chunks as ``TextNode``s (ids ``aws:<_chunk_id>``, grouped per
     document, SOURCE relationship set), and ``unloaded_count`` is the number of
     discovered documents that yielded no chunk.
     """
     import boto3
+    from coa_common.constants import datasource_external_id
 
+    from coa_sources.database.connectors.sts_assume import assume_datasource_session
     from coa_sources.documents.kg_build.bedrock_kb_loader import load_bedrock_kb_chunks
 
     kb_id = _require_env("BEDROCK_KB_ID")
@@ -596,17 +605,15 @@ def _load_bedrock_kb_documents() -> tuple[list, int]:
     region = os.environ.get("BEDROCK_KB_REGION", "").strip() or AWS_REGION
     role_arn = os.environ.get("BEDROCK_KB_EXTRACTION_ROLE_ARN", "").strip()
 
-    session = boto3.Session(region_name=region)
     if role_arn:
-        creds = session.client("sts").assume_role(RoleArn=role_arn, RoleSessionName="coa-kg-build-bedrock-kb")[
-            "Credentials"
-        ]
-        session = boto3.Session(
-            region_name=region,
-            aws_access_key_id=creds["AccessKeyId"],
-            aws_secret_access_key=creds["SecretAccessKey"],
-            aws_session_token=creds["SessionToken"],
+        session = assume_datasource_session(
+            role_arn,
+            datasource_external_id(namespace_id),
+            region,
+            session_name=f"coa-kg-build-{namespace_id}",
         )
+    else:
+        session = boto3.Session(region_name=region)
     runtime = session.client("bedrock-agent-runtime")
     agent = session.client("bedrock-agent")
 
@@ -1726,7 +1733,7 @@ def main() -> None:
     # (nodes, not documents; the toolkit groups them by SOURCE relationship).
     try:
         if INPUT_MODE == "BEDROCK_KB":
-            documents, load_failed = _load_bedrock_kb_documents()
+            documents, load_failed = _load_bedrock_kb_documents(namespace_id)
         else:
             documents, load_failed = _load_staged_documents(bucket_name, staging_prefix)
     except Exception:

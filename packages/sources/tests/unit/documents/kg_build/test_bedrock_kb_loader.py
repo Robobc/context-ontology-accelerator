@@ -328,27 +328,39 @@ class TestGraphBuildHooks:
         kb_load.assert_called_once()
         staged.assert_not_called()
 
-    def test_bedrock_loader_wrapper_assumes_role_and_returns_nodes(self, gb):
+    def test_bedrock_loader_wrapper_assumes_role_with_namespace_external_id(self, gb, monkeypatch):
+        """The extraction role is customer-supplied, so the assume MUST carry the
+        namespace-derived ExternalId (confused-deputy guard), through the same
+        helper every other datasource assume uses."""
+        monkeypatch.setenv("RESOURCE_PREFIX", "coa-dev-")
+        role = "arn:aws:iam::123456789012:role/coa-dev-datasource-access-kb"
         mod = gb(
             INPUT_MODE="BEDROCK_KB",
             BEDROCK_KB_ID=KB,
             BEDROCK_KB_DATA_SOURCE_IDS=f"{DS_S3}, ",
-            BEDROCK_KB_EXTRACTION_ROLE_ARN="arn:aws:iam::123456789012:role/kb-extract",
+            BEDROCK_KB_EXTRACTION_ROLE_ARN=role,
         )
         runtime, agent = _s3_fixture()
-        fake_session = MagicMock()
-        fake_session.client.side_effect = lambda name: {
-            "sts": MagicMock(
-                assume_role=MagicMock(
-                    return_value={"Credentials": {"AccessKeyId": "AKIA", "SecretAccessKey": "s", "SessionToken": "t"}}
-                )
-            ),
-            "bedrock-agent-runtime": runtime,
-            "bedrock-agent": agent,
-        }[name]
-        with patch("boto3.Session", return_value=fake_session) as sess:
-            nodes, unloaded = mod._load_bedrock_kb_documents()
+        assumed = MagicMock()
+        assumed.client.side_effect = lambda name: {"bedrock-agent-runtime": runtime, "bedrock-agent": agent}[name]
+        with patch(
+            "coa_sources.database.connectors.sts_assume.assume_datasource_session", return_value=assumed
+        ) as assume:
+            nodes, unloaded = mod._load_bedrock_kb_documents("11111111-1111-4111-8111-111111111111")
         assert [n.id_ for n in nodes] == ["aws:chunkA1", "aws:chunkA2", "aws:chunkA3", "aws:chunkB1"]
         assert unloaded == 0
-        # Second Session() carries the assumed-role credentials.
-        assert sess.call_args_list[1].kwargs["aws_session_token"] == "t"
+        assert assume.call_args.args[:2] == (role, "coa-dev-11111111-1111-4111-8111-111111111111")
+        assert assume.call_args.kwargs["session_name"].startswith("coa-kg-build-")
+
+    def test_bedrock_loader_wrapper_without_role_uses_task_credentials(self, gb):
+        mod = gb(INPUT_MODE="BEDROCK_KB", BEDROCK_KB_ID=KB, BEDROCK_KB_EXTRACTION_ROLE_ARN="")
+        runtime, agent = _s3_fixture()
+        fake_session = MagicMock()
+        fake_session.client.side_effect = lambda name: {"bedrock-agent-runtime": runtime, "bedrock-agent": agent}[name]
+        with (
+            patch("boto3.Session", return_value=fake_session),
+            patch("coa_sources.database.connectors.sts_assume.assume_datasource_session") as assume,
+        ):
+            nodes, _ = mod._load_bedrock_kb_documents("11111111-1111-4111-8111-111111111111")
+        assert len(nodes) == 4
+        assume.assert_not_called()
