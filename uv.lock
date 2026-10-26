@@ -873,7 +873,7 @@ dev = [
 
 [[package]]
 name = "coa-outer-agent"
-version = "0.3.5"
+version = "0.3.7"
 source = { editable = "packages/outer-agent" }
 dependencies = [
     { name = "bedrock-agentcore" },

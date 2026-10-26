@@ -1,6 +1,6 @@
 [project]
 name = "coa-outer-agent"
-version = "0.3.5"
+version = "0.3.7"
 description = "Thin orchestration runtime for semantic planning and native source retrieval"
 requires-python = ">=3.12"
 
