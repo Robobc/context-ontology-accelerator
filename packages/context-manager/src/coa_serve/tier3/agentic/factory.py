@@ -230,7 +230,7 @@ def build_tool_registry(
     # ── Vector_Search_Tool — opensearch + embed client (Req 2.3) ───────
     if has_opensearch and embed_client is not None:
         vr = vector_retriever if vector_retriever is not None else VectorRetriever(clients.vector)
-        build_vector_tool(registry, vr, embed_client)
+        build_vector_tool(registry, vr, embed_client, entitlement_gate=entitlement_gate)
     else:
         missing = [] if has_opensearch else ["opensearch_endpoint"]
         if embed_client is None:

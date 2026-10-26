@@ -519,6 +519,16 @@ class BaselineLexicalRetriever:
 
         chunks, entities = self._map_results(nodes)
 
+        # Fork: a node's ``entity_contexts`` aggregate entities from documents other
+        # than the node's own source, so the node-level filter above is not enough
+        # for labels; check each entity's own provenance.
+        if self._entitlement_gate is not None and entities:
+            try:
+                entities = await self._entitlement_gate.filter_entities(entities, namespace)
+            except Exception as e:  # fail closed on labels, keep the already-gated chunks
+                logger.warning("baseline_entity_entitlement_failed", error_type=type(e).__name__)
+                entities = []
+
         return BaselineResult(
             chunks=tuple(chunks),
             entities=tuple(entities),

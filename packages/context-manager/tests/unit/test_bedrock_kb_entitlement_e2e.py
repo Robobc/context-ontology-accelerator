@@ -184,6 +184,97 @@ class TestLexicalBaselineThroughTheFactory:
         result = await tool.invoke(namespace=NS, query="pay bands")
         assert "120k" not in repr(result) and "Q3 revenue grew 8%." in repr(result)
 
+    @pytest.mark.asyncio
+    async def test_entity_labels_aggregated_from_other_documents_are_gated(self, gate, as_alice):
+        """A kept node's ``entity_contexts`` can name entities extracted from documents the caller
+        may not read (the toolkit aggregates across sources); labels must be gated per entity."""
+
+        def node():
+            contexts = {
+                "contexts": [
+                    {
+                        "entities": [
+                            {"entity": {"entityId": "e_rev", "value": "Q3 Revenue", "classification": "T"}},
+                            {"entity": {"entityId": "e_band", "value": "Band 4", "classification": "T"}},
+                        ]
+                    }
+                ]
+            }
+            meta = {"source": {"sourceId": "aws:doc:fin"}, "entity_contexts": contexts}
+            return SimpleNamespace(node_id="n", text="Q3 revenue grew 8%.", score=0.5, metadata=meta)
+
+        retriever = self._retriever(gate)
+        retriever._retrieve_sync = lambda query, namespace, strategy: [node()]  # type: ignore[method-assign]
+        result = await retriever.retrieve("revenue", NS)
+        assert [c.text for c in result.chunks] == ["Q3 revenue grew 8%."]  # the node itself is entitled
+        assert [e.label for e in result.entities] == ["Q3 Revenue"]  # but the HR-only label is withheld
+
+        control = self._retriever(None)
+        control._retrieve_sync = lambda query, namespace, strategy: [node()]  # type: ignore[method-assign]
+        assert "Band 4" in [e.label for e in (await control.retrieve("revenue", NS)).entities]
+
+
+@pytest.mark.unit
+class TestOtherAgenticToolsThroughTheRegistry:
+    @pytest.mark.asyncio
+    async def test_vector_search_over_a_shared_index_is_gated(self, gate, as_alice):
+        """Under VECTOR_STORE_MODE=AOSS the OpenSearch chunk index holds every document's text."""
+        from coa_serve.tier3.vector_retriever import ChunkResult
+
+        hits = [
+            ChunkResult("aws:fin1", "Q3 revenue grew 8%.", FINANCE, 0.9),
+            ChunkResult("aws:hr1", "Band 4 pays 120k.", HR, 0.8),
+        ]
+        for g, expect_hr in ((gate, False), (None, True)):
+            tool = _registry(g).get("vector_search")
+            assert tool is not None
+
+            async def _search(embedding, namespace, top_k=10):
+                return list(hits)
+
+            tool._vector.search = _search  # type: ignore[method-assign]
+            result = await tool.invoke(namespace=NS, query="pay")
+            assert ("120k" in repr(result)) is expect_hr
+
+    @pytest.mark.asyncio
+    async def test_chunk_window_expansion_is_gated(self, gate, as_alice, monkeypatch):
+        monkeypatch.setenv("AGENTIC_ENABLE_CHUNK_WINDOW", "1")
+
+        async def _window(cypher, params):
+            if "__NEXT__" in cypher:
+                return [{"chunkId": "aws:fin1", "text": "Q3 revenue grew 8%."}, {"chunkId": "aws:hr1", "text": "120k."}]
+            return await fake_neptune(cypher, params)
+
+        for g, expect_hr in ((gate, False), (None, True)):
+            tool = _registry(g).get("chunk_window")
+            assert tool is not None, "chunk_window must register when AGENTIC_ENABLE_CHUNK_WINDOW=1"
+            with patch.object(type(tool), "_run_cypher", staticmethod(_window)):
+                result = await tool.invoke(namespace=NS, chunk_ids=["aws:sh1"])
+            assert ("120k" in repr(result)) is expect_hr
+
+
+@pytest.mark.unit
+class TestMainWiring:
+    """The gate is only as good as main.py handing it over; pin that statically (cf. TestStrategyWiring)."""
+
+    def test_main_passes_the_gate_to_every_consumer(self):
+        import ast
+        import inspect
+
+        import coa_serve.main as main_mod
+
+        tree = ast.parse(inspect.getsource(main_mod))
+        calls = {
+            getattr(node.func, "id", None) or getattr(node.func, "attr", None): {kw.arg for kw in node.keywords}
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+            in ("build_lexical_retriever", "build_agentic_retriever")
+        }
+        assert set(calls) == {"build_lexical_retriever", "build_agentic_retriever"}
+        for name, kwargs in calls.items():
+            assert "entitlement_gate" in kwargs, f"{name}(...) in coa_serve.main no longer receives entitlement_gate"
+
 
 @pytest.mark.unit
 class TestEntrypointIdentityScope:

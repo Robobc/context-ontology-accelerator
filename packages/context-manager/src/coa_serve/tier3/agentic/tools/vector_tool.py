@@ -103,7 +103,9 @@ class VectorSearchTool:
     client, then delegates to ``VectorRetriever.search``.
     """
 
-    def __init__(self, vector_retriever: VectorRetriever, embed_client: EmbedClient) -> None:
+    def __init__(
+        self, vector_retriever: VectorRetriever, embed_client: EmbedClient, *, entitlement_gate: Any | None = None
+    ) -> None:
         """Build the Tool over a ``VectorRetriever`` and an embed client.
 
         Args:
@@ -112,6 +114,9 @@ class VectorSearchTool:
             embed_client: A client exposing ``async embed(text) -> list[float]``
                 (e.g. the serve layer's ``BedrockLLMClient``), used to embed
                 sub-question text when no precomputed embedding is supplied.
+            entitlement_gate: Optional ``DocumentEntitlementGate`` (fork): the
+                chunk index may hold a per-user Knowledge Base's text when kg-build
+                ran with ``VECTOR_STORE_MODE=AOSS``; hits are gated by document.
         """
         self.name = TOOL_NAME
         self.description = _DESCRIPTION
@@ -119,6 +124,7 @@ class VectorSearchTool:
         self.output_schema = dict(_OUTPUT_SCHEMA)
         self._vector = vector_retriever
         self._embed = embed_client
+        self._entitlement_gate = entitlement_gate
 
     async def invoke(
         self,
@@ -173,6 +179,18 @@ class VectorSearchTool:
             )
             return ToolResult(detail=f"{self.name} error: {type(exc).__name__}")
 
+        if self._entitlement_gate is not None and chunks:
+            profile = _.get("profile") or {}
+            try:
+                chunks = tuple(
+                    await self._entitlement_gate.filter_chunks(
+                        list(chunks), namespace, user_id=profile.get("email") or profile.get("userId")
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed: no text rather than everyone's text
+                logger.warning("vector_tool_entitlement_failed", tool=self.name, error=type(exc).__name__)
+                return ToolResult(detail=f"{self.name}: document entitlement check failed; no chunks returned")
+
         items = tuple(_chunk_item(c) for c in chunks)
         return ToolResult(chunks=chunks, items=items, detail=f"{self.name}: {len(chunks)} chunks")
 
@@ -191,7 +209,13 @@ class VectorSearchTool:
         return []
 
 
-def build_vector_tool(registry: ToolRegistry, vector_retriever: VectorRetriever, embed_client: EmbedClient) -> str:
+def build_vector_tool(
+    registry: ToolRegistry,
+    vector_retriever: VectorRetriever,
+    embed_client: EmbedClient,
+    *,
+    entitlement_gate: Any | None = None,
+) -> str:
     """Register the single :class:`VectorSearchTool` into ``registry``.
 
     Mirrors :func:`build_graph_tool`: a thin builder the factory (task 17) calls
@@ -202,11 +226,12 @@ def build_vector_tool(registry: ToolRegistry, vector_retriever: VectorRetriever,
         registry: The :class:`ToolRegistry` to register the tool into.
         vector_retriever: The shared :class:`VectorRetriever` the tool wraps.
         embed_client: The embed client used to embed sub-question text.
+        entitlement_gate: Optional ``DocumentEntitlementGate`` (fork).
 
     Returns:
         The registered Tool name (``"vector_search"``).
     """
-    tool = VectorSearchTool(vector_retriever, embed_client)
+    tool = VectorSearchTool(vector_retriever, embed_client, entitlement_gate=entitlement_gate)
     registry.register(tool)
     logger.info("vector_tool_registered", tool_name=tool.name)
     return tool.name
