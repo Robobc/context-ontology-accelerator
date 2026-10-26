@@ -261,6 +261,10 @@ def get_job(job_id: str, namespace: str) -> dict:
 # ── Worker thread ───────────────────────────────────────────────────────
 
 
+class AccessControlledGraphError(RuntimeError):
+    """The lexical graph belongs to a per-user document store; induction over it is refused (fork)."""
+
+
 def _build_lexical_store(graph_arn: str, region: str, app_config: dict, namespace: str = ""):
     """Build the appropriate lexical store for the given graph endpoint.
 
@@ -368,6 +372,14 @@ def _run_unstructured_induction(
         region = _parse_region(body.graph_arn) or app_config.get("bedrock_region", "us-east-1")
 
         lexical_store = _build_lexical_store(body.graph_arn, region, app_config, namespace=ns)
+        # Fork (ADR 0011): a graph built from an access-controlled Knowledge Base
+        # must not be promoted into a namespace-wide ontology. Checked before any
+        # LLM work; the job fails and no proposal is created.
+        if lexical_store.has_access_controlled_sources():
+            raise AccessControlledGraphError(
+                "unstructured induction is not available for a namespace whose documents live in an "
+                "access-controlled Knowledge Base (graph sources are 'aws:doc:*'); see ADR 0011"
+            )
         from coa_common import DEFAULT_EMBED_MODEL_ID
 
         embedding_client = BedrockEmbeddingClient(

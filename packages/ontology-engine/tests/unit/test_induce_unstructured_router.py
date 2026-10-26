@@ -594,7 +594,7 @@ class TestRunUnstructuredInductionWorker:
     def _make_request_body(self) -> UnstructuredInductionRequest:
         return UnstructuredInductionRequest(**_valid_request_body())
 
-    def _patch_external_dependencies(self, stack: ExitStack) -> None:
+    def _patch_external_dependencies(self, stack: ExitStack, *, access_controlled: bool = False) -> None:
         """Patch every AWS-touching client constructor used by the worker.
 
         The worker constructs :class:`NeptuneAnalyticsLexicalStore`,
@@ -628,13 +628,39 @@ class TestRunUnstructuredInductionWorker:
             "InMemoryIRIResolver": IRIResolver,
         }
         for name, cls in spec_map.items():
+            double = MagicMock(spec=cls)
+            if cls is LexicalGraphStore:
+                # Fork (ADR 0011): an ordinary graph; the guard test flips this to True.
+                double.has_access_controlled_sources.return_value = access_controlled
+            stack.enter_context(patch.object(induce_unstructured, name, return_value=double))
+
+    def test_access_controlled_graph_fails_before_any_llm_work(self):
+        """Fork (ADR 0011): a graph whose sources are Bedrock KB documents (``aws:doc:*``)
+        must not be induced into a namespace-wide ontology. The job fails before the
+        pipeline runs and no proposal is created.
+        """
+        body = self._make_request_body()
+        pipeline_mock = MagicMock()
+
+        with ExitStack() as stack:
+            ds = stack.enter_context(patch.object(induce_unstructured, "dynamo_store", autospec=True))
             stack.enter_context(
-                patch.object(
-                    induce_unstructured,
-                    name,
-                    return_value=MagicMock(spec=cls),
-                )
+                patch.object(induce_unstructured, "UnstructuredInductionPipeline", return_value=pipeline_mock)
             )
+            self._patch_external_dependencies(stack, access_controlled=True)
+
+            induce_unstructured._run_unstructured_induction("job-acl", body, _NS, {})
+
+            pipeline_mock.run.assert_not_called()
+            ds.create_proposal.assert_not_called()
+            failed = [
+                c
+                for c in ds.update_job_status.call_args_list
+                if c.kwargs.get("status") == InductionJobStatus.FAILED.value
+            ]
+            assert len(failed) == 1
+            assert "AccessControlledGraphError" in failed[0].kwargs["error"]
+            assert "ADR 0011" in failed[0].kwargs["error"]
 
     def test_pipeline_exception_marks_job_failed_and_creates_no_proposal(self):
         """When the pipeline raises, the worker persists ``status="failed"``

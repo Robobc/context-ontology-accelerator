@@ -622,6 +622,23 @@ class TestErrorHandling:
             store._oc_query("RETURN 1 AS ok")
 
 
+class TestHasAccessControlledSources:
+    """Fork (ADR 0011): the graph declares its own origin through ``aws:doc:`` source ids."""
+
+    def test_true_when_a_source_is_a_kb_document(self):
+        mock_client = MagicMock()
+        mock_client.execute_query.return_value = _make_payload([{"acl": True}])
+        assert _make_store(mock_client).has_access_controlled_sources() is True
+        sent = mock_client.execute_query.call_args.kwargs
+        assert "__Source__" in sent["queryString"] and "STARTS WITH $prefix" in sent["queryString"]
+        assert sent["parameters"] == {"prefix": "aws:doc:"}
+
+    def test_false_for_an_ordinary_graph(self):
+        mock_client = MagicMock()
+        mock_client.execute_query.return_value = _make_payload([{"acl": False}])
+        assert _make_store(mock_client).has_access_controlled_sources() is False
+
+
 # ── Fact value parsing helpers ─────────────────────────────────────────
 
 

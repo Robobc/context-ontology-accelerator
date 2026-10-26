@@ -278,6 +278,14 @@ class NeptuneDatabaseLexicalStore:
         relations = self.get_class_relations()
         return ClassSchemaResult(classes=classes, relations=relations)
 
+    def has_access_controlled_sources(self) -> bool:
+        """True when any ``__Source__`` node is a Bedrock KB document (``aws:doc:`` id); fork, ADR 0011."""
+        results = self._oc_query(
+            f"MATCH (s:{self._label('Source')}) WHERE id(s) STARTS WITH $prefix RETURN count(s) > 0 AS acl",
+            {"prefix": "aws:doc:"},
+        )
+        return bool(results and results[0].get("acl"))
+
     def health_check(self) -> dict:
         """Probe the Neptune DB connection with a trivial query.
 

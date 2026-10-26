@@ -771,6 +771,14 @@ class NeptuneAnalyticsLexicalStore:
             if row.get("topic_id") is not None and row.get("value") is not None
         ]
 
+    def has_access_controlled_sources(self) -> bool:
+        """True when any ``__Source__`` node is a Bedrock KB document (``aws:doc:`` id); fork, ADR 0011."""
+        results = self._oc_query(
+            "MATCH (s:`__Source__`) WHERE id(s) STARTS WITH $prefix RETURN count(s) > 0 AS acl",
+            {"prefix": "aws:doc:"},
+        )
+        return bool(results and results[0].get("acl"))
+
     def health_check(self) -> dict:
         """Cheap probe returning backend health status.
 

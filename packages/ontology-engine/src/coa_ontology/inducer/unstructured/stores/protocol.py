@@ -205,6 +205,18 @@ class LexicalGraphStore(Protocol):
         """
         ...
 
+    def has_access_controlled_sources(self) -> bool:
+        """True when the lexical graph was built from an access-controlled document store.
+
+        kg-build gives documents loaded from a Bedrock Knowledge Base with
+        document-level ACL a ``__Source__`` node id prefixed ``aws:doc:``. Such a
+        graph holds every document's facts under one tenant while the Knowledge
+        Base authorizes per user; promoting its entities into a namespace-wide
+        ontology would leak restricted documents into every caller's view, so
+        induction over it is refused (fork, ADR 0011).
+        """
+        ...
+
     def get_graph_schema(self) -> ClassSchemaResult:
         """Retrieve the class distribution and inter-class relationships.
 
