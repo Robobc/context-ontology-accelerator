@@ -61,9 +61,11 @@ changes each release.
 
 **serve, graph.** One `DocumentEntitlementGate`, built at startup and shared,
 applies to every namespace routed to a per-user Knowledge Base and to every
-reader of the lexical graph: the agentic graph-traversal and chunk-window
-tools, the agentic `strategy:*` tools and the lexical-baseline Tier-3 path
-(the last two through the one `BaselineLexicalRetriever` adapter they share).
+reader of the lexical graph: the agentic graph-traversal, chunk-window and
+vector-search tools, the agentic `strategy:*` tools and the lexical-baseline
+Tier-3 path (the last two through the one `BaselineLexicalRetriever` adapter
+they share, which gates result nodes by source document and then the entity
+labels those nodes aggregate from other documents).
 Before any graph-derived content is returned, the gate resolves its provenance
 to source documents (`chunk -> source`, `source id -> uri` for toolkit result
 nodes, or `entity -> fact -> statement -> chunk -> source` for statement text
@@ -90,8 +92,12 @@ and the non-agentic `KnowledgeRetriever` is **not** gated per document. It is
 authorized at namespace level by the Cedar admission gate, and it holds induced
 classes and properties, not document text. That holds only as long as
 unstructured induction is **not** run over a per-user Knowledge Base's lexical
-graph (it would promote document-derived individuals into the ontology);
-`BEDROCK_MANAGED_KB` sources therefore produce no induction proposal.
+graph (it would promote document-derived individuals into the ontology). This
+is enforced, not assumed: the graph declares its own origin (KB documents are
+`__Source__` nodes with ids `aws:doc:*`), and the unstructured induction worker
+checks `LexicalGraphStore.has_access_controlled_sources()` right after
+connecting; a positive answer fails the job before any LLM call and creates no
+proposal (`AccessControlledGraphError`). No second source of truth is needed.
 
 **Flag coupling.** `BEDROCK_KB_SEARCH_MODE=managed` implies
 `BEDROCK_KB_ENFORCE_USER_CONTEXT=true` unless set to `false` explicitly, and
@@ -163,8 +169,26 @@ entry, restored on exit, also when the body raises).
 Review: an independent review of the first gate commit found the request-scope
 leak, the ungated lexical path, the entity-label leak and the mocked wiring
 tests; all four are closed above and the end-to-end file was the response to
-the last one. A second independent review of the fixed state precedes the
-deployed run.
+the last one. A second independent review of the fixed state returned no
+blocker and two majors, both closed: entity labels the lexical path aggregates
+from a node's `entity_contexts` (which span documents) are now gated per entity,
+and the induction suppression is enforced in the worker rather than asserted.
+It also had the agentic `vector_search` tool gated (the OpenSearch chunk index
+holds every document's text under `VECTOR_STORE_MODE=AOSS`), a `chunk_window`
+end-to-end control added, and the `main.py` wiring pinned statically.
+
+Deployed observation step (must pass before the gate is trusted live), as the
+second review phrased it:
+
+1. A known **entitled** document round-trips: the graph's
+   `__Source__.source_uri` must byte-equal the `_source_uri` value the
+   Knowledge Base filters on (encoding, case, trailing slash). Assert an
+   entitled document probes `True`, not only that a denied one probes `False`;
+   a mismatch fails closed for every document and looks like an outage.
+2. The probe query (`"document"`, `numberOfResults=1`, filtered to one
+   document) returns a hit for an entitled document that contains nothing
+   relevant to that word. If it does not, the probe must move to a content-free
+   check before GA.
 
 Deployed (pending): against a Knowledge Base with a document-level ACL data
 source, build the graph, then query as two users with different entitlements
