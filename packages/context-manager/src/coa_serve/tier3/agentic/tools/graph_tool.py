@@ -243,25 +243,32 @@ class GraphTraversalTool:
     async def invoke(self, *, namespace: str, mode: str = "keyword", **kwargs: Any) -> ToolResult:
         """Run a traversal scoped to ``namespace``; see :meth:`_invoke` for the modes."""
         result = await self._invoke(namespace=namespace, mode=mode, **kwargs)
-        if self._entitlement_gate is None or not result.chunks:
+        if self._entitlement_gate is None or (not result.chunks and not result.entities):
             return result
         profile = kwargs.get("profile") or {}
+        user_id = profile.get("email") or profile.get("userId")
         try:
-            kept = await self._entitlement_gate.filter_statement_chunks(
-                list(result.chunks), namespace, user_id=profile.get("email") or profile.get("userId")
+            kept_chunks = await self._entitlement_gate.filter_statement_chunks(
+                list(result.chunks), namespace, user_id=user_id
             )
-        except Exception as exc:  # fail closed on the text, keep the entity structure
+            kept_entities = await self._entitlement_gate.filter_entities(result.entities, namespace, user_id=user_id)
+        except Exception as exc:  # fail closed: labels are document-derived text too
             logger.warning("graph_tool_entitlement_failed", tool=self.name, error=type(exc).__name__)
-            kept = []
-        if len(kept) == len(result.chunks):
+            return ToolResult(detail=f"{self.name}: document entitlement check failed; nothing returned")
+        if len(kept_chunks) == len(result.chunks) and len(kept_entities) == len(result.entities):
             return result
-        items = tuple(_chunk_item(c) for c in kept) + tuple(_entity_item(e) for e in result.entities)
+        items = tuple(_chunk_item(c) for c in kept_chunks) + tuple(_entity_item(e) for e in kept_entities)
+        withheld = (
+            f"{len(result.chunks) - len(kept_chunks)} statement(s) and "
+            f"{len(result.entities) - len(kept_entities)} entity(ies) withheld by document entitlement"
+        )
         return ToolResult(
-            chunks=tuple(kept),
-            entities=result.entities,
+            chunks=tuple(kept_chunks),
+            entities=tuple(kept_entities),
             items=items,
-            detail=f"{result.detail}; {len(result.chunks) - len(kept)} statement(s) withheld by document entitlement",
-            produced_directions=result.produced_directions,
+            detail=f"{result.detail}; {withheld}",
+            # Directions are entity labels handed to the planner: rebuild from what survived.
+            produced_directions=tuple(e.label for e in kept_entities if e.label),
         )
 
     async def _invoke(self, *, namespace: str, mode: str = "keyword", **kwargs: Any) -> ToolResult:

@@ -44,7 +44,7 @@ from .identity import display_principal, extract_jwt_identity, resolve_principal
 from .models import InvokeRequest, TraceStep
 from .namespace_language import bind_label_preference
 from .orchestrator import Orchestrator
-from .request_identity import set_request_user
+from .request_identity import reset_request_user, set_request_user
 from .role_resolver import ResolvedProfile, may_view_debug_info, resolve_profile
 from .session import SessionManager
 from .session_actions import (
@@ -312,9 +312,16 @@ async def _ensure_initialized():
         )
 
         # Lexical baseline retriever — only when TIER3_STRATEGY="lexical-baseline"
-        from .clients.factory import build_lexical_retriever
+        # Fork: one document entitlement gate shared by every reader of the lexical
+        # graph (baseline retriever, agentic strategy/graph/chunk tools); None unless
+        # a namespace's documents live in a per-user Bedrock KB.
+        from .clients.factory import _graph_store_uri, build_lexical_retriever
+        from .tier3.document_entitlement import build_document_entitlement_gate
 
-        lexical_retriever = build_lexical_retriever(config)
+        entitlement_gate = build_document_entitlement_gate(
+            _graph_store_uri(config.neptune_endpoint) if config.neptune_endpoint else "", document_retriever
+        )
+        lexical_retriever = build_lexical_retriever(config, entitlement_gate=entitlement_gate)
 
         knowledge_retriever = KnowledgeRetriever(
             vector_retriever=document_retriever,
@@ -409,7 +416,7 @@ async def _ensure_initialized():
                 step_planner,
                 structured_query_tier=structured_query_tier,
                 guardrail_id_provider=guardrail_provider.guardrail_id,
-                document_retriever=document_retriever,  # fork: per-user KB entitlement gate
+                entitlement_gate=entitlement_gate,  # fork: per-user KB document entitlement
             )
         except Exception as exc:
             logger.warning("agentic_retriever_unavailable", error=type(exc).__name__, error_msg=str(exc)[:200])
@@ -1392,6 +1399,23 @@ async def _authorize_namespace_access(
 
 @app.entrypoint
 async def invoke(payload: dict, context=None):
+    """AgentCore entrypoint; scopes the fork's request identity around :func:`_invoke`.
+
+    Fork: the caller published by the admission gate (``set_request_user``) must
+    not outlive its request. A worker that handled an admitted request and then
+    serves one that skips admission (session CRUD, ``semanticPlan``,
+    ``translate``) would otherwise still read the previous caller from the
+    ``ContextVar``. Clear on entry, restore on exit, whatever path the body takes.
+    """
+    token = set_request_user(None)
+    try:
+        async for event in _invoke(payload, context):
+            yield event
+    finally:
+        reset_request_user(token)
+
+
+async def _invoke(payload: dict, context=None):
     """Main entrypoint — AgentCore @app.entrypoint streaming handler.
 
     All consumer surfaces (Lambda handlers, Playground SSE, MCP) route here.

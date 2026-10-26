@@ -20,6 +20,8 @@ from coa_serve.request_identity import get_request_user, reset_request_user, set
 from coa_serve.tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
 from coa_serve.tier3.document_entitlement import (
     CHUNK_PROVENANCE,
+    ENTITY_PROVENANCE,
+    SOURCE_PROVENANCE,
     STATEMENT_PROVENANCE,
     DocumentEntitlementGate,
     kb_retriever_resolver,
@@ -143,6 +145,21 @@ class TestRetriever:
         r2 = BedrockKnowledgeBaseRetriever(KB, client=client, enforce_user_context=False)
         assert await r2.entitled_source_uris([FINANCE], user_id="alice@example.com") == set()  # not per-user
 
+    @pytest.mark.asyncio
+    async def test_probe_distinguishes_denied_from_unresolved(self, alice):
+        client = AclKbClient()
+        real = client.retrieve
+
+        def retrieve(**kwargs):
+            if kwargs["retrievalConfiguration"]["managedSearchConfiguration"]["filter"]["equals"]["value"] == SHARED:
+                raise RuntimeError("ThrottlingException")
+            return real(**kwargs)
+
+        client.retrieve = retrieve
+        r = BedrockKnowledgeBaseRetriever(KB, client=client, search_mode="managed", enforce_user_context=True)
+        assert await r.probe_source_uris([FINANCE, HR, SHARED]) == {FINANCE: True, HR: False, SHARED: None}
+        assert await r.entitled_source_uris([FINANCE, HR, SHARED]) == {FINANCE}
+
     def test_search_mode_validated(self):
         with pytest.raises(ValueError):
             BedrockKnowledgeBaseRetriever(KB, search_mode="hybrid")
@@ -257,7 +274,92 @@ class TestGate:
     def test_templates_resolve_provenance_via_source_uri(self):
         assert "s.source_uri AS uri" in CHUNK_PROVENANCE and "__EXTRACTED_FROM__" in CHUNK_PROVENANCE
         for edge in ("__SUBJECT__", "__SUPPORTS__", "__MENTIONED_IN__", "__EXTRACTED_FROM__"):
-            assert edge in STATEMENT_PROVENANCE
+            assert edge in STATEMENT_PROVENANCE and edge in ENTITY_PROVENANCE
+        assert "id(s) AS sourceId" in SOURCE_PROVENANCE
+
+    @pytest.mark.asyncio
+    async def test_entities_need_one_entitled_source_document(self, alice):
+        from coa_serve.tier3.graph_traverser import GraphEntity
+
+        gate = _gate(
+            _per_user_retriever(),
+            {
+                "RETURN DISTINCT id(e) AS entityId": [
+                    {"entityId": "e1", "uri": FINANCE},
+                    {"entityId": "e2", "uri": HR},
+                    {"entityId": "e3", "uri": HR},
+                    {"entityId": "e3", "uri": SHARED},
+                ]
+            },
+        )
+        entities = [
+            GraphEntity(uri="e1", label="Q3 Revenue", type="T"),
+            GraphEntity(uri="e2", label="Band 4", type="T"),  # HR only: withheld
+            GraphEntity(uri="e3", label="Handbook", type="T"),  # HR + shared: one entitled is enough
+            GraphEntity(uri="e4", label="Orphan", type="T"),  # no provenance: withheld
+        ]
+        kept = await gate.filter_entities(entities, "ns")
+        assert [e.label for e in kept] == ["Q3 Revenue", "Handbook"]
+        assert await gate.filter_entities(entities, "ns", user_id="carol@example.com") == []
+
+    @pytest.mark.asyncio
+    async def test_lexical_nodes_are_gated_by_their_source_document(self, alice):
+        from types import SimpleNamespace
+
+        gate = _gate(
+            _per_user_retriever(),
+            {
+                "WHERE id(s) IN $source_ids": [
+                    {"sourceId": "aws:doc:fin", "uri": FINANCE},
+                    {"sourceId": "aws:doc:hr", "uri": HR},
+                ]
+            },
+        )
+
+        def node(text, source):
+            meta = {"source": {"sourceId": source}} if source is not None else {}
+            return SimpleNamespace(node_id=text, text=text, score=0.5, metadata=meta)
+
+        nodes = [
+            node("finance text", "aws:doc:fin"),
+            node("hr text", "aws:doc:hr"),
+            node("staged text", "7f3a-toolkit-hash"),  # not a KB source: passes through
+            node("unplaceable text", None),  # no provenance: fail closed
+            node("orphan kb text", "aws:doc:unknown"),  # KB source the graph does not know: fail closed
+        ]
+        kept = await gate.filter_lexical_nodes(nodes, "ns")
+        assert [n.text for n in kept] == ["finance text", "staged text"]
+        assert "hr text" not in [n.text for n in kept]
+        assert await gate.filter_lexical_nodes(nodes, "ns", user_id="carol@example.com") == [nodes[2]]
+
+    @pytest.mark.asyncio
+    async def test_unresolved_probe_withholds_without_caching_a_denial(self, alice):
+        """A throttled KB must not become a 60 s 'not entitled' answer."""
+        retriever = _per_user_retriever()
+        flaky = {"fail": True}
+        real_retrieve = retriever._client.retrieve
+
+        def retrieve(**kwargs):
+            if flaky["fail"] and kwargs["retrievalConfiguration"]["managedSearchConfiguration"]["numberOfResults"] == 1:
+                raise RuntimeError("ThrottlingException")
+            return real_retrieve(**kwargs)
+
+        retriever._client.retrieve = retrieve
+        gate = _gate(retriever, {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": "aws:fin2", "uri": FINANCE}]})
+        chunks = [ChunkResult("aws:fin2", "t", "", 1.0)]
+        assert await gate.filter_chunks(chunks, "ns") == []  # withheld for this request
+        assert gate._cache == {}  # but not remembered as a denial
+        flaky["fail"] = False
+        assert [c.chunk_id for c in await gate.filter_chunks(chunks, "ns")] == ["aws:fin2"]
+
+    @pytest.mark.asyncio
+    async def test_cache_is_bounded(self, alice):
+        retriever = _per_user_retriever()
+        retriever._client.docs = {f"sp://d/{i}": (f"c{i}", "t") for i in range(6)}
+        gate = _gate(retriever, {})
+        gate._cache_max_entries = 4
+        await gate.entitled_uris("ns", list(retriever._client.docs))
+        assert len(gate._cache) <= 4
 
 
 @pytest.mark.unit
@@ -326,7 +428,7 @@ class TestToolWiring:
         assert result.chunks == () and "entitlement" in result.detail
 
     @pytest.mark.asyncio
-    async def test_graph_tool_withholds_statements_but_keeps_entities(self):
+    async def test_graph_tool_withholds_statements_and_unentitled_entities(self):
         from coa_serve.tier3.agentic.tools.base import ToolResult
         from coa_serve.tier3.agentic.tools.graph_tool import GraphTraversalTool
         from coa_serve.tier3.graph_traverser import GraphEntity
@@ -336,15 +438,23 @@ class TestToolWiring:
         async def _filter(chunks, namespace, user_id=None):
             return [c for c in chunks if c.uri == "e1"]
 
+        async def _filter_entities(entities, namespace, user_id=None):
+            assert user_id == "alice@example.com"
+            return [e for e in entities if e.uri == "e1"]
+
         gate.filter_statement_chunks = _filter
+        gate.filter_entities = _filter_entities
         tool = GraphTraversalTool("neptune-db://h:8182", entitlement_gate=gate)
-        entities = (GraphEntity(uri="e1", label="E1", type="Thing"), GraphEntity(uri="e2", label="E2", type="Thing"))
+        e1, e2 = (
+            GraphEntity(uri="e1", label="E1", type="Thing"),
+            GraphEntity(uri="e2", label="Project Falcon", type="T"),
+        )
         inner = ToolResult(
             chunks=(
                 ChunkResult("e1#stmt0", "ok", "", 1.0, uri="e1"),
                 ChunkResult("e2#stmt0", "secret", "", 1.0, uri="e2"),
             ),
-            entities=entities,
+            entities=(e1, e2),
             items=(),
             detail="graph_traversal[edge_typed]: 2 connected nodes, 2 with text",
         )
@@ -355,8 +465,62 @@ class TestToolWiring:
         tool._invoke = _inner  # type: ignore[method-assign]
         result = await tool.invoke(namespace="ns", mode="edge_typed", profile={"email": "alice@example.com"})
         assert [c.text for c in result.chunks] == ["ok"]
-        assert result.entities == entities
-        assert "1 statement(s) withheld" in result.detail
+        assert result.entities == (e1,)
+        assert "Project Falcon" not in repr(result)
+        assert "1 statement(s) and 1 entity(ies) withheld" in result.detail
+
+    @pytest.mark.asyncio
+    async def test_graph_tool_gates_keyword_mode_entities_without_text(self):
+        """Keyword mode returns labels only (no chunks); they are document-derived text and must be gated."""
+        from coa_serve.tier3.agentic.tools.base import ToolResult
+        from coa_serve.tier3.agentic.tools.graph_tool import GraphTraversalTool
+        from coa_serve.tier3.graph_traverser import GraphEntity
+
+        gate = MagicMock()
+
+        async def _no_statements(chunks, namespace, user_id=None):
+            return list(chunks)
+
+        async def _only_e1(entities, namespace, user_id=None):
+            return [e for e in entities if e.uri == "e1"]
+
+        gate.filter_statement_chunks = _no_statements
+        gate.filter_entities = _only_e1
+        tool = GraphTraversalTool("neptune-db://h:8182", entitlement_gate=gate)
+        inner = ToolResult(
+            entities=(GraphEntity(uri="e1", label="Public", type="T"), GraphEntity(uri="e2", label="Secret", type="T")),
+            detail="graph_traversal[keyword]: 2 entities",
+        )
+
+        async def _inner(**kwargs):
+            return inner
+
+        tool._invoke = _inner  # type: ignore[method-assign]
+        result = await tool.invoke(namespace="ns", mode="keyword", query="x", profile={"userId": "alice@example.com"})
+        assert [e.label for e in result.entities] == ["Public"]
+
+    @pytest.mark.asyncio
+    async def test_graph_tool_fails_closed_when_gate_errors(self):
+        from coa_serve.tier3.agentic.tools.base import ToolResult
+        from coa_serve.tier3.agentic.tools.graph_tool import GraphTraversalTool
+        from coa_serve.tier3.graph_traverser import GraphEntity
+
+        gate = MagicMock()
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("neptune down")
+
+        gate.filter_statement_chunks = _boom
+        gate.filter_entities = _boom
+        tool = GraphTraversalTool("neptune-db://h:8182", entitlement_gate=gate)
+        inner = ToolResult(entities=(GraphEntity(uri="e2", label="Secret", type="T"),), detail="d")
+
+        async def _inner(**kwargs):
+            return inner
+
+        tool._invoke = _inner  # type: ignore[method-assign]
+        result = await tool.invoke(namespace="ns", mode="keyword", query="x", profile={"userId": "u"})
+        assert result.entities == () and result.chunks == () and "entitlement" in result.detail
 
     @pytest.mark.asyncio
     async def test_tools_without_gate_are_unchanged(self):
@@ -390,7 +554,12 @@ class TestConfig:
         monkeypatch.delenv("BEDROCK_KB_ENFORCE_USER_CONTEXT", raising=False)
         cfg = load_config()
         assert cfg.bedrock_kb_search_mode == "vector" and cfg.bedrock_kb_enforce_user_context is False
+        # Managed KBs carry document ACL: per-user retrieval is implied unless opted out.
         monkeypatch.setenv("BEDROCK_KB_SEARCH_MODE", "managed")
+        cfg = load_config()
+        assert cfg.bedrock_kb_search_mode == "managed" and cfg.bedrock_kb_enforce_user_context is True
+        monkeypatch.setenv("BEDROCK_KB_ENFORCE_USER_CONTEXT", "false")
+        assert load_config().bedrock_kb_enforce_user_context is False  # explicit opt-out, logged
         monkeypatch.setenv("BEDROCK_KB_ENFORCE_USER_CONTEXT", "true")
         cfg = load_config()
         assert cfg.bedrock_kb_search_mode == "managed" and cfg.bedrock_kb_enforce_user_context is True

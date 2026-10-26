@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import structlog
@@ -176,9 +176,12 @@ def build_llm_client(config: ServiceConfig):
 
 
 def build_lexical_retriever(
-    config: ServiceConfig, *, timeout_s: float | None = None
+    config: ServiceConfig, *, timeout_s: float | None = None, entitlement_gate: Any | None = None
 ) -> BaselineLexicalRetriever | None:
     """Build the lexical baseline retriever (graphrag-toolkit adapter).
+
+    ``entitlement_gate`` (fork): the service's ``DocumentEntitlementGate``, applied
+    to every result node for per-user Bedrock KB namespaces; ``None`` = off.
 
     Built on every deployment so a per-request ``options.retrieverStrategy`` can
     trigger graphrag retrieval on-demand, regardless of ``TIER3_STRATEGY``.
@@ -251,5 +254,6 @@ def build_lexical_retriever(
         graph_store_uri=graph_uri,
         vector_store_uri=vector_store_uri,
         strategy=DEFAULT_SPEC,
+        entitlement_gate=entitlement_gate,
         **({"timeout_s": timeout_s} if timeout_s is not None else {}),
     )

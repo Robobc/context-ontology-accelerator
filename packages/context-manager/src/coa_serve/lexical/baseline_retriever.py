@@ -19,6 +19,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Any
 
 import graphrag_toolkit.lexical_graph.config as _graphrag_cfg
 import structlog
@@ -229,6 +230,7 @@ class BaselineLexicalRetriever:
         post_processors: list | None = None,
         timeout_s: float = 15.0,
         tenant_id_override: str | None = None,
+        entitlement_gate: Any | None = None,
     ):
         """Configure the graphrag stores, strategy, and lexical retrieval knobs.
 
@@ -241,10 +243,14 @@ class BaselineLexicalRetriever:
             timeout_s: Per-query retrieval timeout in seconds.
             tenant_id_override: Eval-only tenant override; None derives the tenant
                 from the namespace (production default).
+            entitlement_gate: Optional ``DocumentEntitlementGate`` (fork): drops
+                result nodes from documents the caller may not read before they
+                are mapped. ``None`` = off.
         """
         self._graph_store_uri = graph_store_uri
         self._vector_store_uri = vector_store_uri
         self._strategy = strategy
+        self._entitlement_gate = entitlement_gate
         # Optional explicit escape hatch for tests: when provided, these override
         # the strategy's own retriever/post-processor configuration.
         self._retrievers = retrievers
@@ -493,6 +499,23 @@ class BaselineLexicalRetriever:
                 }
             )
             return BaselineResult(chunks=(), entities=(), trace_steps=tuple(trace_steps))
+
+        # Fork: per-user Bedrock KB namespaces -- drop nodes from documents this
+        # caller may not read before any text or entity leaves the adapter.
+        if self._entitlement_gate is not None and nodes:
+            try:
+                nodes = await self._entitlement_gate.filter_lexical_nodes(nodes, namespace)
+            except Exception as e:  # fail closed: no text rather than everyone's text
+                logger.warning("baseline_entitlement_failed", error_type=type(e).__name__)
+                trace_steps.append(
+                    {
+                        "step": StepId.LEXICAL_BASELINE_RETRIEVE,
+                        "status": "error",
+                        "durationMs": int((time.perf_counter() - start) * 1000),
+                        "detail": f"strategy={resolved.name}; document entitlement check failed",
+                    }
+                )
+                return BaselineResult(chunks=(), entities=(), trace_steps=tuple(trace_steps))
 
         chunks, entities = self._map_results(nodes)
 

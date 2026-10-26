@@ -232,24 +232,26 @@ class BedrockKnowledgeBaseRetriever:
             )
         return chunks
 
-    async def entitled_source_uris(self, source_uris: Iterable[str], user_id: str | None = None) -> set[str]:
-        """Which of ``source_uris`` the caller may read, per the KB's document ACL.
+    async def probe_source_uris(self, source_uris: Iterable[str], user_id: str | None = None) -> dict[str, bool | None]:
+        """Per document: ``True`` the caller may read it, ``False`` the KB denies it, ``None`` unknown.
 
         One ``Retrieve`` per document (``numberOfResults=1``, filtered on
         ``_source_uri``, with ``userContext``): a non-empty answer means the KB
-        lets this user see that document. Used by the document entitlement gate
-        before graph-derived text (adjacent chunks, supporting statements) is
-        shown. Fails closed: an unknown caller or a KB error entitles nothing.
+        lets this user see that document; an empty one means it does not. A call
+        that fails (throttled, unavailable) yields ``None`` so the caller can
+        withhold the document for this request without caching the outage as a
+        denial. An unknown caller, or a KB not queried per user, yields ``False``
+        for everything (fail closed).
         """
         uris = {u for u in source_uris if u}
         if not uris:
-            return set()
+            return {}
         user_context = self._user_context(user_id)
         if user_context is None:
-            return set()
+            return dict.fromkeys(uris, False)
         client = self._get_client()
         config_key = "managedSearchConfiguration" if self._search_mode == "managed" else "vectorSearchConfiguration"
-        entitled: set[str] = set()
+        answers: dict[str, bool | None] = {}
         for uri in uris:
             try:
                 response = await asyncio.to_thread(
@@ -266,10 +268,18 @@ class BedrockKnowledgeBaseRetriever:
                 )
             except Exception as exc:
                 logger.warning("bedrock_kb_entitlement_probe_failed", error=type(exc).__name__)
+                answers[uri] = None
                 continue
-            if response.get("retrievalResults"):
-                entitled.add(uri)
-        return entitled
+            answers[uri] = bool(response.get("retrievalResults"))
+        return answers
+
+    async def entitled_source_uris(self, source_uris: Iterable[str], user_id: str | None = None) -> set[str]:
+        """Which of ``source_uris`` the caller may read, per the KB's document ACL.
+
+        Convenience over :meth:`probe_source_uris`: unknown counts as not entitled.
+        """
+        answers = await self.probe_source_uris(source_uris, user_id=user_id)
+        return {uri for uri, ok in answers.items() if ok}
 
     async def close(self) -> None:
         """Release the lazily-created boto3 client."""

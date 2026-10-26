@@ -340,9 +340,13 @@ def load_config() -> ServiceConfig:
     bedrock_kb_search_mode = os.environ.get("BEDROCK_KB_SEARCH_MODE", "vector").strip().lower() or "vector"
     if bedrock_kb_search_mode not in ("vector", "managed"):
         raise ConfigurationError("BEDROCK_KB_SEARCH_MODE must be 'vector' or 'managed'")
-    bedrock_kb_enforce_user_context = (
-        os.environ.get("BEDROCK_KB_ENFORCE_USER_CONTEXT", "false").strip().lower() == "true"
-    )
+    # A Managed KB carries document-level ACL, so per-user retrieval is the default
+    # there; an operator must opt out explicitly (a KB without ACL) and the opt-out
+    # is logged so a misconfigured deployment is visible rather than silently open.
+    enforce_raw = os.environ.get("BEDROCK_KB_ENFORCE_USER_CONTEXT", "").strip().lower()
+    bedrock_kb_enforce_user_context = enforce_raw == "true" if enforce_raw else bedrock_kb_search_mode == "managed"
+    if bedrock_kb_search_mode == "managed" and not bedrock_kb_enforce_user_context:
+        logger.warning("bedrock_kb_managed_without_user_context", knowledge_base_id=bedrock_kb_id)
 
     generation_backend = os.environ.get("GENERATION_BACKEND", "bedrock")
     if generation_backend not in ("bedrock", "portkey"):
