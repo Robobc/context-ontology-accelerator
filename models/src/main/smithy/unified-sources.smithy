@@ -934,6 +934,45 @@ list S3PrefixList {
     member: S3Prefix
 }
 
+/// Amazon Bedrock Knowledge Base identifier (10 upper-case alphanumerics).
+@pattern("^[A-Z0-9]{10}$")
+@length(min: 10, max: 10)
+string BedrockKnowledgeBaseId
+
+/// Amazon Bedrock Knowledge Base data source identifier.
+@pattern("^[A-Z0-9]{10}$")
+@length(min: 10, max: 10)
+string BedrockDataSourceId
+
+@length(max: 50)
+list BedrockDataSourceIdList {
+    member: BedrockDataSourceId
+}
+
+/// Bedrock Managed Knowledge Base config. Required for the BEDROCK_MANAGED_KB
+/// sub-type and selects it; mutually exclusive with sourceBucketArn/uploadId.
+///
+/// Extraction reads the KB under extractionRoleArn, a role in the KB owner's
+/// account named `{prefix}-datasource-access-*` that trusts this deployment's
+/// KG-build task role with the namespace's External ID (shown on GetNamespace),
+/// and grants `bedrock:Retrieve`, `bedrock:GetDocumentContent` and
+/// `bedrock:ListKnowledgeBaseDocuments` on the knowledge base. That role sees
+/// every document — extraction has to — which is why the registration binds it
+/// to the namespace with the External ID exactly as database sources do.
+structure BedrockKnowledgeBaseConfiguration {
+    @required
+    knowledgeBaseId: BedrockKnowledgeBaseId
+
+    /// Data sources to extract from. All of the KB's data sources when omitted.
+    dataSourceIds: BedrockDataSourceIdList
+
+    /// Region of the knowledge base. This deployment's region when omitted.
+    region: AwsRegion
+
+    @required
+    extractionRoleArn: IamRoleArn
+}
+
 /// Type of per-file preprocessing issue.
 enum PreprocessingIssueType {
     /// The file was skipped during preprocessing.
@@ -1031,6 +1070,14 @@ enum SourceSubType {
 
     /// Unstructured: direct file upload
     LOCAL_UPLOAD
+
+    /// Unstructured: an existing Amazon Bedrock Managed Knowledge Base. The
+    /// KB keeps parsing, chunking, chunk embedding and document-level ACL; this
+    /// service reads the KB's own chunks (same chunk ids) and runs only the
+    /// LLM entity/fact extraction into the graph. No files are staged, no
+    /// chunk vectors are written here, and the namespace's queries go through
+    /// the KB with the caller's identity so its ACL applies to every answer.
+    BEDROCK_MANAGED_KB
 }
 
 /// Unified lifecycle status for all source types.
@@ -1272,6 +1319,11 @@ structure CreateDocumentSourceInput {
     /// IAM role for cross-account S3 access.
     roleArn: IamRoleArn
 
+    /// Bedrock Managed Knowledge Base to read chunks from. Setting it selects the
+    /// BEDROCK_MANAGED_KB sub-type; s3Prefixes, uploadId and sourceBucketArn must
+    /// then be absent.
+    bedrockKnowledgeBaseConfiguration: BedrockKnowledgeBaseConfiguration
+
     extractionConfig: ExtractionConfig
 }
 
@@ -1452,6 +1504,9 @@ structure DocumentSourceDetail {
     sourceBucketArn: S3BucketArn
 
     roleArn: IamRoleArn
+
+    /// Set for BEDROCK_MANAGED_KB sources.
+    bedrockKnowledgeBaseConfiguration: BedrockKnowledgeBaseConfiguration
 
     extractionConfig: ExtractionConfig
 
