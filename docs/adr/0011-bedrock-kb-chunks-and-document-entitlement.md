@@ -104,6 +104,35 @@ proposal (`AccessControlledGraphError`). No second source of truth is needed.
 that opt-out is logged at startup: a Managed Knowledge Base with document ACL
 queried without a caller would return the extraction role's view to everyone.
 
+**Registration (`BEDROCK_MANAGED_KB` sub-type).** A document source carrying
+`bedrockKnowledgeBaseConfiguration` (`knowledgeBaseId`, optional
+`dataSourceIds`/`region`, `extractionRoleArn`) is the sub-type; it is mutually
+exclusive with `sourceBucketArn`, `uploadId`, `s3Prefixes` and `roleArn`, and
+stages no files (`s3Prefixes` is stored empty). The extraction role is a
+customer-supplied cross-account role and is treated exactly like the Databricks
+and JDBC credential-access roles: it must be named
+`{prefix}-datasource-access-*` at the root IAM path in the `aws` partition
+(checked at submit with the same helpers, so a role the task could never
+assume is refused with the prefix named rather than failing the first
+extraction), and the kg-build task assumes it through
+`assume_datasource_session` with `ExternalId = datasource_external_id(namespace)`,
+the value the control plane shows on `GetNamespace`. The role ARN arrives from
+the API caller; the namespace-derived ExternalId is what binds the assume to the
+namespace entitled to it (confused deputy). The task's grant is the shared
+`assumeDatasourceAccessRoleStatement` (fourth consumer), plus an in-account
+`bedrock:Retrieve`/`GetDocumentContent`/`ListKnowledgeBaseDocuments` grant on
+`knowledge-base/*` for a Knowledge Base in the deployment's own account.
+
+**Pipeline.** The ingestion state machine routes on `input_mode`: `BEDROCK_KB`
+bypasses preprocessing (which lists S3 and would report the source empty) via a
+`Pass` that supplies the `staging_prefix` the shared task definition still
+binds; every other value, and an input predating the field, takes the
+unchanged staging path. The trigger Lambda always emits the flat `input_mode`,
+`vector_store_mode` and `bedrock_kb_*` string fields (staging defaults when the
+job carries no `bedrock_kb`), because the task environment binds them with
+`JsonPath.stringAt`, which fails the execution on a missing path. Re-scan
+re-extracts from the Knowledge Base by forwarding the stored configuration.
+
 **Not decided here.** Chunk text remains in Neptune as the toolkit writes it;
 it is treated as a cache of the Knowledge Base's text and is reachable only
 through the gate. Removing it is a possible later hardening. Incremental
@@ -139,8 +168,13 @@ kg-build task environment (`packages/sources/.../kg_build/graph_build.py`):
 | `BEDROCK_KB_ID` | required when `INPUT_MODE=BEDROCK_KB` | Knowledge Base to read. |
 | `BEDROCK_KB_DATA_SOURCE_IDS` | empty = all | Comma-separated data source ids to scope the scan. |
 | `BEDROCK_KB_REGION` | `AWS_REGION` | Region of the Knowledge Base. |
-| `BEDROCK_KB_EXTRACTION_ROLE_ARN` | empty = task role | Role assumed for the Bedrock calls; must see every document. |
+| `BEDROCK_KB_EXTRACTION_ROLE_ARN` | empty = task role | `{prefix}-datasource-access-*` role assumed with the namespace ExternalId for the Bedrock calls; must see every document. |
+| `RESOURCE_PREFIX` | set by CDK | The `{prefix}-{env}-` the ExternalId is derived from; the task fails the assume rather than default it. |
 | `CHUNK_SIZE` | toolkit default | Ignored under `BEDROCK_KB` (logged). |
+
+The state machine sets the first six from the trigger Lambda's flattened job
+input; none is operator-set. The source-level configuration is the API's
+`bedrockKnowledgeBaseConfiguration` (Smithy `unified-sources.smithy`).
 
 serve environment (`packages/context-manager/src/coa_serve/config.py`),
 in addition to `DOCUMENT_RETRIEVER_BACKEND`, `BEDROCK_KNOWLEDGE_BASE_ID` and
@@ -150,6 +184,12 @@ in addition to `DOCUMENT_RETRIEVER_BACKEND`, `BEDROCK_KNOWLEDGE_BASE_ID` and
 |---|---|---|
 | `BEDROCK_KB_SEARCH_MODE` | `vector` | `managed` sends `managedSearchConfiguration`, required for Managed Knowledge Bases. |
 | `BEDROCK_KB_ENFORCE_USER_CONTEXT` | `true` when `BEDROCK_KB_SEARCH_MODE=managed`, else `false` | `true` puts the caller on every `Retrieve` and entitlement probe; no caller, no results. Also enables the `DocumentEntitlementGate` for routed namespaces. An explicit `false` under `managed` is logged. |
+
+Both are set from the SSM deployment config (`bedrockKbSearchMode`,
+`bedrockKbEnforceUserContext`, alongside `bedrockKnowledgeBaseByNamespace`) and
+are absent from the serve template unless configured. A `BEDROCK_MANAGED_KB`
+namespace therefore needs three things in that config: its namespace mapped to
+the Knowledge Base id, `managed`, and (by default) per-user enforcement.
 
 ## Verification
 
@@ -189,8 +229,27 @@ second review phrased it:
    document) returns a hit for an entitled document that contains nothing
    relevant to that word. If it does not, the probe must move to a content-free
    check before GA.
+3. Registration end to end: `CreateSource` with a
+   `bedrockKnowledgeBaseConfiguration` naming a `{prefix}-datasource-access-*`
+   role in the Knowledge Base's account, whose trust policy names the kg-build
+   task role and the namespace's `datasourceExternalId` from `GetNamespace`;
+   the ingestion execution takes the `SourcesBedrockKbSkipPreprocess` branch,
+   the task assumes the role (CloudTrail in the KB account shows the
+   `coa-kg-build-<namespace>` session with the ExternalId), and the source
+   reaches `COMPLETED` with `chunksGraph` equal to the Knowledge Base's
+   distinct `Retrieve` result count for the scoped data sources.
 
 Deployed (pending): against a Knowledge Base with a document-level ACL data
 source, build the graph, then query as two users with different entitlements
 and confirm the traversal output contains no statement text from documents
 the user cannot `Retrieve`. This is the observation step for the gate.
+
+Registration and pipeline unit coverage:
+`packages/sources/tests/unit/api/test_document_routes.py::TestCreateBedrockManagedKbSource`
+(sub-type inference, mutual exclusion, role shape, stored form, job body),
+`packages/sources/tests/unit/documents/trigger/test_index.py::TestBedrockKbFlattening`
+(flat fields always present), `infra/test/services/sources-stack.test.ts`
+"Fork: BEDROCK_MANAGED_KB ingestion" (routing `Choice`, bypass `Pass`, task
+env bindings, `RESOURCE_PREFIX`, IAM scope, fourth assume consumer) and
+`infra/test/services/serve-stack.test.ts` (the two serve knobs absent by
+default, strings when set).

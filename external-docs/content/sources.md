@@ -1027,6 +1027,67 @@ authorized to. Both are required; the role alone is not sufficient. The platform
 own role needs `s3:GetBucketTagging` on the bucket to read that tag, so include it
 alongside `s3:GetObject` and `s3:ListBucket`.
 
+### Bedrock Managed Knowledge Base Source
+
+If your documents are already indexed in an Amazon Bedrock Managed Knowledge
+Base (for example a SharePoint corpus with document-level access control), you
+can build the knowledge graph from the Knowledge Base's own chunks instead of
+re-ingesting the files. The Knowledge Base keeps parsing, chunking, chunk
+embedding and access control; Context Ontology Accelerator runs only the
+entity and relationship extraction into the graph, keyed on the Knowledge
+Base's chunk ids so a Knowledge Base search result pivots straight into graph
+traversal.
+
+Create via `POST /namespaces/{namespaceId}/sources` with `sourceType:
+"DOCUMENTS"` and a `documentSource.bedrockKnowledgeBaseConfiguration`
+(no `sourceBucketArn`, `uploadId`, `s3Prefixes` or `roleArn`):
+
+```json
+{
+  "sourceType": "DOCUMENTS",
+  "documentSource": {
+    "name": "knowledge-hub",
+    "bedrockKnowledgeBaseConfiguration": {
+      "knowledgeBaseId": "ABCDEFGHIJ",
+      "dataSourceIds": ["KLMNOPQRST"],
+      "region": "eu-central-1",
+      "extractionRoleArn": "arn:aws:iam::<kb-account>:role/coa-datasource-access-knowledge-hub"
+    }
+  }
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `knowledgeBaseId` | ✅ | The Knowledge Base id (10 characters). |
+| `dataSourceIds` | | Restrict extraction to these data sources; all of them when omitted. |
+| `region` | | Region of the Knowledge Base; the deployment's region when omitted. |
+| `extractionRoleArn` | ✅ | Role in the Knowledge Base's account that the KG build assumes to read it. |
+
+The extraction role follows the same rules as a database source's
+cross-account role: its name must start with `{prefix}-datasource-access-` at
+the root IAM path, and its trust policy must name the deployment's document
+KG-build task role **with the namespace's External ID** (`datasourceExternalId`
+on **GetNamespace**). It needs `bedrock:Retrieve`, `bedrock:GetDocumentContent`
+and `bedrock:ListKnowledgeBaseDocuments` on the Knowledge Base. The role sees
+every document, which extraction requires; the External ID is what binds it to
+the one namespace allowed to use it.
+
+What differs from file sources:
+
+- Nothing is preprocessed or staged, and no chunk embeddings are written to the
+  platform's own vector store (the Knowledge Base holds them). Chunk boundaries
+  are the Knowledge Base's.
+- Queries for the namespace must go through the Knowledge Base with the
+  caller's identity so its document-level access control applies to every
+  answer, including facts reached through the graph. The deployment maps the
+  namespace to the Knowledge Base id in its configuration
+  (`bedrockKnowledgeBaseByNamespace`), with `bedrockKbSearchMode: "managed"`.
+- Such a source produces no ontology induction proposal: an ontology induced
+  over an access-controlled corpus would leak its structure to every reader.
+- **RescanSource** re-extracts from the Knowledge Base; run it after a
+  Knowledge Base sync that changed documents.
+
 ### Document Processing Pipeline
 
 After creation, documents go through:
