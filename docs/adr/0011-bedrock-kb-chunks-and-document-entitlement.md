@@ -59,17 +59,44 @@ at the admission gate through a `ContextVar` rather than threaded through every
 retriever and tool signature, because those signatures are upstream code that
 changes each release.
 
-**serve, graph.** A `DocumentEntitlementGate` applies to every namespace routed
-to a per-user Knowledge Base. Before a tool returns Neptune-held text (chunk
-window expansion, graph traversal), the gate resolves the provenance of each
-item to its source documents (`chunk -> source`, or
-`entity -> fact -> statement -> chunk -> source`), asks the Knowledge Base per
-document whether the caller may read it (`Retrieve`, `numberOfResults=1`,
-filtered on `_source_uri`, with `userContext`; non-empty means entitled), and
-drops anything unentitled or whose provenance cannot be resolved. Answers are
-cached per `(user, namespace, uri)` for 60 s. Entities keep their structure;
-only their statement text is withheld. Chunks not minted from the Knowledge
-Base (ids without `aws:`) are not under its ACL and pass through.
+**serve, graph.** One `DocumentEntitlementGate`, built at startup and shared,
+applies to every namespace routed to a per-user Knowledge Base and to every
+reader of the lexical graph: the agentic graph-traversal and chunk-window
+tools, the agentic `strategy:*` tools and the lexical-baseline Tier-3 path
+(the last two through the one `BaselineLexicalRetriever` adapter they share).
+Before any graph-derived content is returned, the gate resolves its provenance
+to source documents (`chunk -> source`, `source id -> uri` for toolkit result
+nodes, or `entity -> fact -> statement -> chunk -> source` for statement text
+and entity labels), asks the Knowledge Base per document whether the caller
+may read it (`Retrieve`, `numberOfResults=1`, filtered on `_source_uri`, with
+`userContext`; non-empty means entitled), and drops anything unentitled or
+whose provenance cannot be resolved. Entity labels are document-derived text
+and are withheld like statements, together with the planner directions built
+from them. Definite answers are cached per `(user, namespace, uri)` for 60 s in
+a bounded cache; a probe the Knowledge Base could not answer (throttled,
+unavailable) withholds the document for that request only and is not cached,
+so an outage never becomes a remembered denial. Content not minted from the
+Knowledge Base (chunk ids without `aws:`, source ids without `aws:doc:`) is not
+under its ACL and passes through, logged.
+
+**serve, request scope.** The `ContextVar` identity is cleared when the
+entrypoint starts a request and restored when it ends (`try/finally` around the
+handler), so a request that skips the admission gate (session CRUD,
+`semanticPlan`, `translate`) on a reused worker never reads the previous
+caller.
+
+**serve, ontology graph.** The SPARQL ontology graph read by `graphTraverse`
+and the non-agentic `KnowledgeRetriever` is **not** gated per document. It is
+authorized at namespace level by the Cedar admission gate, and it holds induced
+classes and properties, not document text. That holds only as long as
+unstructured induction is **not** run over a per-user Knowledge Base's lexical
+graph (it would promote document-derived individuals into the ontology);
+`BEDROCK_MANAGED_KB` sources therefore produce no induction proposal.
+
+**Flag coupling.** `BEDROCK_KB_SEARCH_MODE=managed` implies
+`BEDROCK_KB_ENFORCE_USER_CONTEXT=true` unless set to `false` explicitly, and
+that opt-out is logged at startup: a Managed Knowledge Base with document ACL
+queried without a caller would return the extraction role's view to everyone.
 
 **Not decided here.** Chunk text remains in Neptune as the toolkit writes it;
 it is treated as a cache of the Knowledge Base's text and is reachable only
@@ -116,16 +143,28 @@ in addition to `DOCUMENT_RETRIEVER_BACKEND`, `BEDROCK_KNOWLEDGE_BASE_ID` and
 | Variable | Default | Meaning |
 |---|---|---|
 | `BEDROCK_KB_SEARCH_MODE` | `vector` | `managed` sends `managedSearchConfiguration`, required for Managed Knowledge Bases. |
-| `BEDROCK_KB_ENFORCE_USER_CONTEXT` | `false` | `true` puts the caller on every `Retrieve` and `entitled_source_uris` probe; no caller, no results. Also enables the `DocumentEntitlementGate` for routed namespaces. |
+| `BEDROCK_KB_ENFORCE_USER_CONTEXT` | `true` when `BEDROCK_KB_SEARCH_MODE=managed`, else `false` | `true` puts the caller on every `Retrieve` and entitlement probe; no caller, no results. Also enables the `DocumentEntitlementGate` for routed namespaces. An explicit `false` under `managed` is logged. |
 
 ## Verification
 
-Unit: `uv run pytest packages/sources/tests/unit/documents/kg_build/test_bedrock_kb_loader.py packages/context-manager/tests/unit/test_bedrock_kb_entitlement.py packages/context-manager/tests/unit/test_bedrock_kb_retriever.py -q`.
+Unit: `uv run pytest packages/sources/tests/unit/documents/kg_build/test_bedrock_kb_loader.py packages/context-manager/tests/unit/test_bedrock_kb_entitlement.py packages/context-manager/tests/unit/test_bedrock_kb_entitlement_e2e.py packages/context-manager/tests/unit/test_bedrock_kb_retriever.py -q`.
 Pinned behaviours: `aws:` ids survive the toolkit; chunk count equals distinct
 `Retrieve` results; `chunking=None` under `BEDROCK_KB`; `dummy://` under
 `DUMMY`; a caller without entitlement sees nothing from an ACL data source, an
 entitled caller sees only their documents, and a request with no caller sees
-nothing.
+nothing. The `_e2e` file goes through the real builders
+(`build_document_entitlement_gate`, `build_tool_registry`,
+`build_lexical_retriever`) with one fake lexical graph and keeps a control case
+per path that returns the restricted text when the gate is left out, so the
+assertions fail if the gate is unwired, not only if the fake changes. The
+entrypoint identity scope is asserted directly (stale caller invisible on
+entry, restored on exit, also when the body raises).
+
+Review: an independent review of the first gate commit found the request-scope
+leak, the ungated lexical path, the entity-label leak and the mocked wiring
+tests; all four are closed above and the end-to-end file was the response to
+the last one. A second independent review of the fixed state precedes the
+deployed run.
 
 Deployed (pending): against a Knowledge Base with a document-level ACL data
 source, build the graph, then query as two users with different entitlements
