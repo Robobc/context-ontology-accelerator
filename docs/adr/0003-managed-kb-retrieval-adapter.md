@@ -1,6 +1,7 @@
 # ADR 0003: Use Bedrock Knowledge Bases for document retrieval only
 
-- Status: Accepted for the integration PoC
+- Status: Accepted for the integration PoC. The per-document ACL consequence
+  below is superseded by ADR 0011.
 - Date: 2026-09-21
 
 ## Decision
