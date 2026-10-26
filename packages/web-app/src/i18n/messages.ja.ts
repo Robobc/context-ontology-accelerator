@@ -351,6 +351,7 @@ export const MESSAGES_JA = {
   "Custom connector": "カスタムコネクタ",
   Databricks: "Databricks",
   Upload: "アップロード",
+  "Bedrock Knowledge Base": "Bedrock ナレッジベース",
   "10 sources": "10 件",
   "20 sources": "20 件",
   "50 sources": "50 件",
