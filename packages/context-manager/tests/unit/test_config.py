@@ -587,9 +587,7 @@ class TestValidLexicalRetrieverStrategiesFallback:
             "os.environ",
             {
                 "DOCUMENT_RETRIEVER_BACKEND": "opensearch",
-                "BEDROCK_KB_BY_NAMESPACE": (
-                    '{"managed-namespace":"ABCDEFGHIJ","other":"KLMNOPQRST"}'
-                ),
+                "BEDROCK_KB_BY_NAMESPACE": ('{"managed-namespace":"ABCDEFGHIJ","other":"KLMNOPQRST"}'),
             },
         ):
             config = load_config()
@@ -654,10 +652,7 @@ class TestValidLexicalRetrieverStrategiesFallback:
             {
                 "GENERATION_BACKEND": "portkey",
                 "PORTKEY_MODEL_ID": "@bedrock/claude",
-                "PORTKEY_SECRET_ARN": (
-                    "arn:aws:secretsmanager:us-east-1:123456789012:"
-                    "secret:portkey-abc123"
-                ),
+                "PORTKEY_SECRET_ARN": ("arn:aws:secretsmanager:us-east-1:123456789012:secret:portkey-abc123"),
             },
         ):
             config = load_config()

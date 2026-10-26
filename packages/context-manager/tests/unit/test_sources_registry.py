@@ -849,6 +849,7 @@ class TestNamespaceIntegrationProfile:
         )
         assert await registry.get_namespace_integration_profile("11111111-2222-4333-8444-555555555555") is None
 
+
 def _glue_source(source_id, database, **extra):
     """A root-catalog Glue source shaped like the ones the sources API wrote before it stopped setting
     ``athenaDataCatalogName`` for Glue."""

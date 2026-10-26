@@ -1078,7 +1078,9 @@ class TestHandleKbSearchOptions:
 
         assert KB_SEARCH_MIN_TOP_K <= KB_SEARCH_DEFAULT_TOP_K <= KB_SEARCH_MAX_TOP_K
         _, orch = await self._run({})
-        assert orch._knowledge_retriever.document_retriever.retrieve.call_args.kwargs["top_k"] == KB_SEARCH_DEFAULT_TOP_K
+        assert (
+            orch._knowledge_retriever.document_retriever.retrieve.call_args.kwargs["top_k"] == KB_SEARCH_DEFAULT_TOP_K
+        )
 
     @pytest.mark.asyncio
     async def test_kb_search_accepts_min_top_k(self):

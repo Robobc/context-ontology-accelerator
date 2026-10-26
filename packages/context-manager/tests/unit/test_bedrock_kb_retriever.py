@@ -47,9 +47,7 @@ class TestBedrockKnowledgeBaseRetriever:
         client.retrieve.assert_called_once_with(
             knowledgeBaseId="ABCDEFGHIJ",
             retrievalQuery={"text": "What is AgentCore?"},
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {"numberOfResults": 7}
-            },
+            retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 7}},
         )
 
     async def test_retrieve_passes_trusted_filter(self):
@@ -70,9 +68,7 @@ class TestBedrockKnowledgeBaseRetriever:
     async def test_retrieve_skips_non_text_results(self):
         client = MagicMock()
         client.retrieve.return_value = {
-            "retrievalResults": [
-                {"content": {"row": [{"columnName": "x", "columnValue": "y"}]}}
-            ]
+            "retrievalResults": [{"content": {"row": [{"columnName": "x", "columnValue": "y"}]}}]
         }
         retriever = BedrockKnowledgeBaseRetriever("ABCDEFGHIJ", client=client)
 
