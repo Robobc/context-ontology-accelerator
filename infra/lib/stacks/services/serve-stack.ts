@@ -94,6 +94,16 @@ export interface ServeStackProps extends cdk.StackProps {
   /** Per-namespace existing Bedrock Knowledge Base overrides. */
   readonly bedrockKnowledgeBaseByNamespace?: Record<string, string>;
 
+  /** Fork: how the Bedrock KB retriever searches. `managed` is a Bedrock Managed
+   *  Knowledge Base (managedSearchConfiguration), the backend of the
+   *  BEDROCK_MANAGED_KB document source type. Default `vector`. */
+  readonly bedrockKbSearchMode?: "vector" | "managed";
+
+  /** Fork: put the caller on every Retrieve as `userContext` so the KB applies
+   *  its document ACL. Defaults to true when `bedrockKbSearchMode` is `managed`
+   *  (the serve config logs an explicit opt-out), false otherwise. */
+  readonly bedrockKbEnforceUserContext?: boolean;
+
   /** Generation backend; embeddings continue to use Bedrock. */
   readonly generationBackend?: "bedrock" | "portkey";
 
@@ -731,6 +741,14 @@ export class ServeStack extends SCLStack {
                 props.bedrockKnowledgeBaseByNamespace,
               ),
             }),
+          ...(props.bedrockKbSearchMode && {
+            BEDROCK_KB_SEARCH_MODE: props.bedrockKbSearchMode,
+          }),
+          ...(props.bedrockKbEnforceUserContext !== undefined && {
+            BEDROCK_KB_ENFORCE_USER_CONTEXT: String(
+              props.bedrockKbEnforceUserContext,
+            ),
+          }),
           GENERATION_BACKEND: props.generationBackend ?? "bedrock",
           ...(props.portkeyBaseUrl && {
             PORTKEY_BASE_URL: props.portkeyBaseUrl,

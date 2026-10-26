@@ -443,6 +443,8 @@ async function deploy(): Promise<void> {
     documentRetrieverBackend: config.documentRetrieverBackend,
     bedrockKnowledgeBaseId: config.bedrockKnowledgeBaseId,
     bedrockKnowledgeBaseByNamespace: config.bedrockKnowledgeBaseByNamespace,
+    bedrockKbSearchMode: config.bedrockKbSearchMode,
+    bedrockKbEnforceUserContext: config.bedrockKbEnforceUserContext,
     generationBackend: config.generationBackend,
     portkeyBaseUrl: config.portkeyBaseUrl,
     portkeyModelId: config.portkeyModelId,

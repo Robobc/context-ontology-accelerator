@@ -35,6 +35,8 @@ function createStack(
     documentRetrieverBackend?: "opensearch" | "bedrock-kb";
     bedrockKnowledgeBaseId?: string;
     bedrockKnowledgeBaseByNamespace?: Record<string, string>;
+    bedrockKbSearchMode?: "vector" | "managed";
+    bedrockKbEnforceUserContext?: boolean;
     generationBackend?: "bedrock" | "portkey";
     portkeyBaseUrl?: string;
     portkeyModelId?: string;
@@ -105,6 +107,39 @@ describe("ServeStack - managed Knowledge Base retrieval", () => {
           }),
         ]),
       },
+    });
+  });
+
+  // Fork (ADR 0011): a BEDROCK_MANAGED_KB namespace needs managed search and
+  // per-user retrieval. Both knobs are absent from the template unless set, so
+  // the default deployment is byte-identical to upstream.
+  it("omits the fork KB knobs unless configured", () => {
+    const template = createStack({}, { documentRetrieverBackend: "opensearch" });
+    const [runtime] = Object.values(
+      template.findResources("AWS::BedrockAgentCore::Runtime"),
+    ) as any[];
+    expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+      "BEDROCK_KB_SEARCH_MODE",
+    );
+    expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+      "BEDROCK_KB_ENFORCE_USER_CONTEXT",
+    );
+  });
+
+  it("passes managed search mode and the user-context switch as strings", () => {
+    const template = createStack(
+      {},
+      {
+        bedrockKnowledgeBaseByNamespace: { "managed-docs": "ABCDEFGHIJ" },
+        bedrockKbSearchMode: "managed",
+        bedrockKbEnforceUserContext: true,
+      },
+    );
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        BEDROCK_KB_SEARCH_MODE: "managed",
+        BEDROCK_KB_ENFORCE_USER_CONTEXT: "true",
+      }),
     });
   });
 });

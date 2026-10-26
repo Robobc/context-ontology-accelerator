@@ -192,6 +192,12 @@ export interface SsmConfig {
   /** Namespace id to existing Bedrock Knowledge Base id overrides. */
   readonly bedrockKnowledgeBaseByNamespace?: Record<string, string>;
 
+  /** Fork: Bedrock KB search mode, `vector` (default) or `managed` (Managed KB). */
+  readonly bedrockKbSearchMode?: "vector" | "managed";
+
+  /** Fork: pass the caller as `userContext` on every KB Retrieve (document ACL). */
+  readonly bedrockKbEnforceUserContext?: boolean;
+
   /** Generation backend; embeddings remain on Bedrock in both modes. */
   readonly generationBackend?: "bedrock" | "portkey";
 
