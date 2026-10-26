@@ -15,7 +15,6 @@ from coa_common import (
     default_namespace_integration_profile,
     normalize_namespace_integration_profile,
 )
-
 from coa_common.constants import validate_namespace_id
 from coa_common.dao import DynamoDBDAO
 from coa_common.language_tags import effective_namespace_language

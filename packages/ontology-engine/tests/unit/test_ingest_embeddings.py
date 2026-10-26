@@ -193,9 +193,7 @@ class TestSqlNamesFromR2rml:
     def test_derives_physical_table_and_column_names(self):
         from coa_ontology.catalog.ingest import _sql_names_from_r2rml
 
-        tables, columns = _sql_names_from_r2rml(
-            _build_r2rml_graph_with_sql_names().serialize(format="turtle")
-        )
+        tables, columns = _sql_names_from_r2rml(_build_r2rml_graph_with_sql_names().serialize(format="turtle"))
 
         assert tables == {str(EX.ConnectionDemo): "coa_connection_demo"}
         assert columns == {str(EX.category): "category"}
@@ -217,9 +215,7 @@ class TestSqlNamesFromR2rml:
         ontology.add((EX.category, RDFS.domain, EX.ConnectionDemo))
         ontology.add((EX.category, RDFS.label, Literal("Category")))
         ontology.add((EX.category, RDFS.range, URIRef("http://www.w3.org/2001/XMLSchema#string")))
-        tables, columns = _sql_names_from_r2rml(
-            _build_r2rml_graph_with_sql_names().serialize(format="turtle")
-        )
+        tables, columns = _sql_names_from_r2rml(_build_r2rml_graph_with_sql_names().serialize(format="turtle"))
 
         _accumulate_embeddings(
             vector_store=vector_store,

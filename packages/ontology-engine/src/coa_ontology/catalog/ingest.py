@@ -1456,9 +1456,7 @@ def _accumulate_embeddings(
             if (prop_uri, RDF.type, OWL.ObjectProperty) in graph:
                 range_business_name = _label_of(prop_range) if prop_range else ""
                 range_name = table_map.get(str(prop_range), range_business_name) if prop_range else ""
-                obj_props_list.append(
-                    (prop_name, prop_label, range_name, prop_comment, _term_hints(prop_uri))
-                )
+                obj_props_list.append((prop_name, prop_label, range_name, prop_comment, _term_hints(prop_uri)))
             elif (prop_uri, RDF.type, OWL.DatatypeProperty) in graph:
                 dtype = str(prop_range).split("#")[-1] if prop_range else "string"
                 distinct_vals = [str(o) for o in graph.objects(prop_uri, _SCL_NS.distinctValues)]

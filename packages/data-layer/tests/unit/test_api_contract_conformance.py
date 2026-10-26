@@ -56,7 +56,14 @@ _OPENAPI = (
 # ``direction`` and ``relationshipFilter`` are read (and so pass here) but not yet
 # applied by the Context Manager; the model's member docs say so, rather than this
 # list hiding them.
-_CHECKED_OPERATIONS = ("Query", "TranslateSPARQL", "KBSearch", "GraphTraverse", "DescribeSchema", "PlanSemanticExecution")
+_CHECKED_OPERATIONS = (
+    "Query",
+    "TranslateSPARQL",
+    "KBSearch",
+    "GraphTraverse",
+    "DescribeSchema",
+    "PlanSemanticExecution",
+)
 _SKIPPED_OPERATIONS: set[str] = set()
 
 # Known gaps: (operationId, member) -> why it is acceptable for now. Keep empty

@@ -1080,7 +1080,8 @@ export const MESSAGES_JA = {
   "This selection has the same structure as an existing accepted proposal, so no new proposal was created. Open the existing proposal to review it, or induce anyway if source metadata (descriptions, synonyms, glossary terms) changed since it was accepted: structure-only duplicate detection cannot see those edits.":
     "この選択内容は承認済みの既存提案と同じ構造のため、新しい提案は作成されませんでした。既存の提案を開いて確認するか、承認後にソースメタデータ（説明、同義語、用語集）が変更された場合は「それでも誘導する」を選択してください。構造のみの重複検出ではこれらの編集を検知できません。",
   "View existing proposal": "既存の提案を表示",
-  "Induce anyway (new proposal from current metadata)": "それでも誘導する（現在のメタデータから新しい提案を作成）",
+  "Induce anyway (new proposal from current metadata)":
+    "それでも誘導する（現在のメタデータから新しい提案を作成）",
   "Could not load data sources": "データソースを読み込めませんでした",
   "Induce Ontology": "オントロジーを誘導",
   Strategy: "戦略",

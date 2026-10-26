@@ -15,7 +15,6 @@ from coa_common.bedrock import (
     BedrockClient,
     BedrockInvocationResult,
     BedrockTruncationError,
-    clamp_max_tokens,
     GuardrailBlockedError,
     InputTooLargeError,
     clamp_max_tokens,

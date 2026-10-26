@@ -16,9 +16,8 @@ from typing import Any
 
 import structlog
 from coa_common.dao import DynamoDBDAO
-from coa_common.integration_profiles import IntegrationProfileError
-
 from coa_common.idempotency import idempotent_create
+from coa_common.integration_profiles import IntegrationProfileError
 from coa_common.language_tags import LanguageTagError
 from coa_common.logging import setup_logging
 from coa_common.metadata_store import MetadataStoreError, SMUSClient
