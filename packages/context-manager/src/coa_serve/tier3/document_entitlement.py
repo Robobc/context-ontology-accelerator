@@ -329,39 +329,67 @@ class DocumentEntitlementGate:
             logger.info("document_entitlement_passthrough_non_kb", namespace=namespace, kind=kind, count=count)
 
 
+class _DenyAllKbRetriever:
+    """Stand-in resolver answer when a request bound to one namespace reads another.
+
+    No shipped surface does this (a request is admitted for exactly one
+    namespace), so it is a defect signal; the safe answer is to keep the gate on
+    and deny every KB-sourced item rather than pass them through ungated.
+    """
+
+    enforces_user_context = True
+
+    async def probe_source_uris(self, source_uris: Iterable[str], user_id: str | None = None) -> dict[str, bool | None]:
+        """Every document denied."""
+        return dict.fromkeys({u for u in source_uris if u}, False)
+
+
+_DENY_ALL = _DenyAllKbRetriever()
+
+
 def kb_retriever_resolver(document_retriever: Any) -> Callable[[str], Any | None] | None:
     """``namespace -> per-user Bedrock KB retriever`` for the service's document retriever, or ``None``.
 
-    Understands the two shapes ``build_document_retriever`` produces: a bare
-    ``BedrockKnowledgeBaseRetriever`` (every namespace) and a
-    ``RoutingDocumentRetriever`` (per-namespace routes plus a default). Returns
-    ``None`` when no per-user KB is configured at all, so callers can skip
+    Understands the two shapes ``build_document_retriever`` produces: a
+    ``RegistryDocumentRetriever``, whose answer is the Knowledge Base source the
+    admission gate bound to the current request (``None`` when the request's
+    namespace has none, so the gate does not apply), and a bare per-user
+    ``BedrockKnowledgeBaseRetriever`` (tests). Returns ``None`` only for a
+    document retriever that can never serve a per-user KB, so callers can skip
     building a gate.
     """
+    from ..request_document_source import get_request_document_source
     from .bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
+    from .document_retriever import RegistryDocumentRetriever
 
     def _per_user(r: Any) -> Any | None:
         return r if isinstance(r, BedrockKnowledgeBaseRetriever) and r.enforces_user_context else None
 
-    resolve = getattr(document_retriever, "_resolve", None)
-    if callable(resolve):
-        candidates = list(getattr(document_retriever, "_routes", {}).values()) + [
-            getattr(document_retriever, "_default", None)
-        ]
-        if not any(_per_user(c) for c in candidates):
-            return None
-        return lambda namespace: _per_user(resolve(namespace))
+    if isinstance(document_retriever, RegistryDocumentRetriever):
+
+        def _bound(namespace: str) -> Any | None:
+            bound = get_request_document_source()
+            if bound is None:
+                return None
+            if bound.namespace != namespace:
+                logger.warning("document_source_namespace_mismatch", bound=bound.namespace, requested=namespace)
+                return _DENY_ALL
+            return _per_user(bound.retriever)
+
+        return _bound
     if _per_user(document_retriever) is not None:
         return lambda namespace: document_retriever
     return None
 
 
 def build_document_entitlement_gate(graph_store_uri: str, document_retriever: Any) -> DocumentEntitlementGate | None:
-    """The one gate every consumer shares, or ``None`` when no per-user KB is configured.
+    """The one gate every consumer shares, or ``None`` when no per-user KB can ever be served.
 
     Built once at startup in ``main.py`` and handed to the lexical-baseline
     retriever, the agentic tool registry and the chunk/graph tools, so they share
-    a graph store and an entitlement cache.
+    a graph store and an entitlement cache. Whether it applies to a given request
+    is decided per request from the namespace's registered sources
+    (:meth:`DocumentEntitlementGate.applies_to`).
     """
     if not graph_store_uri or document_retriever is None:
         return None

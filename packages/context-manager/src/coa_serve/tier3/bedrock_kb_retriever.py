@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from collections.abc import Iterable
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
@@ -288,3 +289,94 @@ class BedrockKnowledgeBaseRetriever:
             if callable(close):
                 close()
             self._client = None
+
+
+class KbRetrieverCache:
+    """One per-user retriever per registered ``BEDROCK_MANAGED_KB`` source, built on first use.
+
+    A source in this deployment's own account is read under the serve runtime's
+    own role (the in-account grant in the serve stack); a source carrying a
+    ``crossAccountRoleArn`` is read through that role, assumed with the
+    namespace's ExternalId exactly as the kg-build task assumes it for
+    extraction, so registration and query agree on who may be impersonated.
+    Credentials renew themselves for as long as the retriever is cached.
+
+    Keyed on everything the session depends on, so re-registering a source with a
+    different role or region builds a new retriever instead of reusing a session
+    for the old one. Bounded LRU: evicted retrievers are closed.
+    """
+
+    def __init__(
+        self,
+        *,
+        default_region: str,
+        max_entries: int = 256,
+        session_factory: Callable[[str, str, str, str], boto3.Session] | None = None,
+    ) -> None:
+        """``session_factory(role_arn, external_id, region, session_name)`` defaults to the refreshable STS assume."""
+        self._default_region = default_region
+        self._max_entries = max(1, max_entries)
+        self._session_factory = session_factory
+        self._entries: OrderedDict[tuple[str, str, str, str], BedrockKnowledgeBaseRetriever] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, source: Any) -> BedrockKnowledgeBaseRetriever:
+        """The retriever for *source* (a ``BedrockKbSource``); the first call may assume the role.
+
+        Synchronous because the assume is: callers on the event loop run it in a
+        thread. Raises whatever the assume raises (``DatasourceAssumeError``, or
+        ``RuntimeError`` when ``RESOURCE_PREFIX`` is unset and no ExternalId can
+        be derived); the admission gate turns either into a fail-closed error.
+        """
+        region = source.region or self._default_region
+        role_arn = source.cross_account_role_arn or ""
+        key = (source.namespace_id, source.knowledge_base_id, region, role_arn)
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is not None:
+                self._entries.move_to_end(key)
+                return hit
+        retriever = self._build(source, region, role_arn)
+        with self._lock:
+            racing = self._entries.get(key)
+            if racing is not None:
+                return racing
+            self._entries[key] = retriever
+            evicted = []
+            while len(self._entries) > self._max_entries:
+                evicted.append(self._entries.popitem(last=False)[1])
+        for old in evicted:
+            client = old._client
+            if client is not None and callable(getattr(client, "close", None)):
+                client.close()
+        return retriever
+
+    def _build(self, source: Any, region: str, role_arn: str) -> BedrockKnowledgeBaseRetriever:
+        if role_arn:
+            from coa_common.constants import datasource_external_id
+
+            from ..clients.datasource_session import refreshable_datasource_session
+
+            factory = self._session_factory or refreshable_datasource_session
+            session = factory(
+                role_arn,
+                datasource_external_id(source.namespace_id),
+                region,
+                f"coa-serve-{source.namespace_id}",
+            )
+        else:
+            session = boto3.Session(region_name=region)
+        client = session.client(
+            "bedrock-agent-runtime",
+            config=BotoConfig(read_timeout=30, connect_timeout=5, retries={"max_attempts": 2}),
+        )
+        logger.info(
+            "bedrock_kb_retriever_built",
+            knowledge_base_id=source.knowledge_base_id,
+            namespace=source.namespace_id,
+            cross_account=bool(role_arn),
+        )
+        # A Managed KB carries document-level ACL, so it is always queried per user.
+        return BedrockKnowledgeBaseRetriever(
+            source.knowledge_base_id, region=region, client=client, search_mode="managed", enforce_user_context=True
+        )

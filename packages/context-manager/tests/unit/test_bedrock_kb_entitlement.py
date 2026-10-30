@@ -13,9 +13,14 @@ finance, carol has no entitlement at all.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from coa_serve.request_document_source import (
+    BoundDocumentSource,
+    bind_request_document_source,
+    reset_request_document_source,
+)
 from coa_serve.request_identity import get_request_user, reset_request_user, set_request_user
 from coa_serve.tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
 from coa_serve.tier3.document_entitlement import (
@@ -26,7 +31,7 @@ from coa_serve.tier3.document_entitlement import (
     DocumentEntitlementGate,
     kb_retriever_resolver,
 )
-from coa_serve.tier3.document_retriever import RoutingDocumentRetriever
+from coa_serve.tier3.document_retriever import RegistryDocumentRetriever
 from coa_serve.tier3.vector_retriever import ChunkResult
 
 KB = "ABCDEFGHIJ"
@@ -364,24 +369,73 @@ class TestGate:
 
 @pytest.mark.unit
 class TestResolver:
-    def test_routing_retriever_resolves_per_namespace(self):
-        per_user = _per_user_retriever()
-        plain = BedrockKnowledgeBaseRetriever(KB, client=AclKbClient())
-        routing = RoutingDocumentRetriever(default=MagicMock(), routes={"docs": per_user, "legacy": plain})
-        resolve = kb_retriever_resolver(routing)
-        assert resolve is not None
-        assert resolve("docs") is per_user
-        assert resolve("legacy") is None and resolve("other") is None
+    """The gate reads the Knowledge Base the admission gate bound to the request, per namespace."""
 
-    def test_none_when_no_per_user_kb_is_configured(self):
+    def test_registry_retriever_resolves_the_bound_namespace_only(self):
+        per_user = _per_user_retriever()
+        resolve = kb_retriever_resolver(RegistryDocumentRetriever(default=MagicMock()))
+        assert resolve is not None
+        assert resolve("docs") is None  # nothing bound: a namespace without a KB source, gate off
+        token = bind_request_document_source(BoundDocumentSource(namespace="docs", retriever=per_user))
+        try:
+            assert resolve("docs") is per_user
+        finally:
+            reset_request_document_source(token)
+        assert resolve("docs") is None  # the binding did not outlive its scope
+
+    @pytest.mark.asyncio
+    async def test_reading_another_namespace_than_the_bound_one_denies_everything(self):
+        """A request admitted for one namespace must not read another's KB content ungated."""
+        per_user = _per_user_retriever()
+        resolve = kb_retriever_resolver(RegistryDocumentRetriever(default=MagicMock()))
+        token = bind_request_document_source(BoundDocumentSource(namespace="docs", retriever=per_user))
+        try:
+            other = resolve("other-namespace")
+            assert other is not None and other.enforces_user_context  # the gate stays ON
+            assert await other.probe_source_uris([FINANCE, SHARED], user_id="alice@example.com") == {
+                FINANCE: False,
+                SHARED: False,
+            }
+        finally:
+            reset_request_document_source(token)
+
+    def test_none_when_no_per_user_kb_can_ever_be_served(self):
         plain = BedrockKnowledgeBaseRetriever(KB, client=AclKbClient())
-        assert kb_retriever_resolver(RoutingDocumentRetriever(default=MagicMock(), routes={"a": plain})) is None
+        assert kb_retriever_resolver(plain) is None  # not per user
         assert kb_retriever_resolver(MagicMock(spec=[])) is None
 
     def test_bare_per_user_retriever_applies_everywhere(self):
         per_user = _per_user_retriever()
         resolve = kb_retriever_resolver(per_user)
         assert resolve is not None and resolve("any") is per_user
+
+
+@pytest.mark.unit
+class TestRegistryDocumentRetriever:
+    """Tier-3 Retrieve goes to the bound Knowledge Base; everything else to COA's own index."""
+
+    @pytest.mark.asyncio
+    async def test_routes_by_request_binding(self):
+        default = MagicMock()
+        default.backend_name.return_value = "opensearch"
+        default.requires_query_embedding.return_value = True
+        default.retrieve = AsyncMock(return_value=[])
+        per_user = _per_user_retriever()
+        retriever = RegistryDocumentRetriever(default=default)
+
+        assert retriever.backend_name("docs") == "opensearch"
+        assert retriever.requires_query_embedding("docs") is True
+        token = bind_request_document_source(BoundDocumentSource(namespace="docs", retriever=per_user))
+        try:
+            assert retriever.backend_name("docs") == "bedrock-kb"
+            assert retriever.requires_query_embedding("docs") is False
+            chunks = await retriever.retrieve("revenue", "docs", user_id="alice@example.com")
+            assert {c.source_doc for c in chunks} == {FINANCE, SHARED}
+            # A different namespace in the same request is not the bound KB's business.
+            assert retriever.backend_name("other") == "opensearch"
+        finally:
+            reset_request_document_source(token)
+        default.retrieve.assert_not_called()
 
 
 @pytest.mark.unit
@@ -538,33 +592,17 @@ class TestToolWiring:
 
 
 @pytest.mark.unit
-class TestConfig:
-    def test_defaults_and_knobs(self, monkeypatch):
-        from coa_serve.config import load_config
+class TestNoDeploymentKnobs:
+    """A Knowledge Base is routed from the source registry; the serve config has no KB map."""
 
-        base = {
-            "NEPTUNE_ENDPOINT": "h",
-            "OPENSEARCH_ENDPOINT": "o",
-            "DOCUMENT_RETRIEVER_BACKEND": "bedrock-kb",
-            "BEDROCK_KNOWLEDGE_BASE_ID": KB,
-        }
-        for k, v in base.items():
-            monkeypatch.setenv(k, v)
-        monkeypatch.delenv("BEDROCK_KB_SEARCH_MODE", raising=False)
-        monkeypatch.delenv("BEDROCK_KB_ENFORCE_USER_CONTEXT", raising=False)
-        cfg = load_config()
-        assert cfg.bedrock_kb_search_mode == "vector" and cfg.bedrock_kb_enforce_user_context is False
-        # Managed KBs carry document ACL: per-user retrieval is implied unless opted out.
-        monkeypatch.setenv("BEDROCK_KB_SEARCH_MODE", "managed")
-        cfg = load_config()
-        assert cfg.bedrock_kb_search_mode == "managed" and cfg.bedrock_kb_enforce_user_context is True
-        monkeypatch.setenv("BEDROCK_KB_ENFORCE_USER_CONTEXT", "false")
-        assert load_config().bedrock_kb_enforce_user_context is False  # explicit opt-out, logged
-        monkeypatch.setenv("BEDROCK_KB_ENFORCE_USER_CONTEXT", "true")
-        cfg = load_config()
-        assert cfg.bedrock_kb_search_mode == "managed" and cfg.bedrock_kb_enforce_user_context is True
-        from coa_serve.config import ConfigurationError
+    def test_config_carries_no_knowledge_base_routing(self, monkeypatch):
+        from dataclasses import fields
 
-        monkeypatch.setenv("BEDROCK_KB_SEARCH_MODE", "hybrid")
-        with pytest.raises(ConfigurationError):
-            load_config()
+        from coa_serve.config import ServiceConfig, load_config
+
+        monkeypatch.setenv("NEPTUNE_ENDPOINT", "h")
+        monkeypatch.setenv("OPENSEARCH_ENDPOINT", "o")
+        for stale in ("DOCUMENT_RETRIEVER_BACKEND", "BEDROCK_KB_BY_NAMESPACE", "BEDROCK_KB_SEARCH_MODE"):
+            monkeypatch.setenv(stale, "x")  # ignored, not an error: an old SSM config must not break serve
+        load_config()
+        assert not [f.name for f in fields(ServiceConfig) if "kb" in f.name or "retriever_backend" in f.name]

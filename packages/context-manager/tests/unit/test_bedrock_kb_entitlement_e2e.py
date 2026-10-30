@@ -27,10 +27,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from coa_serve.request_document_source import (
+    BoundDocumentSource,
+    bind_request_document_source,
+    get_request_document_source,
+    reset_request_document_source,
+)
 from coa_serve.request_identity import get_request_user, reset_request_user, set_request_user
 from coa_serve.tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
 from coa_serve.tier3.document_entitlement import build_document_entitlement_gate
-from coa_serve.tier3.document_retriever import RoutingDocumentRetriever
+from coa_serve.tier3.document_retriever import RegistryDocumentRetriever
 
 from .test_bedrock_kb_entitlement import FINANCE, HR, KB, SHARED, AclKbClient
 from .test_tier3_agentic_factory import make_clients, make_config
@@ -74,9 +80,8 @@ async def fake_neptune(cypher: str, params: dict) -> list[dict]:
     raise AssertionError(f"unexpected cypher: {cypher[:80]}")
 
 
-def _document_retriever():
-    per_user = BedrockKnowledgeBaseRetriever(KB, client=AclKbClient(), search_mode="managed", enforce_user_context=True)
-    return RoutingDocumentRetriever(default=SimpleNamespace(), routes={NS: per_user})
+def _per_user_kb():
+    return BedrockKnowledgeBaseRetriever(KB, client=AclKbClient(), search_mode="managed", enforce_user_context=True)
 
 
 def _registry(gate):
@@ -96,9 +101,14 @@ def _wire(gate):
 
 @pytest.fixture()
 def gate():
-    g = build_document_entitlement_gate(GRAPH_URI, _document_retriever())
-    assert g is not None, "a per-user KB route must produce a gate"
-    return _wire(g)
+    """The gate as main.py builds it, with NS's Knowledge Base bound the way the admission gate binds it."""
+    g = build_document_entitlement_gate(GRAPH_URI, RegistryDocumentRetriever(default=SimpleNamespace()))
+    assert g is not None, "a registry-backed document retriever must produce a gate"
+    token = bind_request_document_source(BoundDocumentSource(namespace=NS, retriever=_per_user_kb()))
+    try:
+        yield _wire(g)
+    finally:
+        reset_request_document_source(token)
 
 
 @pytest.fixture()
@@ -278,27 +288,32 @@ class TestMainWiring:
 
 @pytest.mark.unit
 class TestEntrypointIdentityScope:
-    """The caller published during one request never survives into the next (worker reuse)."""
+    """Neither the caller nor the Knowledge Base bound during one request survives into the next (worker reuse)."""
 
     @pytest.mark.asyncio
-    async def test_identity_is_cleared_on_entry_and_reset_on_exit(self):
+    async def test_identity_and_document_source_are_cleared_on_entry_and_reset_on_exit(self):
         import coa_serve.main as main_mod
 
-        seen: list[str] = []
+        seen: list[tuple[str, object]] = []
 
         async def fake_body(payload, context):
-            seen.append(get_request_user())  # what a request that skips admission would read
+            seen.append((get_request_user(), get_request_document_source()))  # a request that skips admission
             set_request_user("alice@example.com")  # what the admission gate does
+            bind_request_document_source(BoundDocumentSource(namespace=NS, retriever=_per_user_kb()))
             yield {"ok": True}
 
+        stale_source = BoundDocumentSource(namespace="previous-ns", retriever=_per_user_kb())
         leaked = set_request_user("previous-caller@example.com")  # a stale identity on this worker
+        leaked_source = bind_request_document_source(stale_source)  # and a stale KB binding
         try:
             with patch.object(main_mod, "_invoke", fake_body):
                 events = [e async for e in main_mod.invoke({"action": "listSessions"}, None)]
             assert events == [{"ok": True}]
-            assert seen == [""]  # cleared on entry: the stale caller was not visible to the body
-            assert get_request_user() == "previous-caller@example.com"  # reset to the outer value on exit
+            assert seen == [("", None)]  # cleared on entry: neither stale value was visible to the body
+            assert get_request_user() == "previous-caller@example.com"  # reset to the outer values on exit
+            assert get_request_document_source() is stale_source
         finally:
+            reset_request_document_source(leaked_source)
             reset_request_user(leaked)
 
     @pytest.mark.asyncio

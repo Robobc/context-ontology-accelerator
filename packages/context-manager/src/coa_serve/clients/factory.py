@@ -124,29 +124,17 @@ def _build_default_clients() -> ClientSet:
     )
 
 
-def build_document_retriever(config: ServiceConfig, vector_client: VectorClient) -> DocumentRetriever:
-    """Build the default and per-namespace document retrieval adapters."""
-    from ..tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
-    from ..tier3.document_retriever import RoutingDocumentRetriever
+def build_document_retriever(vector_client: VectorClient) -> DocumentRetriever:
+    """Build the document retriever: the request's registered Knowledge Base, else COA's own chunk index.
+
+    Fork: which namespaces read from a Bedrock Managed Knowledge Base is not
+    deployment configuration; it is the ``BEDROCK_MANAGED_KB`` source each
+    namespace registers, resolved per request by the admission gate.
+    """
+    from ..tier3.document_retriever import RegistryDocumentRetriever
     from ..tier3.vector_retriever import VectorRetriever
 
-    opensearch_retriever = VectorRetriever(vector_client)
-    default: DocumentRetriever = opensearch_retriever
-    kb_kwargs = {
-        "region": config.bedrock_region,
-        "search_mode": config.bedrock_kb_search_mode,
-        "enforce_user_context": config.bedrock_kb_enforce_user_context,
-    }
-    if config.document_retriever_backend == "bedrock-kb":
-        default = BedrockKnowledgeBaseRetriever(config.bedrock_kb_id, **kb_kwargs)
-
-    routes = {
-        namespace: BedrockKnowledgeBaseRetriever(kb_id, **kb_kwargs)
-        for namespace, kb_id in config.bedrock_kb_by_namespace
-    }
-    if not routes:
-        return default
-    return RoutingDocumentRetriever(default=default, routes=routes)
+    return RegistryDocumentRetriever(default=VectorRetriever(vector_client))
 
 
 def build_llm_client(config: ServiceConfig):

@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,18 +126,9 @@ class ServiceConfig:
     # the majority of real edges). "strict" restores the allowlist (ontology edges
     # only), guarded so it never strips the request down to nothing.
     deep_reasoning_ontology_edge_mode: Literal["soft_prior", "strict"] = "soft_prior"
-    # Passage retrieval is independent of the ontology vector index. A
-    # deployment may default to OpenSearch and route selected namespaces to an
-    # existing Bedrock Knowledge Base.
-    document_retriever_backend: Literal["opensearch", "bedrock-kb"] = "opensearch"
-    bedrock_kb_id: str = ""
-    bedrock_kb_by_namespace: tuple[tuple[str, str], ...] = ()
-    # Fork: "vector" (vectorSearchConfiguration) or "managed" (Bedrock Managed KB,
-    # managedSearchConfiguration); and whether every Retrieve carries the caller
-    # as userContext so the KB applies its document ACL (required for the
-    # BEDROCK_MANAGED_KB document source type).
-    bedrock_kb_search_mode: Literal["vector", "managed"] = "vector"
-    bedrock_kb_enforce_user_context: bool = False
+    # Fork: passage retrieval from a Bedrock Managed Knowledge Base is not
+    # configured here. A namespace reads from the BEDROCK_MANAGED_KB source it
+    # registers (sources registry), resolved per request by the admission gate.
     generation_backend: Literal["bedrock", "portkey"] = "bedrock"
     portkey_base_url: str = "https://api.portkey.ai/v1"
     portkey_model_id: str = ""
@@ -313,41 +302,6 @@ def load_config() -> ServiceConfig:
         )
         deep_reasoning_ontology_edge_mode = "soft_prior"
 
-    document_retriever_backend = os.environ.get("DOCUMENT_RETRIEVER_BACKEND", "opensearch")
-    if document_retriever_backend not in ("opensearch", "bedrock-kb"):
-        raise ConfigurationError("DOCUMENT_RETRIEVER_BACKEND must be 'opensearch' or 'bedrock-kb'")
-    bedrock_kb_id = os.environ.get("BEDROCK_KNOWLEDGE_BASE_ID", "").strip()
-    if bedrock_kb_id and not re.fullmatch(r"[A-Z0-9]{10}", bedrock_kb_id):
-        raise ConfigurationError("BEDROCK_KNOWLEDGE_BASE_ID is invalid")
-
-    raw_kb_map = os.environ.get("BEDROCK_KB_BY_NAMESPACE", "").strip()
-    kb_map: dict[str, str] = {}
-    if raw_kb_map:
-        try:
-            parsed_kb_map = json.loads(raw_kb_map)
-        except json.JSONDecodeError as exc:
-            raise ConfigurationError("BEDROCK_KB_BY_NAMESPACE must be a JSON object") from exc
-        if not isinstance(parsed_kb_map, dict):
-            raise ConfigurationError("BEDROCK_KB_BY_NAMESPACE must be a JSON object")
-        for namespace, kb_id in parsed_kb_map.items():
-            if not isinstance(namespace, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", namespace):
-                raise ConfigurationError("BEDROCK_KB_BY_NAMESPACE contains an invalid namespace")
-            if not isinstance(kb_id, str) or not re.fullmatch(r"[A-Z0-9]{10}", kb_id):
-                raise ConfigurationError(f"BEDROCK_KB_BY_NAMESPACE contains an invalid KB id for {namespace}")
-            kb_map[namespace] = kb_id
-    if document_retriever_backend == "bedrock-kb" and not bedrock_kb_id:
-        raise ConfigurationError("BEDROCK_KNOWLEDGE_BASE_ID is required when DOCUMENT_RETRIEVER_BACKEND=bedrock-kb")
-    bedrock_kb_search_mode = os.environ.get("BEDROCK_KB_SEARCH_MODE", "vector").strip().lower() or "vector"
-    if bedrock_kb_search_mode not in ("vector", "managed"):
-        raise ConfigurationError("BEDROCK_KB_SEARCH_MODE must be 'vector' or 'managed'")
-    # A Managed KB carries document-level ACL, so per-user retrieval is the default
-    # there; an operator must opt out explicitly (a KB without ACL) and the opt-out
-    # is logged so a misconfigured deployment is visible rather than silently open.
-    enforce_raw = os.environ.get("BEDROCK_KB_ENFORCE_USER_CONTEXT", "").strip().lower()
-    bedrock_kb_enforce_user_context = enforce_raw == "true" if enforce_raw else bedrock_kb_search_mode == "managed"
-    if bedrock_kb_search_mode == "managed" and not bedrock_kb_enforce_user_context:
-        logger.warning("bedrock_kb_managed_without_user_context", knowledge_base_id=bedrock_kb_id)
-
     generation_backend = os.environ.get("GENERATION_BACKEND", "bedrock")
     if generation_backend not in ("bedrock", "portkey"):
         raise ConfigurationError("GENERATION_BACKEND must be 'bedrock' or 'portkey'")
@@ -409,11 +363,6 @@ def load_config() -> ServiceConfig:
         deep_reasoning_ontology_source=deep_reasoning_ontology_source,
         deep_reasoning_ontology_file=deep_reasoning_ontology_file,
         deep_reasoning_ontology_edge_mode=deep_reasoning_ontology_edge_mode,
-        document_retriever_backend=document_retriever_backend,
-        bedrock_kb_id=bedrock_kb_id,
-        bedrock_kb_by_namespace=tuple(sorted(kb_map.items())),
-        bedrock_kb_search_mode=bedrock_kb_search_mode,
-        bedrock_kb_enforce_user_context=bedrock_kb_enforce_user_context,
         generation_backend=generation_backend,
         portkey_base_url=portkey_base_url,
         portkey_model_id=portkey_model_id,

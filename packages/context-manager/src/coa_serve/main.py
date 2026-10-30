@@ -44,6 +44,11 @@ from .identity import display_principal, extract_jwt_identity, resolve_principal
 from .models import InvokeRequest, TraceStep
 from .namespace_language import bind_label_preference
 from .orchestrator import Orchestrator
+from .request_document_source import (
+    BoundDocumentSource,
+    bind_request_document_source,
+    reset_request_document_source,
+)
 from .request_identity import reset_request_user, set_request_user
 from .role_resolver import ResolvedProfile, may_view_debug_info, resolve_profile
 from .session import SessionManager
@@ -77,6 +82,7 @@ from .tier3.synthesizer import Synthesizer
 if TYPE_CHECKING:
     from .clients.sources_registry import SourcesRegistry
     from .deadline import Deadline
+    from .tier3.bedrock_kb_retriever import KbRetrieverCache
 
 from .trace import TraceCollector
 
@@ -91,6 +97,9 @@ _orchestrator: Orchestrator | None = None
 _session_manager: SessionManager | None = None
 _session_metadata: SessionMetadataStore | None = None
 _sources_registry: SourcesRegistry | None = None
+# Fork: per-user retrievers for registered BEDROCK_MANAGED_KB sources, one per
+# (namespace, KB, region, role); the admission gate binds one to each request.
+_kb_retrievers: KbRetrieverCache | None = None
 _nl_to_sparql: NLtoSPARQL | None = None
 _nl_to_sql_strategy: NLtoSQLStrategy | None = None
 _init_lock = asyncio.Lock()
@@ -133,7 +142,7 @@ _NAMESPACE_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 async def _ensure_initialized():
     """Initialize config and orchestrator on first request."""
     global _config, _guardrail_provider, _orchestrator, _session_manager
-    global _session_metadata, _sources_registry, _nl_to_sparql, _nl_to_sql_strategy
+    global _session_metadata, _sources_registry, _kb_retrievers, _nl_to_sparql, _nl_to_sql_strategy
     if _orchestrator is not None:
         return
     async with _init_lock:
@@ -186,10 +195,14 @@ async def _ensure_initialized():
             table_name=config.data_sources_table,
             namespaces_table=os.environ.get("NAMESPACES_TABLE", ""),
             region=config.bedrock_region,
-            external_document_namespaces=(namespace for namespace, _ in config.bedrock_kb_by_namespace),
-            external_document_default=(config.document_retriever_backend == "bedrock-kb"),
         )
         _sources_registry = sources_registry
+        # Fork: a namespace's documents may live in the Bedrock Managed Knowledge
+        # Base it registered as a source; the retriever for it is built on first
+        # use (assuming the source's cross-account role when it has one).
+        from .tier3.bedrock_kb_retriever import KbRetrieverCache
+
+        _kb_retrievers = KbRetrieverCache(default_region=config.bedrock_region)
         athena_executor = AthenaQueryExecutor(region=config.bedrock_region, sources_registry=sources_registry)
 
         # single-vs-cross-source dispatcher (Serve LLD §2.2.1 Option D).
@@ -277,7 +290,7 @@ async def _ensure_initialized():
         )
         from .clients.factory import build_document_retriever
 
-        document_retriever = build_document_retriever(config, opensearch_client)
+        document_retriever = build_document_retriever(opensearch_client)
         graph_traverser = GraphTraverser(graph_client=neptune_client)
 
         # Query-time chunk screening: evaluate retrieved content against retrieval
@@ -1314,6 +1327,54 @@ async def _bind_namespace_label_preference(
     return None
 
 
+async def _bind_namespace_document_source(namespace: str, request_id: str) -> dict | None:
+    """Fork: resolve the namespace's Knowledge Base source once and bind it to this request.
+
+    A ``BEDROCK_MANAGED_KB`` source is routed like a Databricks one: from the
+    namespace's source registry, not from deployment configuration. The document
+    retriever and the entitlement gate read the binding
+    (:mod:`coa_serve.request_document_source`). Fails closed: a namespace whose
+    inventory cannot be read, or whose Knowledge Base cannot be reached (the
+    cross-account assume refused), is not served, because serving it would fall
+    back to an OpenSearch index holding none of its chunks with the gate off.
+
+    Returns:
+        ``None`` on success, else the error payload to yield.
+    """
+    from .clients.sources_registry import BedrockKbSourceUnavailableError
+
+    if _sources_registry is None or _kb_retrievers is None:
+        bind_request_document_source(None)
+        return None
+    try:
+        source = await _sources_registry.find_bedrock_kb_source(namespace)
+    except BedrockKbSourceUnavailableError as exc:
+        logger.warning(
+            "document_source_unavailable_fail_closed", namespace=namespace, reason=str(exc), request_id=request_id
+        )
+        return DataSourceUnavailableError("Unable to resolve document sources").to_dict(request_id)
+    except Exception:
+        logger.warning("document_source_lookup_failed", namespace=namespace, request_id=request_id, exc_info=True)
+        return DataSourceUnavailableError("Unable to resolve document sources").to_dict(request_id)
+    if source is None:
+        bind_request_document_source(None)
+        return None
+    try:
+        retriever = await asyncio.to_thread(_kb_retrievers.get, source)
+    except Exception as exc:
+        # The assume (or the ExternalId derivation) failed; the role ARN stays in the log.
+        logger.warning(
+            "document_source_session_failed",
+            namespace=namespace,
+            knowledge_base_id=source.knowledge_base_id,
+            error=type(exc).__name__,
+            request_id=request_id,
+        )
+        return DataSourceUnavailableError("Unable to reach the namespace's knowledge base").to_dict(request_id)
+    bind_request_document_source(BoundDocumentSource(namespace=namespace, retriever=retriever))
+    return None
+
+
 async def _authorize_namespace_access(
     namespace: str,
     jwt_user_id: str,
@@ -1401,17 +1462,21 @@ async def _authorize_namespace_access(
 async def invoke(payload: dict, context=None):
     """AgentCore entrypoint; scopes the fork's request identity around :func:`_invoke`.
 
-    Fork: the caller published by the admission gate (``set_request_user``) must
-    not outlive its request. A worker that handled an admitted request and then
+    Fork: the caller published by the admission gate (``set_request_user``) and
+    the Knowledge Base source it bound (``bind_request_document_source``) must
+    not outlive their request. A worker that handled an admitted request and then
     serves one that skips admission (session CRUD, ``semanticPlan``,
-    ``translate``) would otherwise still read the previous caller from the
-    ``ContextVar``. Clear on entry, restore on exit, whatever path the body takes.
+    ``translate``) would otherwise still read the previous caller, and the
+    previous namespace's Knowledge Base, from the ``ContextVar``s. Clear on
+    entry, restore on exit, whatever path the body takes.
     """
     token = set_request_user(None)
+    source_token = bind_request_document_source(None)
     try:
         async for event in _invoke(payload, context):
             yield event
     finally:
+        reset_request_document_source(source_token)
         reset_request_user(token)
 
 
@@ -1546,6 +1611,11 @@ async def _invoke(payload: dict, context=None):
         language_error = await _bind_namespace_label_preference(namespace, namespace_present, request_id)
         if language_error is not None:
             yield language_error
+            return
+        # Fork: which Knowledge Base (if any) this namespace reads documents from.
+        source_error = await _bind_namespace_document_source(namespace, request_id)
+        if source_error is not None:
+            yield source_error
             return
 
     # ── Namespace admission gate (Cedar) ───────────────────────────────────

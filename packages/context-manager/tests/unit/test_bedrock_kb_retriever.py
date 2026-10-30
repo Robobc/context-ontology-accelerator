@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from coa_serve.tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
-from coa_serve.tier3.document_retriever import RoutingDocumentRetriever
+from coa_serve.tier3.document_retriever import RegistryDocumentRetriever
 from coa_serve.tier3.vector_retriever import VectorRetriever
 
 
@@ -85,8 +85,14 @@ class TestBedrockKnowledgeBaseRetriever:
 
 
 @pytest.mark.unit
-class TestRoutingDocumentRetriever:
-    async def test_routes_only_configured_namespace_to_kb(self):
+class TestRegistryDocumentRetriever:
+    async def test_routes_the_bound_namespace_to_its_kb(self):
+        from coa_serve.request_document_source import (
+            BoundDocumentSource,
+            bind_request_document_source,
+            reset_request_document_source,
+        )
+
         vector_client = MagicMock()
         vector_client.search = MagicMock()
         opensearch = VectorRetriever(vector_client)
@@ -94,9 +100,14 @@ class TestRoutingDocumentRetriever:
         kb.retrieve = MagicMock(return_value=[])
         kb.backend_name.return_value = "bedrock-kb"
         kb.requires_query_embedding.return_value = False
-        router = RoutingDocumentRetriever(opensearch, {"managed-docs": kb})
+        router = RegistryDocumentRetriever(opensearch)
 
-        assert router.backend_name("managed-docs") == "bedrock-kb"
-        assert router.backend_name("default-search") == "opensearch"
-        assert router.requires_query_embedding("managed-docs") is False
-        assert router.requires_query_embedding("default-search") is True
+        assert router.backend_name("managed-docs") == "opensearch"  # nothing bound yet
+        token = bind_request_document_source(BoundDocumentSource(namespace="managed-docs", retriever=kb))
+        try:
+            assert router.backend_name("managed-docs") == "bedrock-kb"
+            assert router.backend_name("default-search") == "opensearch"
+            assert router.requires_query_embedding("managed-docs") is False
+            assert router.requires_query_embedding("default-search") is True
+        finally:
+            reset_request_document_source(token)
