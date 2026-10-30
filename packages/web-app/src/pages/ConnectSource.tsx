@@ -331,6 +331,10 @@ interface Model {
   // Comma- or whitespace-separated data source ids; all of the KB's when blank.
   docKbDataSourceIds: string;
   docKbCrossAccountRoleArn: string;
+  // The identity the extraction reads the KB as (userContext.userId). Required
+  // in practice for an ACL-enabled data source: Bedrock returns nothing to a
+  // read without one and has no administrative bypass.
+  docKbExtractionUserId: string;
   // Shared extraction config
   enableVersioning: boolean;
   deletePrevVersions: boolean;
@@ -512,6 +516,7 @@ const initialModel: Model = {
   docKbRegion: "",
   docKbDataSourceIds: "",
   docKbCrossAccountRoleArn: "",
+  docKbExtractionUserId: "",
   enableVersioning: true,
   deletePrevVersions: false,
   // Defaults match server-side behaviour today: infer classifications from the
@@ -719,6 +724,7 @@ interface ValidationErrors {
   docKbKnowledgeBaseId?: string;
   docKbDataSourceIds?: string;
   docKbCrossAccountRoleArn?: string;
+  docKbExtractionUserId?: string;
   preferredEntityClassifications?: string;
   preferredTopics?: string;
   docS3Prefixes?: Record<number, string>;
@@ -907,6 +913,13 @@ function validateStep2(
         t,
       );
       if (roleErr) errs.docKbCrossAccountRoleArn = roleErr;
+      const identity = model.docKbExtractionUserId.trim();
+      // Same rule as the API: a typo here is not an error at scan time but an
+      // empty graph, so the one check worth making is the email shape.
+      if (identity && !/^\S+@\S+$/.test(identity))
+        errs.docKbExtractionUserId = t(
+          "Must be the email address of the account the knowledge base owner granted read access to.",
+        );
     }
     // "Define my own" with nothing defined is a contradiction: the payload would
     // silently fall back to inference (classes) or automatic naming (topics),
@@ -1187,6 +1200,7 @@ export const ConnectSource: React.FC = () => {
               region: model.docKbRegion.trim() || undefined,
               crossAccountRoleArn:
                 model.docKbCrossAccountRoleArn.trim() || undefined,
+              extractionUserId: model.docKbExtractionUserId.trim() || undefined,
             },
             extractionConfig: buildExtractionConfig(model),
           },
@@ -2502,6 +2516,24 @@ export const ConnectSource: React.FC = () => {
                             isLoading={namespaceLoading}
                             loadFailed={namespaceLoadFailed}
                           />
+                          <FormField
+                            label={t("Extraction identity")}
+                            description={t(
+                              "The account the knowledge graph is built as: the email of a user or service account the knowledge base owner has granted read access to every document the graph should cover. Required when the knowledge base enforces document permissions, because it returns nothing to a read without an identity; the graph will contain exactly what this account may read, and nothing else.",
+                            )}
+                            constraintText={t(
+                              "This identity decides the graph's coverage, not what anyone sees: every question is still answered as the asking user.",
+                            )}
+                            errorText={step2Errs.docKbExtractionUserId}
+                          >
+                            <Input
+                              value={model.docKbExtractionUserId}
+                              onChange={({ detail }) =>
+                                setField("docKbExtractionUserId", detail.value)
+                              }
+                              placeholder="coa-extraction@example.com"
+                            />
+                          </FormField>
                         </SpaceBetween>
                       </Container>
                     </SpaceBetween>
@@ -2936,6 +2968,12 @@ export const ConnectSource: React.FC = () => {
                             value:
                               model.docKbCrossAccountRoleArn ||
                               t("(this deployment's account)"),
+                          },
+                          {
+                            label: t("Extraction identity"),
+                            value:
+                              model.docKbExtractionUserId ||
+                              t("(none: non-ACL data sources only)"),
                           },
                         ]
                       : [

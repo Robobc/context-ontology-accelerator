@@ -116,10 +116,12 @@ describe("SourceDetail — BEDROCK_MANAGED_KB sub-type", () => {
       region: "eu-central-1",
       dataSourceIds: ["KLMNOPQRST", "UVWXYZ0123"],
       crossAccountRoleArn: KB_ROLE_ARN,
+      extractionUserId: "coa-extraction@example.com",
     });
     render(<SourceDetail />, { wrapper });
 
     expect(screen.getByText("Bedrock Knowledge Base")).toBeInTheDocument();
+    expect(screen.getByText("coa-extraction@example.com")).toBeInTheDocument();
     expect(screen.queryByText("S3 bucket")).not.toBeInTheDocument();
     expect(screen.getByText("ABCDEFGHIJ")).toBeInTheDocument();
     expect(screen.getByText("eu-central-1")).toBeInTheDocument();
@@ -138,5 +140,8 @@ describe("SourceDetail — BEDROCK_MANAGED_KB sub-type", () => {
     expect(screen.getByText("(this deployment's)")).toBeInTheDocument();
     expect(screen.getByText("(all)")).toBeInTheDocument();
     expect(screen.getByText("(this deployment's account)")).toBeInTheDocument();
+    expect(
+      screen.getByText("(none: non-ACL data sources only)"),
+    ).toBeInTheDocument();
   });
 });

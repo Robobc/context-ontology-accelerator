@@ -35,31 +35,84 @@ Knowledge Base already holds, and to make every graph read answerable to the
 Knowledge Base's own authorization.
 
 Facts the design depends on, verified against the pinned toolkit
-(`graphrag-lexical-graph` 3.18.7) and a live Managed Knowledge Base:
+(`graphrag-lexical-graph` 3.18.7) and a live Managed Knowledge Base
+(`71RZ44THV5`, eu-central-1, 2026-10-25 and 2026-10-30):
 
 - `Retrieve` returns `metadata._chunk_id` per result, stable across syncs and
-  content-derived; there is no chunk enumeration API and
-  `ListKnowledgeBaseDocuments` rejects SharePoint data sources.
-- `Retrieve` with `userContext.userId` enforces document-level ACL; without it
-  an ACL-enabled data source returns nothing.
-- The toolkit rehashes every node id unless it starts with `aws:`, merges
-  `__Chunk__` nodes on that id, and only skips its own splitter when
+  content-derived (observed; the service team has been asked whether it is
+  guaranteed); there is no chunk enumeration API and
+  `ListKnowledgeBaseDocuments` rejects SharePoint data sources. For an S3 data
+  source the `documentId` is the `s3://` URI while `_source_uri`, the key the
+  KB filters on, is the `https://` form of the same object.
+- `Retrieve` and `GetDocumentContent` with `userContext.userId` enforce
+  document-level ACL. **Without a user context an ACL-enabled data source
+  returns nothing** (`GetDocumentContent` refuses with "UserContext is
+  required for ACL-aware data sources"), a document with no ACL is restricted
+  rather than public, and **there is no administrative or service identity
+  that sees everything** ([docs](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-test-retrieve-acl.html)).
+  Non-ACL data sources return every document to any identity.
+- The toolkit touches node ids in two stages. The extract stage's
+  `IdRewriter._new_id` leaves any id starting with `aws:` alone. The build
+  stage's `NodeBuilders.pre_process` then applies `TenantId.rewrite_id` to
+  every node id and relationship id: `parts = id.split(":")`, result
+  `f"{parts[0]}:{tenant}:{':'.join(parts[2:])}"`. Segment 1 is replaced by the
+  tenant; an id with only two segments loses its tail (`aws:<x>` becomes
+  `aws:<tenant>:`, every chunk onto one node). The toolkit merges `__Chunk__`
+  nodes on the stored id and only skips its own splitter when
   `IndexingConfig(chunking=None)` is passed explicitly.
 
 ## Decision
 
 **kg-build.** `INPUT_MODE=BEDROCK_KB` loads a Knowledge Base's chunks through a
 document-scoped `Retrieve` scan (documents from `ListKnowledgeBaseDocuments`
-where the data source allows it, otherwise discovered through `Retrieve`
-sampling) and hands them to the toolkit as pre-chunked `TextNode`s with
-`id_ = "aws:" + _chunk_id` and a `SOURCE` relationship to
-`"aws:doc:" + documentId`. Chunking is `None`; nothing is re-split. Raw ids are
-kept as `bedrockChunkId` / `bedrockDocumentId` properties so joins never
-depend on prefix stripping. `VECTOR_STORE_MODE=DUMMY` leaves chunk and topic
-embeddings in the Knowledge Base instead of writing them to OpenSearch.
-Extraction runs under a dedicated role **without** `userContext`, so the graph
-contains facts from every document. The default mode (`STAGING`, `AOSS`) is
-unchanged.
+where the data source allows it, located in the data-source scan by
+`documentId` and read through their `_source_uri`; otherwise discovered through
+`Retrieve` sampling) and hands them to the toolkit as pre-chunked `TextNode`s.
+Chunking is `None`; nothing is re-split. `VECTOR_STORE_MODE=DUMMY` leaves chunk
+and topic embeddings in the Knowledge Base instead of writing them to
+OpenSearch. The default mode (`STAGING`, `AOSS`) is unchanged.
+
+**Id contract** (`libs/common/src/coa_common/kb_ids.py`, the one place the
+shape is written; kg-build, serve and the ontology engine import it). Because
+the toolkit rewrites segment 1 of every id to the tenant, ids are emitted in
+the toolkit's own shape with an empty tenant slot and stored with it filled:
+
+| | emitted by kg-build | stored in the graph |
+|---|---|---|
+| `__Chunk__` | `aws::kb:<_chunk_id>` | `aws:<tenant>:kb:<_chunk_id>` |
+| `__Source__` | `aws::doc:<tail>` | `aws:<tenant>:doc:<tail>` |
+
+`<tenant>` is `to_graphrag_tenant_id(namespace)`, which serve knows, so a
+`Retrieve` hit's `_chunk_id` is turned into the exact stored node id with no
+lookup (`stored_chunk_id`). The `kb` / `doc` markers at segment 2 are what
+distinguish Knowledge Base content from the toolkit's own nodes
+(`aws:<tenant>:<hex8>:<hex4>...`), which are not under any document ACL. The
+document tail is the `documentId` with `#` -> `_` when that fits the id
+grammar (SharePoint's `4#<uuid>#<sha256>`), else `h.<sha256[:32]>` (an S3
+`documentId` is an `s3://` URI); the raw ids stay on the nodes as
+`bedrockChunkId` / `bedrockDocumentId`, and the gate resolves a source to its
+`_source_uri` through a property, never by parsing the id. A unit test runs
+the toolkit's real `TenantId.rewrite_id` on the emitted ids so the two halves
+cannot drift again; the first implementation had emitted `aws:<_chunk_id>`,
+verified only against the extract stage, and would have collapsed every chunk
+onto one node while stripping the prefix the gate tested for.
+
+**Extraction identity.** The scan reads the Knowledge Base as one identity,
+`bedrockKnowledgeBaseConfiguration.extractionUserId`, passed as
+`userContext.userId` on every `Retrieve` and `GetDocumentContent`: the email of
+a user or service account the Knowledge Base owner has granted read access to
+every document the graph should cover. There is no other way to read an
+ACL-enabled data source, so **the graph's coverage is exactly that identity's
+entitlement**, set by the owner in the source system (for SharePoint, a
+service account with read permission on the sites in scope, checked by
+Bedrock against the synced ACLs and in real time). The identity decides
+coverage, never visibility: every question is still answered as the asking
+user. A scan over a data source that lists documents the identity cannot read
+at all fails the job (`ExtractionIdentityRequiredError`, surfaced on the
+source row naming the field) instead of building an empty graph that looks
+like a successful one; partial visibility is counted and logged
+(`documents_not_visible`). Non-ACL data sources ignore the identity. Optional
+on the API for that reason; required in practice for any ACL-enabled source.
 
 **serve, routing.** Which Knowledge Base serves a namespace is read from the
 namespace's source registry (the same DynamoDB inventory Tier-2 routes
@@ -81,8 +134,8 @@ account is read through a refreshable session assumed from its
 under the serve runtime's own role.
 
 **serve, retrieval.** The existing `BedrockKnowledgeBaseRetriever` emits chunk
-ids as `aws:<_chunk_id>`, so a vector hit is the id of the graph node and no
-translation table exists. A Managed Knowledge Base source is **always** queried
+ids as `stored_chunk_id(tenant, _chunk_id)` = `aws:<tenant>:kb:<_chunk_id>`,
+so a vector hit is the id of the graph node and no translation table exists. A Managed Knowledge Base source is **always** queried
 per user: every `Retrieve` carries the caller as `userContext.userId` with
 `managedSearchConfiguration`, and a request with no resolvable caller returns
 no chunks. There is no switch to turn this off; the former
@@ -112,8 +165,8 @@ from them. Definite answers are cached per `(user, namespace, uri)` for 60 s in
 a bounded cache; a probe the Knowledge Base could not answer (throttled,
 unavailable) withholds the document for that request only and is not cached,
 so an outage never becomes a remembered denial. Content not minted from the
-Knowledge Base (chunk ids without `aws:`, source ids without `aws:doc:`) is not
-under its ACL and passes through, logged.
+Knowledge Base (ids without the `kb` / `doc` marker, `is_kb_chunk_id` /
+`is_kb_source_id`) is not under its ACL and passes through, logged.
 
 **serve, request scope.** The `ContextVar` identity is cleared when the
 entrypoint starts a request and restored when it ends (`try/finally` around the
@@ -128,10 +181,11 @@ classes and properties, not document text. That holds only as long as
 unstructured induction is **not** run over a per-user Knowledge Base's lexical
 graph (it would promote document-derived individuals into the ontology). This
 is enforced, not assumed: the graph declares its own origin (KB documents are
-`__Source__` nodes with ids `aws:doc:*`), and the unstructured induction worker
-checks `LexicalGraphStore.has_access_controlled_sources()` right after
-connecting; a positive answer fails the job before any LLM call and creates no
-proposal (`AccessControlledGraphError`). No second source of truth is needed.
+`__Source__` nodes with ids `aws:<tenant>:doc:*`, tested with the shared
+`KB_SOURCE_ID_CYPHER_PREDICATE`), and the unstructured induction worker checks
+`LexicalGraphStore.has_access_controlled_sources()` right after connecting; a
+positive answer fails the job before any LLM call and creates no proposal
+(`AccessControlledGraphError`). No second source of truth is needed.
 
 **Registration (`BEDROCK_MANAGED_KB` sub-type).** A document source carrying
 `bedrockKnowledgeBaseConfiguration` (`knowledgeBaseId`, optional
@@ -169,13 +223,19 @@ the sources stack's. Both principals are published in SSM
 `/{project}/{env}/serve/runtime-role-arn`) so the Knowledge Base owner reads
 them rather than assembling them.
 
-**Governance.** Three decisions, three owners, none of them deployment config:
+**Governance.** Four decisions, three owners, none of them deployment config:
 *which* Knowledge Bases a namespace may read is decided by the Knowledge Base
 owner, in their account, through the role's trust policy (which namespaces, by
-ExternalId) and permission policy (which Knowledge Bases); *that* a namespace
-reads one is decided by whoever holds `manageSource` on that namespace, by
+ExternalId) and permission policy (which Knowledge Bases); *which documents
+the graph covers* is decided by the same owner, in the source system, through
+what the extraction identity may read; *that* a namespace reads a Knowledge
+Base is decided by whoever holds `manageSource` on that namespace, by
 registering it; *what each user sees* is decided by the Knowledge Base's own
 document ACL on every `Retrieve`, and the graph is gated to the same answer.
+One consequence worth stating: Bedrock trusts the calling role to assert the
+`userId`, so whoever may call `Retrieve` on a Knowledge Base through COA's
+roles may read as anyone; the role, not the identity string, is the boundary,
+which is why the roles are COA's and the ExternalId binds them to a namespace.
 One role can serve several namespaces by listing their ExternalIds, so a
 Knowledge Hub with hundreds of Knowledge Bases needs one role per owning
 account, not one per Knowledge Base or per namespace.
@@ -206,9 +266,15 @@ separate milestone.
 - Cost: one `Retrieve` per candidate document per request (bounded by the
   60 s cache), on top of the retrieval call. Topic embeddings do not exist
   under `DUMMY`, so Tier-3 topic retrieval is unavailable for such namespaces.
-- `_chunk_id` stability and the `aws:` passthrough are observed behaviour, not
-  documented contracts; both are pinned by unit tests and must be re-checked
-  on every toolkit or Bedrock change. Detected id churn means a full rebuild.
+- `_chunk_id` stability is observed behaviour, not a documented contract, and
+  the toolkit's two-stage id handling is an implementation detail; both are
+  pinned by unit tests (the second with the toolkit's real `rewrite_id`) and
+  must be re-checked on every toolkit or Bedrock change. Detected id churn
+  means a full rebuild.
+- The Knowledge Base owner must provision one more thing than for Databricks:
+  an extraction identity with read access to the documents in scope. For
+  SharePoint that is an Entra account with site read permission; Bedrock's
+  real-time ACL check applies to it like to any user.
 - `graph_build.py` and the agentic tool wiring are upstream files; the hooks
   there are kept to a few lines each so release rebases stay cheap.
 - A namespace without a `BEDROCK_MANAGED_KB` source is served exactly as
@@ -235,11 +301,12 @@ kg-build task environment (`packages/sources/.../kg_build/graph_build.py`):
 | `BEDROCK_KB_ID` | required when `INPUT_MODE=BEDROCK_KB` | Knowledge Base to read. |
 | `BEDROCK_KB_DATA_SOURCE_IDS` | empty = all | Comma-separated data source ids to scope the scan. |
 | `BEDROCK_KB_REGION` | `AWS_REGION` | Region of the Knowledge Base. |
-| `BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN` | empty = task role | `{prefix}-datasource-access-*` role assumed with the namespace ExternalId for the Bedrock calls; must see every document. |
+| `BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN` | empty = task role | `{prefix}-datasource-access-*` role assumed with the namespace ExternalId for the Bedrock calls (IAM side). |
+| `BEDROCK_KB_EXTRACTION_USER_ID` | empty = no user context | `userContext.userId` for every `Retrieve` / `GetDocumentContent` of the scan (ACL side); what it may read is what the graph contains. Empty against an ACL-enabled data source fails the job. |
 | `RESOURCE_PREFIX` | set by CDK | The `{prefix}-{env}-` the ExternalId is derived from; the task fails the assume rather than default it. |
 | `CHUNK_SIZE` | toolkit default | Ignored under `BEDROCK_KB` (logged). |
 
-The state machine sets the first six from the trigger Lambda's flattened job
+The state machine sets the first seven from the trigger Lambda's flattened job
 input; none is operator-set. The source-level configuration is the API's
 `bedrockKnowledgeBaseConfiguration` (Smithy `unified-sources.smithy`).
 
@@ -326,8 +393,16 @@ second review phrased it:
    namespace makes queries fail with `DataSourceUnavailableError` until one
    is deleted.
 5. Chunk-id stability: a second scan of the same Knowledge Base produces the
-   same `aws:<_chunk_id>` set (zero drift), which is the assumption the
-   mapping rests on. The service team has been asked whether it is guaranteed.
+   same `_chunk_id` set (zero drift), which is the assumption the mapping
+   rests on. The service team has been asked whether it is guaranteed.
+6. Id contract live: after the build, `MATCH (c:__Chunk__) RETURN id(c)` on
+   the namespace's graph shows `aws:<tenant>:kb:<_chunk_id>` ids whose count
+   equals the distinct `Retrieve` results (no collapse), and a `Retrieve` hit's
+   `stored_chunk_id` resolves to one node.
+7. Extraction identity: a scan of an ACL-enabled data source with no identity
+   ends `SCAN_FAILED` with a message naming `extractionUserId`; the same scan
+   with an identity granted some documents produces a graph containing exactly
+   those (`documents_not_visible` equals the rest).
 
 Deployed (pending): against a Knowledge Base with a document-level ACL data
 source, build the graph, then query as two users with different entitlements

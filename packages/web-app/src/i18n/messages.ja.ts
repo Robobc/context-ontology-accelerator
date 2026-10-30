@@ -759,6 +759,14 @@ export const MESSAGES_JA = {
   "(this deployment's)": "（このデプロイのもの）",
   "(all)": "（すべて）",
   "(this deployment's account)": "（このデプロイのアカウント）",
+  "Extraction identity": "抽出アイデンティティ",
+  "The account the knowledge graph is built as: the email of a user or service account the knowledge base owner has granted read access to every document the graph should cover. Required when the knowledge base enforces document permissions, because it returns nothing to a read without an identity; the graph will contain exactly what this account may read, and nothing else.":
+    "ナレッジグラフを構築する際のアカウントです。グラフに含めるすべての文書への読み取り権限をナレッジベース所有者が付与したユーザーまたはサービスアカウントのメールアドレスを指定します。ナレッジベースが文書のアクセス権を適用する場合は必須です（アイデンティティなしの読み取りには何も返されません）。グラフにはこのアカウントが読み取れるものだけが含まれます。",
+  "This identity decides the graph's coverage, not what anyone sees: every question is still answered as the asking user.":
+    "このアイデンティティはグラフの範囲を決めるもので、誰に何が見えるかは決めません。各質問は引き続き質問したユーザーとして回答されます。",
+  "Must be the email address of the account the knowledge base owner granted read access to.":
+    "ナレッジベース所有者が読み取り権限を付与したアカウントのメールアドレスを指定してください。",
+  "(none: non-ACL data sources only)": "（なし: ACL なしのデータソースのみ）",
   "Advanced options": "詳細オプション",
   "Tracks document versions in Neptune.":
     "Neptune で文書のバージョンを追跡します。",

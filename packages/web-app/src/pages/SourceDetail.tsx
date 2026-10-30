@@ -1424,6 +1424,11 @@ export const SourceDetail: React.FC = () => {
                     {docDetails?.bedrockKnowledgeBaseConfiguration
                       ?.crossAccountRoleArn ?? t("(this deployment's account)")}
                   </ValueWithLabel>
+                  <ValueWithLabel label={t("Extraction identity")}>
+                    {docDetails?.bedrockKnowledgeBaseConfiguration
+                      ?.extractionUserId ??
+                      t("(none: non-ACL data sources only)")}
+                  </ValueWithLabel>
                 </>
               )}
               {source.sourceSubType !== "LOCAL_UPLOAD" &&

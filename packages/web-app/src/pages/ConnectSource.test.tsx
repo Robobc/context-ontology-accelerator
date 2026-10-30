@@ -1391,6 +1391,7 @@ describe("ConnectSource — Bedrock Knowledge Base (Documents tab)", () => {
       region?: string;
       dataSourceIds?: string;
       roleArn?: string;
+      extractionUserId?: string;
     } = {},
   ) {
     await user.click(screen.getByLabelText("Documents"));
@@ -1420,6 +1421,11 @@ describe("ConnectSource — Bedrock Knowledge Base (Documents tab)", () => {
       await user.type(
         screen.getByPlaceholderText(KB_ROLE_ARN),
         overrides.roleArn,
+      );
+    if (overrides.extractionUserId)
+      await user.type(
+        screen.getByPlaceholderText("coa-extraction@example.com"),
+        overrides.extractionUserId,
       );
   }
 
@@ -1462,6 +1468,7 @@ describe("ConnectSource — Bedrock Knowledge Base (Documents tab)", () => {
       region: "eu-central-1",
       dataSourceIds: "KLMNOPQRST, UVWXYZ0123",
       roleArn: KB_ROLE_ARN,
+      extractionUserId: "coa-extraction@example.com",
     });
     await clickNext();
     await user.click(screen.getByRole("button", { name: /^connect source$/i }));
@@ -1473,6 +1480,7 @@ describe("ConnectSource — Bedrock Knowledge Base (Documents tab)", () => {
       dataSourceIds: ["KLMNOPQRST", "UVWXYZ0123"],
       region: "eu-central-1",
       crossAccountRoleArn: KB_ROLE_ARN,
+      extractionUserId: "coa-extraction@example.com",
     });
     expect(documentSource.extractionConfig).toBeDefined();
     // The backend 400s when any of these ride along: the configuration present

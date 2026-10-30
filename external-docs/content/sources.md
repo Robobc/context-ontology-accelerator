@@ -1047,9 +1047,10 @@ same way a Databricks owner provides the credential-access role.
 #### Register via Web UI
 
 **Connect Source → Documents → Bedrock Knowledge Base** tab. Enter a name, the
-Knowledge Base id, optionally its Region and the data source ids to read, and
-the access role ARN when the Knowledge Base is in another account. The form
-states the role-name rule with this deployment's real prefix and shows the
+Knowledge Base id, optionally its Region and the data source ids to read, the
+access role ARN when the Knowledge Base is in another account, and the
+extraction identity when the Knowledge Base enforces document permissions. The
+form states the role-name rule with this deployment's real prefix and shows the
 External ID the trust policy must require, with a copy button; the External ID
 is displayed, never typed.
 
@@ -1069,7 +1070,8 @@ sub-type):
       "knowledgeBaseId": "ABCDEFGHIJ",
       "dataSourceIds": ["KLMNOPQRST"],
       "region": "eu-central-1",
-      "crossAccountRoleArn": "arn:aws:iam::<kb-account>:role/{prefix}-datasource-access-knowledge-hub"
+      "crossAccountRoleArn": "arn:aws:iam::<kb-account>:role/{prefix}-datasource-access-knowledge-hub",
+      "extractionUserId": "coa-extraction@example.com"
     },
     "extractionConfig": { "preferredEntityClassifications": ["Product", "Regulation"] }
   }
@@ -1082,6 +1084,34 @@ sub-type):
 | `dataSourceIds` | | Restrict extraction to these data sources; all of them when omitted. |
 | `region` | | Region of the Knowledge Base; the deployment's Region when omitted. |
 | `crossAccountRoleArn` | | Role in the Knowledge Base's account, named `{prefix}-datasource-access-*`. Omit when the Knowledge Base is in the deployment's own account. Same member, type and meaning as on Glue, JDBC and Databricks sources. |
+| `extractionUserId` | when any data source enforces document permissions | The email of the account the knowledge graph is built as (see [The extraction identity](#the-extraction-identity-which-documents-the-graph-covers)). Omit only for data sources without access control. |
+
+#### The extraction identity: which documents the graph covers
+
+A Knowledge Base with document-level access control returns documents only to
+a request that names a user, and only the documents that user may read. There
+is no administrative identity that sees everything. Building the graph is such
+a request, so it runs as one identity: the **extraction identity**, the email
+of a user or service account in the source system (for SharePoint, an Entra
+account) that the Knowledge Base owner has granted **read access to every
+document the graph should cover**.
+
+- The graph contains exactly what that account may read, and nothing else. The
+  Knowledge Base owner therefore decides the graph's coverage with the same
+  tool they use for every other reader: permissions in the source system.
+- The identity decides coverage, never visibility. Every question is still
+  answered as the asking user, with their own permissions.
+- A scan over an access-controlled data source with no identity, or with one
+  that may read none of its documents, ends in `SCAN_FAILED` with a message
+  naming `extractionUserId`, rather than producing an empty graph. An identity
+  that may read some documents produces a graph of those; the count of
+  documents it could not read is logged.
+- Data sources without access control ignore the identity.
+
+What to provision: a dedicated service account (not a person's), granted read
+on the sites or folders in scope, kept in a group whose membership is
+reviewed. Bedrock applies the same real-time permission check to it as to any
+user, so revoking its access removes those documents from the next scan.
 
 `extractionConfig` (entity classes, topics, versioning) applies as for any
 document source; see [Configuring Document Extraction](#configuring-document-extraction).
@@ -1175,6 +1205,8 @@ directly.
   their account, through the role's trust policy (which namespaces, by External
   ID) and permission policy (which Knowledge Bases). One role per owning
   account is enough for any number of Knowledge Bases.
+- **Which documents the graph covers**: the same owner, in the source system,
+  through what the extraction identity may read.
 - **That a namespace reads one**: whoever holds `manageSource` on the
   namespace, by registering the source.
 - **What each user sees**: the Knowledge Base's own document-level access
