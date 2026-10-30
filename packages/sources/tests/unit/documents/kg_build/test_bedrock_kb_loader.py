@@ -304,6 +304,21 @@ class TestLoader:
         assert agent.list_calls == 1
         assert res.documents_discovered == 2 and [n.id_ for n in res.chunks] == ["aws::kb:c1", "aws::kb:c2"]
 
+    def test_list_denied_is_a_failure_not_a_fallback(self):
+        """Only the SharePoint ValidationException means 'sample instead'; an
+        AccessDenied on the listing would recur on the scan and must surface."""
+        runtime, agent = _s3_fixture()
+
+        def denied(**kwargs):
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "ListKnowledgeBaseDocuments"
+            )
+
+        agent.list_knowledge_base_documents = denied
+        with pytest.raises(ClientError, match="AccessDeniedException"):
+            loader.load_bedrock_kb_chunks(knowledge_base_id=KB, data_source_ids=[DS_S3], runtime=runtime, agent=agent)
+        assert runtime.calls == []  # nothing was sampled on the same broken credentials
+
     def test_all_data_sources_when_none_given(self):
         runtime, agent = _s3_fixture()
         runtime.pages[(DS_SP, None)] = [[]]

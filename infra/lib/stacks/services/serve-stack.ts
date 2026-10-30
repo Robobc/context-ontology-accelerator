@@ -768,11 +768,13 @@ export class ServeStack extends SCLStack {
           "AssumeRoleKbRetrieval",
         ),
       );
+      // Any Region of this account: a same-account KB may live in another
+      // Region (the source's `region` member), and the account is the boundary.
       runtime.addToRolePolicy(
         new iam.PolicyStatement({
           sid: "RetrieveBedrockKnowledgeBase",
           actions: ["bedrock:Retrieve"],
-          resources: [`arn:aws:bedrock:${region}:${account}:knowledge-base/*`],
+          resources: [`arn:aws:bedrock:*:${account}:knowledge-base/*`],
         }),
       );
       if (props.portkeySecretArn) {

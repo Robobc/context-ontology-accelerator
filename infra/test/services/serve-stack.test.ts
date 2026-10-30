@@ -116,7 +116,7 @@ describe("ServeStack - Bedrock Managed Knowledge Base sources", () => {
     template_hasAssumeGrant(createStack());
   });
 
-  it("reads a Knowledge Base in this account under its own role", () => {
+  it("reads a Knowledge Base in this account, in any Region, under its own role", () => {
     createStack().hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -124,7 +124,7 @@ describe("ServeStack - Bedrock Managed Knowledge Base sources", () => {
             Sid: "RetrieveBedrockKnowledgeBase",
             Effect: "Allow",
             Action: "bedrock:Retrieve",
-            Resource: "arn:aws:bedrock:us-east-1:123456789012:knowledge-base/*",
+            Resource: "arn:aws:bedrock:*:123456789012:knowledge-base/*",
           }),
         ]),
       },

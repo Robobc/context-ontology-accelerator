@@ -2313,7 +2313,10 @@ export class SourcesStack extends SCLStack {
     // below covers a KB in this deployment's own account, where no role hop is
     // needed. `GetDocumentContent` is the optional completeness check and is
     // authorised against `bedrock:Retrieve` as well; `ListKnowledgeBaseDocuments`
-    // is the document discovery for S3/custom data sources.
+    // is the document discovery for S3/custom data sources. Any Region of THIS
+    // account: the source's `region` member lets a same-account KB live in
+    // another Region (the first deployed run hit exactly that), and the
+    // account id is the boundary that matters here.
     kgBuildTaskDef.taskRole.addToPrincipalPolicy(
       this.assumeDatasourceAccessRoleStatement("AssumeRoleKbExtraction"),
     );
@@ -2325,9 +2328,7 @@ export class SourcesStack extends SCLStack {
           "bedrock:GetDocumentContent",
           "bedrock:ListKnowledgeBaseDocuments",
         ],
-        resources: [
-          `arn:aws:bedrock:${this.region}:${this.account}:knowledge-base/*`,
-        ],
+        resources: [`arn:aws:bedrock:*:${this.account}:knowledge-base/*`],
       }),
     );
 

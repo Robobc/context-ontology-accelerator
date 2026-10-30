@@ -2888,7 +2888,10 @@ describe("SourcesStack", () => {
       });
     });
 
-    it("scopes the in-account KB read to knowledge-base ARNs in this region and account", () => {
+    it("scopes the in-account KB read to this account's knowledge bases in any Region", () => {
+      // The account is the boundary; the Region is not, because the source's
+      // `region` member lets a same-account KB live elsewhere (the first deployed
+      // run read a eu-central-1 KB from a us-east-1 deployment).
       template.hasResourceProperties("AWS::IAM::Policy", {
         PolicyDocument: {
           Statement: Match.arrayWith([
@@ -2899,7 +2902,7 @@ describe("SourcesStack", () => {
                 "bedrock:GetDocumentContent",
                 "bedrock:ListKnowledgeBaseDocuments",
               ],
-              Resource: `arn:aws:bedrock:${TEST_ENV.region}:${TEST_ENV.account}:knowledge-base/*`,
+              Resource: `arn:aws:bedrock:*:${TEST_ENV.account}:knowledge-base/*`,
             }),
           ]),
         },

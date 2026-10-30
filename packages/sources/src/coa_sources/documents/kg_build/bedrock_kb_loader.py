@@ -303,8 +303,15 @@ def discover_documents(
                 break
         logger.info("bedrock_kb_documents_listed", data_source_id=data_source_id, count=len(listed_uris))
     except Exception as exc:
-        # SharePoint (and any other type the API refuses): fall back to sampling.
-        logger.info("bedrock_kb_list_documents_unavailable", data_source_id=data_source_id, error=type(exc).__name__)
+        # Only "this data source type does not support the call" (SharePoint and
+        # friends, a ValidationException) falls back to sampling. Anything else,
+        # an AccessDenied above all, is a real failure: sampling would then run
+        # on the same credentials and either fail too or, worse, succeed and
+        # hide that the listing path is broken.
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "") if hasattr(exc, "response") else ""
+        if code != "ValidationException":
+            raise
+        logger.info("bedrock_kb_list_documents_unavailable", data_source_id=data_source_id, error=code)
         listed_uris = None
 
     quiet = 0
