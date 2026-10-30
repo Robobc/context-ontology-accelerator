@@ -1786,6 +1786,10 @@ describe("SourcesStack", () => {
     // connector stack deployed from a separate CDK app, where they become IAM grants, so
     // there the shared name fails OPEN. A future change env-scoping the rest of the
     // platform's parameters starts by moving the three names below.
+    //
+    // Fork: `doc-kg-build-role-arn` is env-scoped for the same reason as
+    // `db-connector-role-arn` — a Knowledge Base owner pastes it into a trust policy
+    // in their own account (ADR 0011).
     it("keeps the remaining role parameters on one env-less convention", () => {
       const names = Object.values(template.findResources("AWS::SSM::Parameter"))
         .map((p) => String(p.Properties?.Name ?? ""))
@@ -1793,14 +1797,40 @@ describe("SourcesStack", () => {
         .sort();
       expect(names).toEqual([
         "/coa/dev/sources/db-connector-role-arn",
+        "/coa/dev/sources/doc-kg-build-role-arn",
         "/coa/sources/api-role-arn",
         "/coa/sources/db-enrichment-role-arn",
         "/coa/sources/federation-provisioner-role-arn",
       ]);
       for (const name of names) {
         if (name.endsWith("/db-connector-role-arn")) continue;
+        if (name.endsWith("/doc-kg-build-role-arn")) continue;
         expect(name).not.toContain("/dev/");
       }
+    });
+
+    // Fork (ADR 0011): the value is the task role itself (GetAtt), never an ARN
+    // assembled from the prefix — the account and partition come from the deployment.
+    it("publishes the document KG-build task role for Knowledge Base owners' trust policies", () => {
+      const param = Object.values(
+        template.findResources("AWS::SSM::Parameter"),
+      ).find(
+        (p) => p.Properties?.Name === "/coa/dev/sources/doc-kg-build-role-arn",
+      );
+      expect(param).toBeDefined();
+      const roleId = param!.Properties.Value["Fn::GetAtt"][0] as string;
+      expect(param!.Properties.Value["Fn::GetAtt"][1]).toBe("Arn");
+      // The role that holds the KB extraction assume grant is the one published.
+      const policies = Object.values(
+        template.findResources("AWS::IAM::Policy"),
+      );
+      const kbExtraction = policies.find((p) =>
+        JSON.stringify(p.Properties.PolicyDocument).includes(
+          '"AssumeRoleKbExtraction"',
+        ),
+      );
+      expect(kbExtraction).toBeDefined();
+      expect(kbExtraction!.Properties.Roles[0].Ref).toBe(roleId);
     });
   });
 

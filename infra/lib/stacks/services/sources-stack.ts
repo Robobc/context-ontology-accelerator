@@ -2631,7 +2631,9 @@ export class SourcesStack extends SCLStack {
             },
             {
               name: "BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN",
-              value: sfn.JsonPath.stringAt("$.bedrock_kb_cross_account_role_arn"),
+              value: sfn.JsonPath.stringAt(
+                "$.bedrock_kb_cross_account_role_arn",
+              ),
             },
           ],
         },
@@ -2752,16 +2754,20 @@ export class SourcesStack extends SCLStack {
     // definition stays shared with the staging path. `isPresent` first: an
     // execution input from before the trigger emitted `input_mode` must take
     // the staging branch, not fail the Choice.
-    const kbSkipPreprocess = new sfn.Pass(this, "SourcesBedrockKbSkipPreprocess", {
-      parameters: {
-        staging_prefix: sfn.JsonPath.format(
-          "{}/staging/{}/",
-          sfn.JsonPath.stringAt("$.namespace_id"),
-          sfn.JsonPath.stringAt("$.doc_source_id"),
-        ),
+    const kbSkipPreprocess = new sfn.Pass(
+      this,
+      "SourcesBedrockKbSkipPreprocess",
+      {
+        parameters: {
+          staging_prefix: sfn.JsonPath.format(
+            "{}/staging/{}/",
+            sfn.JsonPath.stringAt("$.namespace_id"),
+            sfn.JsonPath.stringAt("$.doc_source_id"),
+          ),
+        },
+        resultPath: "$.preprocessResult",
       },
-      resultPath: "$.preprocessResult",
-    });
+    );
     const routeByInputMode = new sfn.Choice(this, "SourcesInputMode?")
       .when(
         sfn.Condition.and(
@@ -4175,6 +4181,19 @@ export class SourcesStack extends SCLStack {
       parameterName: `${ssmPrefix}/sources/db-enrichment-role-arn`,
       stringValue: dbEnrichmentTaskDef.taskRole.roleArn,
       description: "Sources database enrichment ECS task role ARN",
+    });
+    // Fork (ADR 0011): the document KG-build task role is a principal a Knowledge
+    // Base owner's `{prefix}-datasource-access-*` role must trust (the other is
+    // serve's runtime role, `/{project}/{env}/serve/runtime-role-arn`). Published
+    // so the owner reads it rather than assembling it. ENV-SCOPED like that
+    // sibling and `db-connector-role-arn`: it becomes an IAM trust grant in another
+    // account, where a sibling environment overwriting it would have the owner
+    // trust the wrong environment's task (fail OPEN), not merely break this one.
+    new ssm.StringParameter(this, "SsmSourcesDocKgBuildRoleArn", {
+      parameterName: `${ssmPrefix}/${envName}/sources/doc-kg-build-role-arn`,
+      stringValue: kgBuildTaskDef.taskRole.roleArn,
+      description:
+        "Document KG-build ECS task role ARN — the extraction-time principal a Knowledge Base's datasource-access role must trust",
     });
 
     // ================================================================

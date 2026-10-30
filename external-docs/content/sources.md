@@ -1038,9 +1038,27 @@ entity and relationship extraction into the graph, keyed on the Knowledge
 Base's chunk ids so a Knowledge Base search result pivots straight into graph
 traversal.
 
-Create via `POST /namespaces/{namespaceId}/sources` with `sourceType:
-"DOCUMENTS"` and a `documentSource.bedrockKnowledgeBaseConfiguration`
-(no `sourceBucketArn`, `uploadId`, `s3Prefixes` or `roleArn`):
+A Knowledge Base is a source like any other: register it, scan it, re-scan it,
+delete it, exactly as a Databricks or Glue source. Nothing is configured on the
+deployment. What the Knowledge Base owner provides is one IAM role in their
+account when the Knowledge Base is not in the deployment's own account, the
+same way a Databricks owner provides the credential-access role.
+
+#### Register via Web UI
+
+**Connect Source → Documents → Bedrock Knowledge Base** tab. Enter a name, the
+Knowledge Base id, optionally its Region and the data source ids to read, and
+the access role ARN when the Knowledge Base is in another account. The form
+states the role-name rule with this deployment's real prefix and shows the
+External ID the trust policy must require, with a copy button; the External ID
+is displayed, never typed.
+
+#### Register via API
+
+`POST /namespaces/{namespaceId}/sources` with `sourceType: "DOCUMENTS"` and a
+`documentSource.bedrockKnowledgeBaseConfiguration` (no `sourceBucketArn`,
+`uploadId`, `s3Prefixes` or `roleArn`; the configuration present selects the
+sub-type):
 
 ```json
 {
@@ -1051,38 +1069,131 @@ Create via `POST /namespaces/{namespaceId}/sources` with `sourceType:
       "knowledgeBaseId": "ABCDEFGHIJ",
       "dataSourceIds": ["KLMNOPQRST"],
       "region": "eu-central-1",
-      "crossAccountRoleArn": "arn:aws:iam::<kb-account>:role/coa-datasource-access-knowledge-hub"
-    }
+      "crossAccountRoleArn": "arn:aws:iam::<kb-account>:role/{prefix}-datasource-access-knowledge-hub"
+    },
+    "extractionConfig": { "preferredEntityClassifications": ["Product", "Regulation"] }
   }
 }
 ```
 
 | Field | Required | Notes |
 |---|---|---|
-| `knowledgeBaseId` | ✅ | The Knowledge Base id (10 characters). |
+| `knowledgeBaseId` | ✅ | The Knowledge Base id (10 upper-case letters or digits). |
 | `dataSourceIds` | | Restrict extraction to these data sources; all of them when omitted. |
-| `region` | | Region of the Knowledge Base; the deployment's region when omitted. |
-| `crossAccountRoleArn` | | Role in the Knowledge Base's account, named `{prefix}datasource-access-*`, that the KG build (extraction) and serve (per-user retrieval, entitlement probe) assume with the namespace's External ID. Omit when the Knowledge Base is in the deployment's own account. Same member as on Glue, JDBC and Databricks sources. |
+| `region` | | Region of the Knowledge Base; the deployment's Region when omitted. |
+| `crossAccountRoleArn` | | Role in the Knowledge Base's account, named `{prefix}-datasource-access-*`. Omit when the Knowledge Base is in the deployment's own account. Same member, type and meaning as on Glue, JDBC and Databricks sources. |
 
-The extraction role follows the same rules as a database source's
-cross-account role: its name must start with `{prefix}-datasource-access-` at
-the root IAM path, and its trust policy must name the deployment's document
-KG-build task role **with the namespace's External ID** (`datasourceExternalId`
-on **GetNamespace**). It needs `bedrock:Retrieve`, `bedrock:GetDocumentContent`
-and `bedrock:ListKnowledgeBaseDocuments` on the Knowledge Base. The role sees
-every document, which extraction requires; the External ID is what binds it to
-the one namespace allowed to use it.
+`extractionConfig` (entity classes, topics, versioning) applies as for any
+document source; see [Configuring Document Extraction](#configuring-document-extraction).
+Chunking settings are ignored: chunk boundaries are the Knowledge Base's.
+
+#### The access role (Knowledge Base in another account)
+
+Create one IAM role in the Knowledge Base's account. It follows the same rules
+as the Databricks credential-access role, so the
+[Databricks guide's role section](databricks-sources.md#3-create-the-credential-access-role)
+applies, with these differences: the two principals are different, the
+permissions are Bedrock read actions, and the role is optional.
+
+- **Name**: starts with `{prefix}-datasource-access-` at the root IAM path, where
+  `{prefix}` is the deployment's `{project}-{env}`. Registration refuses any
+  other name, because the platform's `sts:AssumeRole` grant is scoped to that
+  prefix and a differently named role would fail at first scan instead.
+- **Two platform principals assume it**, and the trust policy must name both:
+
+  | Principal | When | What it does |
+  |---|---|---|
+  | **Document KG-build task role** | At every scan and re-scan | Reads every document's chunks to build the graph |
+  | **Serve runtime role** | On every question | Reads as the asking user (`Retrieve` with `userContext`), and asks per document whether that user may read it |
+
+  Both are published in SSM; read them rather than assembling them:
+
+  ```bash
+  aws ssm get-parameter --name "/{project}/{env}/sources/doc-kg-build-role-arn" \
+    --query Parameter.Value --output text
+  aws ssm get-parameter --name "/{project}/{env}/serve/runtime-role-arn" \
+    --query Parameter.Value --output text
+  ```
+
+- **External ID**: the namespace's `datasourceExternalId` (`GET
+  /namespaces/{namespaceId}`, also shown on the Connect Source form). The
+  condition is what turns the trust policy into an authorization list: one
+  role can serve several namespaces by listing their External IDs, and a role
+  without the condition is assumable on behalf of any namespace in the
+  deployment, so removing it is never the fix for an `AccessDenied`.
+
+Trust policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "<doc-kg-build-role-arn>",
+          "<serve-runtime-role-arn>"
+        ]
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": { "sts:ExternalId": ["<datasourceExternalId>"] }
+      }
+    }
+  ]
+}
+```
+
+Permission policy, naming the Knowledge Bases this role chooses to expose:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadKnowledgeBase",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Retrieve",
+        "bedrock:GetDocumentContent",
+        "bedrock:ListKnowledgeBaseDocuments"
+      ],
+      "Resource": "arn:aws:bedrock:<region>:<kb-account>:knowledge-base/ABCDEFGHIJ"
+    }
+  ]
+}
+```
+
+A Knowledge Base **in the deployment's own account** needs no role: omit
+`crossAccountRoleArn` and the platform's own task and serve roles read it
+directly.
+
+#### Who decides what
+
+- **Which Knowledge Bases a namespace may read**: the Knowledge Base owner, in
+  their account, through the role's trust policy (which namespaces, by External
+  ID) and permission policy (which Knowledge Bases). One role per owning
+  account is enough for any number of Knowledge Bases.
+- **That a namespace reads one**: whoever holds `manageSource` on the
+  namespace, by registering the source.
+- **What each user sees**: the Knowledge Base's own document-level access
+  control, applied on every retrieval with the asking user's identity. Facts
+  reached through the knowledge graph are filtered to the same documents, so a
+  graph traversal never surfaces text from a document the user could not
+  retrieve directly.
 
 What differs from file sources:
 
 - Nothing is preprocessed or staged, and no chunk embeddings are written to the
   platform's own vector store (the Knowledge Base holds them). Chunk boundaries
   are the Knowledge Base's.
-- Queries for the namespace must go through the Knowledge Base with the
-  caller's identity so its document-level access control applies to every
-  answer, including facts reached through the graph. The deployment maps the
-  namespace to the Knowledge Base id in its configuration
-  (`bedrockKnowledgeBaseByNamespace`), with `bedrockKbSearchMode: "managed"`.
+- Questions on the namespace are answered through the Knowledge Base with the
+  caller's identity, always; there is no setting to configure and none to turn
+  it off. A request whose caller cannot be resolved returns no documents.
+- A namespace holds **one** Knowledge Base source. Registering a second makes
+  the namespace's queries fail (`DataSourceUnavailableError`) until one is
+  deleted, rather than silently serving one and hiding the other.
 - Such a source produces no ontology induction proposal: an ontology induced
   over an access-controlled corpus would leak its structure to every reader.
 - **RescanSource** re-extracts from the Knowledge Base; run it after a

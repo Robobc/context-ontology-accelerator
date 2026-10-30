@@ -2,11 +2,22 @@
 
 ## Status
 
-Proposed. Implemented on `feature/bedrock-kb-chunk-source` (kg-build loader,
-serve retriever, entitlement gate); the source sub-type, IAM and a deployed
-run against a real Knowledge Base are pending. Supersedes the last consequence
-of ADR 0003 ("per-document ACL-to-retrieval-filter translation is not yet
-wired").
+Proposed. Implemented on `feature/bedrock-kb-chunk-source`: kg-build loader,
+serve retriever and entitlement gate, the `BEDROCK_MANAGED_KB` source sub-type
+with its IAM, registry-based routing in serve, and the Connect Source wizard
+tab. The deployed run against a real Knowledge Base (the observation step
+below) is pending. Supersedes the last consequence of ADR 0003
+("per-document ACL-to-retrieval-filter translation is not yet wired") and
+ADR 0003's deployment-level namespace-to-Knowledge-Base routing.
+
+The guiding decision, taken with the customer on 2026-10-30: **a Knowledge
+Base is a source like any other.** It is registered, trusted, scanned,
+re-scanned, listed and routed exactly as a Databricks, Glue or JDBC source is,
+and nothing about it lives in deployment configuration. The two places it is
+more than a connector are internal: what a scan does (extraction only, over the
+Knowledge Base's own chunks) and what a query does (the vector leg goes to the
+Knowledge Base as the asking user, and the graph leg is gated to the same
+answer).
 
 ## Context
 
@@ -50,14 +61,37 @@ Extraction runs under a dedicated role **without** `userContext`, so the graph
 contains facts from every document. The default mode (`STAGING`, `AOSS`) is
 unchanged.
 
+**serve, routing.** Which Knowledge Base serves a namespace is read from the
+namespace's source registry (the same DynamoDB inventory Tier-2 routes
+Databricks and Glue sources from), never from deployment configuration. The
+admission gate resolves the namespace's `BEDROCK_MANAGED_KB` source once per
+request (`SourcesRegistry.find_bedrock_kb_source`) and binds a per-user
+retriever for it to the request (`request_document_source`, the same
+`ContextVar` pattern as the caller identity); the document retriever and the
+entitlement gate read that binding. A namespace with no such source is served
+from COA's own index as before. A namespace whose inventory cannot be read, or
+which registers **more than one** Knowledge Base source (`Retrieve` takes one
+`knowledgeBaseId`; this release does no fan-out), or whose cross-account assume
+is refused, is **not served**: falling back would answer from an OpenSearch
+index holding none of its chunks with the gate off. Retrievers are built on
+first use and cached per source (`KbRetrieverCache`); a source in another
+account is read through a refreshable session assumed from its
+`crossAccountRoleArn` with the namespace ExternalId
+(`refreshable_datasource_session`, serve is long-lived), a same-account source
+under the serve runtime's own role.
+
 **serve, retrieval.** The existing `BedrockKnowledgeBaseRetriever` emits chunk
 ids as `aws:<_chunk_id>`, so a vector hit is the id of the graph node and no
-translation table exists. With `BEDROCK_KB_ENFORCE_USER_CONTEXT=true` every
-`Retrieve` carries the caller as `userContext.userId`; a request with no
-resolvable caller returns no chunks. The caller is published once per request
-at the admission gate through a `ContextVar` rather than threaded through every
-retriever and tool signature, because those signatures are upstream code that
-changes each release.
+translation table exists. A Managed Knowledge Base source is **always** queried
+per user: every `Retrieve` carries the caller as `userContext.userId` with
+`managedSearchConfiguration`, and a request with no resolvable caller returns
+no chunks. There is no switch to turn this off; the former
+`BEDROCK_KB_SEARCH_MODE` / `BEDROCK_KB_ENFORCE_USER_CONTEXT` knobs are gone,
+because a Managed Knowledge Base with document ACL queried without a caller
+would return the extraction role's view to everyone. The caller is published
+once per request at the admission gate through a `ContextVar` rather than
+threaded through every retriever and tool signature, because those signatures
+are upstream code that changes each release.
 
 **serve, graph.** One `DocumentEntitlementGate`, built at startup and shared,
 applies to every namespace routed to a per-user Knowledge Base and to every
@@ -99,29 +133,52 @@ checks `LexicalGraphStore.has_access_controlled_sources()` right after
 connecting; a positive answer fails the job before any LLM call and creates no
 proposal (`AccessControlledGraphError`). No second source of truth is needed.
 
-**Flag coupling.** `BEDROCK_KB_SEARCH_MODE=managed` implies
-`BEDROCK_KB_ENFORCE_USER_CONTEXT=true` unless set to `false` explicitly, and
-that opt-out is logged at startup: a Managed Knowledge Base with document ACL
-queried without a caller would return the extraction role's view to everyone.
-
 **Registration (`BEDROCK_MANAGED_KB` sub-type).** A document source carrying
 `bedrockKnowledgeBaseConfiguration` (`knowledgeBaseId`, optional
-`dataSourceIds`/`region`, `crossAccountRoleArn`) is the sub-type; it is mutually
-exclusive with `sourceBucketArn`, `uploadId`, `s3Prefixes` and `roleArn`, and
-stages no files (`s3Prefixes` is stored empty). The extraction role is a
-customer-supplied cross-account role and is treated exactly like the Databricks
-and JDBC credential-access roles: it must be named
-`{prefix}-datasource-access-*` at the root IAM path in the `aws` partition
-(checked at submit with the same helpers, so a role the task could never
-assume is refused with the prefix named rather than failing the first
-extraction), and the kg-build task assumes it through
-`assume_datasource_session` with `ExternalId = datasource_external_id(namespace)`,
-the value the control plane shows on `GetNamespace`. The role ARN arrives from
-the API caller; the namespace-derived ExternalId is what binds the assume to the
-namespace entitled to it (confused deputy). The task's grant is the shared
-`assumeDatasourceAccessRoleStatement` (fourth consumer), plus an in-account
-`bedrock:Retrieve`/`GetDocumentContent`/`ListKnowledgeBaseDocuments` grant on
-`knowledge-base/*` for a Knowledge Base in the deployment's own account.
+`dataSourceIds`, `region` and `crossAccountRoleArn`) is the sub-type; it is
+mutually exclusive with `sourceBucketArn`, `uploadId`, `s3Prefixes` and
+`roleArn`, and stages no files (`s3Prefixes` is stored empty). In the web
+console it is the third tab of the Documents source kind, beside Upload files
+and S3 bucket, with the same form the Databricks step uses for its role: the
+reserved-name rule stated with the deployment's real prefix (derived from the
+namespace's ExternalId) and the ExternalId shown read-only, never typed.
+
+`crossAccountRoleArn` is the **same member, with the same meaning, as on the
+Glue, JDBC and Databricks configurations**, and optional as on Glue: omitted,
+the Knowledge Base is in the deployment's own account and is read directly
+under the kg-build task role and the serve runtime role, which hold an
+in-account `bedrock:Retrieve` / `GetDocumentContent` /
+`ListKnowledgeBaseDocuments` grant on `knowledge-base/*`. Given, it is a
+customer-owned role in the Knowledge Base's account and is treated exactly like
+the Databricks credential-access role: named `{prefix}-datasource-access-*` at
+the root IAM path in the `aws` partition (checked at submit with the same
+helpers, so a role neither consumer could ever assume is refused with the
+prefix named rather than failing the first extraction), and assumed with
+`ExternalId = datasource_external_id(namespace)`, the value the control plane
+shows on `GetNamespace`. The role ARN arrives from the API caller; the
+namespace-derived ExternalId is what binds the assume to the namespace entitled
+to it (confused deputy). **Two** COA principals assume it, so the role's trust
+policy must name both: the kg-build task (extraction, which must see every
+document) and the serve runtime (per-user `Retrieve` and the entitlement
+probe). They are the fourth and fifth consumers of the one scoped
+`sts:AssumeRole` grant shape (`arn:aws:iam::*:role/{prefix}-datasource-access-*`,
+ExternalId required); serve's copy lives in a fork-owned helper
+(`infra/lib/utils/datasource-assume.ts`) that its stack test pins byte-equal to
+the sources stack's. Both principals are published in SSM
+(`/{project}/{env}/sources/doc-kg-build-role-arn`,
+`/{project}/{env}/serve/runtime-role-arn`) so the Knowledge Base owner reads
+them rather than assembling them.
+
+**Governance.** Three decisions, three owners, none of them deployment config:
+*which* Knowledge Bases a namespace may read is decided by the Knowledge Base
+owner, in their account, through the role's trust policy (which namespaces, by
+ExternalId) and permission policy (which Knowledge Bases); *that* a namespace
+reads one is decided by whoever holds `manageSource` on that namespace, by
+registering it; *what each user sees* is decided by the Knowledge Base's own
+document ACL on every `Retrieve`, and the graph is gated to the same answer.
+One role can serve several namespaces by listing their ExternalIds, so a
+Knowledge Hub with hundreds of Knowledge Bases needs one role per owning
+account, not one per Knowledge Base or per namespace.
 
 **Pipeline.** The ingestion state machine routes on `input_mode`: `BEDROCK_KB`
 bypasses preprocessing (which lists S3 and would report the source empty) via a
@@ -154,8 +211,18 @@ separate milestone.
   on every toolkit or Bedrock change. Detected id churn means a full rebuild.
 - `graph_build.py` and the agentic tool wiring are upstream files; the hooks
   there are kept to a few lines each so release rebases stay cheap.
-- Under the `STAGING` input mode and without a per-user route, nothing in this
-  decision is active and behaviour is byte-identical to upstream.
+- A namespace without a `BEDROCK_MANAGED_KB` source is served exactly as
+  upstream serves it; nothing in this decision is active and no deployment
+  setting can switch it on. A namespace with one is served only through its
+  Knowledge Base, per user, or not at all.
+- The deployment config carries nothing per Knowledge Base. Adding a Knowledge
+  Base is a registration (API or wizard); connecting a Knowledge Base account is
+  one role in that account. Neither needs a deploy.
+- A namespace holds at most one Knowledge Base source. Registering a second
+  makes the namespace unservable (the admission gate refuses) until one is
+  deleted; the alternative, picking one, would silently hide the other's
+  documents. Serving several Knowledge Bases per namespace is a later
+  milestone.
 
 ## Configuration
 
@@ -176,20 +243,32 @@ The state machine sets the first six from the trigger Lambda's flattened job
 input; none is operator-set. The source-level configuration is the API's
 `bedrockKnowledgeBaseConfiguration` (Smithy `unified-sources.smithy`).
 
-serve environment (`packages/context-manager/src/coa_serve/config.py`),
-in addition to `DOCUMENT_RETRIEVER_BACKEND`, `BEDROCK_KNOWLEDGE_BASE_ID` and
-`BEDROCK_KB_BY_NAMESPACE` from ADR 0003:
+serve environment (`packages/context-manager/src/coa_serve/config.py`): **no
+Knowledge Base setting.** Which Knowledge Base, in which Region, through which
+role, is read from the registered source at request time. The former ADR 0003
+variables `DOCUMENT_RETRIEVER_BACKEND`, `BEDROCK_KNOWLEDGE_BASE_ID` and
+`BEDROCK_KB_BY_NAMESPACE`, and this ADR's earlier `BEDROCK_KB_SEARCH_MODE` and
+`BEDROCK_KB_ENFORCE_USER_CONTEXT`, are removed together with their SSM
+deployment-config fields (`documentRetrieverBackend`, `bedrockKnowledgeBaseId`,
+`bedrockKnowledgeBaseByNamespace`, `bedrockKbSearchMode`,
+`bedrockKbEnforceUserContext`); stale values in an existing config are ignored,
+not rejected. Serve keeps one fork variable:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BEDROCK_KB_SEARCH_MODE` | `vector` | `managed` sends `managedSearchConfiguration`, required for Managed Knowledge Bases. |
-| `BEDROCK_KB_ENFORCE_USER_CONTEXT` | `true` when `BEDROCK_KB_SEARCH_MODE=managed`, else `false` | `true` puts the caller on every `Retrieve` and entitlement probe; no caller, no results. Also enables the `DocumentEntitlementGate` for routed namespaces. An explicit `false` under `managed` is logged. |
+| `RESOURCE_PREFIX` | set by CDK | The `{prefix}-{env}-` the ExternalId is derived from, the same value the kg-build task gets; serve fails the assume rather than default it. |
 
-Both are set from the SSM deployment config (`bedrockKbSearchMode`,
-`bedrockKbEnforceUserContext`, alongside `bedrockKnowledgeBaseByNamespace`) and
-are absent from the serve template unless configured. A `BEDROCK_MANAGED_KB`
-namespace therefore needs three things in that config: its namespace mapped to
-the Knowledge Base id, `managed`, and (by default) per-user enforcement.
+Published for the Knowledge Base owner (SSM, both env-scoped because they
+become IAM trust grants in another account):
+
+| Parameter | Value |
+|---|---|
+| `/{project}/{env}/sources/doc-kg-build-role-arn` | kg-build ECS task role; extraction-time principal. |
+| `/{project}/{env}/serve/runtime-role-arn` | serve runtime role; query-time principal (already published upstream). |
+
+The customer-facing recipe (role name, trust policy with both principals and
+the ExternalId condition, permission policy) is in
+`external-docs/content/sources.md`, "Bedrock Managed Knowledge Base Source".
 
 ## Verification
 
@@ -229,27 +308,48 @@ second review phrased it:
    document) returns a hit for an entitled document that contains nothing
    relevant to that word. If it does not, the probe must move to a content-free
    check before GA.
-3. Registration end to end: `CreateSource` with a
-   `bedrockKnowledgeBaseConfiguration` naming a `{prefix}-datasource-access-*`
-   role in the Knowledge Base's account, whose trust policy names the kg-build
-   task role and the namespace's `datasourceExternalId` from `GetNamespace`;
-   the ingestion execution takes the `SourcesBedrockKbSkipPreprocess` branch,
-   the task assumes the role (CloudTrail in the KB account shows the
-   `coa-kg-build-<namespace>` session with the ExternalId), and the source
-   reaches `COMPLETED` with `chunksGraph` equal to the Knowledge Base's
-   distinct `Retrieve` result count for the scoped data sources.
+3. Registration end to end, through the wizard: Documents, "Bedrock Knowledge
+   Base" tab, a `{prefix}-datasource-access-*` role in the Knowledge Base's
+   account whose trust policy names **both** the kg-build task role and the
+   serve runtime role with the namespace's `datasourceExternalId` (or no role,
+   for a same-account Knowledge Base); the ingestion execution takes the
+   `SourcesBedrockKbSkipPreprocess` branch, the task assumes the role
+   (CloudTrail in the KB account shows the `coa-kg-build-<namespace>` session
+   with the ExternalId), and the source reaches `COMPLETED` with `chunksGraph`
+   equal to the Knowledge Base's distinct `Retrieve` result count for the
+   scoped data sources.
+4. Routing: a query on the namespace reaches the Knowledge Base as the caller
+   (CloudTrail `Retrieve` with the serve session and `userContext`) with no
+   Knowledge Base setting in the serve environment; a namespace without a
+   Knowledge Base source on the same deployment is served from COA's own
+   index unchanged; registering a second Knowledge Base source on the
+   namespace makes queries fail with `DataSourceUnavailableError` until one
+   is deleted.
+5. Chunk-id stability: a second scan of the same Knowledge Base produces the
+   same `aws:<_chunk_id>` set (zero drift), which is the assumption the
+   mapping rests on. The service team has been asked whether it is guaranteed.
 
 Deployed (pending): against a Knowledge Base with a document-level ACL data
 source, build the graph, then query as two users with different entitlements
 and confirm the traversal output contains no statement text from documents
 the user cannot `Retrieve`. This is the observation step for the gate.
 
-Registration and pipeline unit coverage:
+Registration, routing and pipeline unit coverage:
 `packages/sources/tests/unit/api/test_document_routes.py::TestCreateBedrockManagedKbSource`
-(sub-type inference, mutual exclusion, role shape, stored form, job body),
+(sub-type inference, mutual exclusion, optional role shape, stored form, job
+body),
 `packages/sources/tests/unit/documents/trigger/test_index.py::TestBedrockKbFlattening`
-(flat fields always present), `infra/test/services/sources-stack.test.ts`
+(flat fields always present),
+`packages/context-manager/tests/unit/test_bedrock_kb_source_routing.py`
+(registry lookup, ambiguity and unavailability refused, per-source retriever
+cache, same-account versus assumed session with the namespace ExternalId,
+admission binding fails closed), `infra/test/services/sources-stack.test.ts`
 "Fork: BEDROCK_MANAGED_KB ingestion" (routing `Choice`, bypass `Pass`, task
-env bindings, `RESOURCE_PREFIX`, IAM scope, fourth assume consumer) and
-`infra/test/services/serve-stack.test.ts` (the two serve knobs absent by
-default, strings when set).
+env bindings, `RESOURCE_PREFIX`, IAM scope, fourth assume consumer, the
+published task-role parameter), `infra/test/services/serve-stack.test.ts`
+(fifth assume consumer byte-equal to the sources stack's, in-account read
+grant, `RESOURCE_PREFIX`, no Knowledge Base variable in the runtime
+environment), `packages/web-app/src/pages/ConnectSource.test.tsx` "Bedrock
+Knowledge Base (Documents tab)" (payload shape, reserved-prefix check against
+the derived prefix, ExternalId never submitted, optional fields omitted) and
+`SourceDetail.bedrockkb.test.tsx` (readback).
