@@ -249,6 +249,11 @@ function resolveContentType(file: File): string {
 
 // ── Form model ────────────────────────────────────────────────────────────────
 
+/** How a DOCUMENTS source gets its documents. Each tab is one sub-type on the
+ *  wire: LOCAL_UPLOAD, S3, and (fork) BEDROCK_MANAGED_KB, selected server-side
+ *  by which configuration the payload carries. */
+type DocTab = "upload" | "s3" | "kb";
+
 interface Model {
   // Step 1 — source kind (replaces the old two-step category + type)
   sourceKind: SourceKind;
@@ -315,6 +320,17 @@ interface Model {
   docS3BucketArn: string;
   docS3Prefixes: { id: number; value: string }[];
   docS3RoleArn: string;
+  // Fork: Documents config (Bedrock Knowledge Base tab). The KB already holds
+  // the parsed, chunked and embedded documents; COA reads its chunks and runs
+  // extraction only. Reached like a Databricks warehouse: through the
+  // customer's `{prefix}-datasource-access-*` role when the KB lives in
+  // another account, directly under this deployment's roles when it does not.
+  docKbName: string;
+  docKbKnowledgeBaseId: string;
+  docKbRegion: string;
+  // Comma- or whitespace-separated data source ids; all of the KB's when blank.
+  docKbDataSourceIds: string;
+  docKbCrossAccountRoleArn: string;
   // Shared extraction config
   enableVersioning: boolean;
   deletePrevVersions: boolean;
@@ -491,6 +507,11 @@ const initialModel: Model = {
   docS3BucketArn: "",
   docS3Prefixes: [{ id: 0, value: "" }],
   docS3RoleArn: "",
+  docKbName: "",
+  docKbKnowledgeBaseId: "",
+  docKbRegion: "",
+  docKbDataSourceIds: "",
+  docKbCrossAccountRoleArn: "",
   enableVersioning: true,
   deletePrevVersions: false,
   // Defaults match server-side behaviour today: infer classifications from the
@@ -604,6 +625,34 @@ function validateRequiredCrossAccountRoleArn(
   return undefined;
 }
 
+/**
+ * Fork: the Databricks rule for a role that is optional. Empty means "the
+ * knowledge base is in this deployment's account, read it directly" (as on the
+ * Glue form); anything else must pass the reserved-name check against the real
+ * prefix, because the API refuses any other name at submit and the assume grant
+ * would deny it at first scan anyway.
+ */
+function validateOptionalReservedRoleArn(
+  arn: string,
+  resourcePrefix: string | undefined,
+  t: AppTranslate,
+): string | undefined {
+  if (!arn.trim()) return undefined;
+  return validateRequiredCrossAccountRoleArn(arn, resourcePrefix, t);
+}
+
+// Fork: mirrors the Smithy BedrockKnowledgeBaseId / BedrockDataSourceId pattern.
+const BEDROCK_KB_ID_RE = /^[A-Z0-9]{10}$/;
+const BEDROCK_KB_DATA_SOURCE_IDS_MAX = 50;
+
+/** Split the data-source-ids field on commas and whitespace, dropping blanks. */
+function parseBedrockDataSourceIds(raw: string): string[] {
+  return raw
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 // Mirror the Smithy patterns: these values reach a `;`-delimited JDBC property list
 // or interpolated information_schema SQL, and the server is patterned accordingly.
 const DATABRICKS_WORKSPACE_HOSTNAME_RE =
@@ -666,6 +715,10 @@ interface ValidationErrors {
   docFiles?: string;
   docS3Name?: string;
   docS3BucketArn?: string;
+  docKbName?: string;
+  docKbKnowledgeBaseId?: string;
+  docKbDataSourceIds?: string;
+  docKbCrossAccountRoleArn?: string;
   preferredEntityClassifications?: string;
   preferredTopics?: string;
   docS3Prefixes?: Record<number, string>;
@@ -673,7 +726,7 @@ interface ValidationErrors {
 
 /** The name field that belongs to the selected source kind. A switch rather
  *  than a ternary chain so a new kind cannot silently inherit another's name. */
-function sourceNameFor(model: Model, docTab: "upload" | "s3"): string {
+function sourceNameFor(model: Model, docTab: DocTab): string {
   switch (model.sourceKind) {
     case "GLUE_DATABASE":
       return model.dbName;
@@ -684,15 +737,23 @@ function sourceNameFor(model: Model, docTab: "upload" | "s3"): string {
     case "DATABRICKS_SQL_WAREHOUSE":
       return model.databricksName;
     case "DOCUMENTS":
-      return docTab === "upload" ? model.docUploadName : model.docS3Name;
+      switch (docTab) {
+        case "upload":
+          return model.docUploadName;
+        case "s3":
+          return model.docS3Name;
+        case "kb":
+          return model.docKbName;
+      }
   }
 }
 
 function validateStep2(
   model: Model,
-  docTab: "upload" | "s3",
+  docTab: DocTab,
   t: AppTranslate,
-  // Only the Databricks arm uses it; Glue and JDBC keep a shape-only check.
+  // The Databricks and Knowledge Base arms use it; Glue and JDBC keep a
+  // shape-only check.
   resourcePrefix?: string,
 ): ValidationErrors {
   const errs: ValidationErrors = {};
@@ -809,7 +870,7 @@ function validateStep2(
             files: bad.map((f) => f.name).join(", "),
           });
       }
-    } else {
+    } else if (docTab === "s3") {
       if (!model.docS3Name.trim()) errs.docS3Name = t("Name is required.");
       if (!model.docS3BucketArn.trim())
         errs.docS3BucketArn = t("Bucket ARN is required.");
@@ -822,6 +883,30 @@ function validateStep2(
         if (e) prefixErrs[id] = e;
       });
       if (Object.keys(prefixErrs).length > 0) errs.docS3Prefixes = prefixErrs;
+    } else {
+      // Fork: Bedrock Knowledge Base
+      if (!model.docKbName.trim()) errs.docKbName = t("Name is required.");
+      if (!model.docKbKnowledgeBaseId.trim())
+        errs.docKbKnowledgeBaseId = t("Knowledge base ID is required.");
+      else if (!BEDROCK_KB_ID_RE.test(model.docKbKnowledgeBaseId.trim()))
+        errs.docKbKnowledgeBaseId = t(
+          "Must be a knowledge base ID: 10 upper-case letters or digits.",
+        );
+      const dataSourceIds = parseBedrockDataSourceIds(model.docKbDataSourceIds);
+      if (dataSourceIds.some((id) => !BEDROCK_KB_ID_RE.test(id)))
+        errs.docKbDataSourceIds = t(
+          "Each data source ID is 10 upper-case letters or digits. Separate several with commas.",
+        );
+      else if (dataSourceIds.length > BEDROCK_KB_DATA_SOURCE_IDS_MAX)
+        errs.docKbDataSourceIds = t("Maximum {count} data source IDs.", {
+          count: BEDROCK_KB_DATA_SOURCE_IDS_MAX,
+        });
+      const roleErr = validateOptionalReservedRoleArn(
+        model.docKbCrossAccountRoleArn,
+        resourcePrefix,
+        t,
+      );
+      if (roleErr) errs.docKbCrossAccountRoleArn = roleErr;
     }
     // "Define my own" with nothing defined is a contradiction: the payload would
     // silently fall back to inference (classes) or automatic naming (topics),
@@ -875,7 +960,7 @@ export const ConnectSource: React.FC = () => {
   const [model, setModel] = useState<Model>(initialModel);
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [showErrors, setShowErrors] = useState<Record<number, boolean>>({});
-  const [docTab, setDocTab] = useState<"upload" | "s3">("upload");
+  const [docTab, setDocTab] = useState<DocTab>("upload");
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const prefixIdCounter = useRef(1);
@@ -1078,6 +1163,31 @@ export const ConnectSource: React.FC = () => {
               .map((p) => p.value.trim())
               .filter(Boolean),
             roleArn: model.docS3RoleArn.trim() || undefined,
+            extractionConfig: buildExtractionConfig(model),
+          },
+        },
+      });
+      return;
+    }
+
+    // Fork: DOCUMENTS — Bedrock Knowledge Base mode. The configuration present
+    // selects the sub-type, and the backend 400s if any S3/upload field rides
+    // along, so nothing but the KB configuration and the extraction config is sent.
+    if (docTab === "kb") {
+      const dataSourceIds = parseBedrockDataSourceIds(model.docKbDataSourceIds);
+      createSource({
+        namespaceId: namespaceId!,
+        body: {
+          sourceType: SourceType.DOCUMENTS,
+          documentSource: {
+            name: model.docKbName.trim(),
+            bedrockKnowledgeBaseConfiguration: {
+              knowledgeBaseId: model.docKbKnowledgeBaseId.trim(),
+              dataSourceIds: dataSourceIds.length ? dataSourceIds : undefined,
+              region: model.docKbRegion.trim() || undefined,
+              crossAccountRoleArn:
+                model.docKbCrossAccountRoleArn.trim() || undefined,
+            },
             extractionConfig: buildExtractionConfig(model),
           },
         },
@@ -2067,9 +2177,7 @@ export const ConnectSource: React.FC = () => {
           <SpaceBetween size="l">
             <Tabs
               activeTabId={docTab}
-              onChange={({ detail }) =>
-                setDocTab(detail.activeTabId as "upload" | "s3")
-              }
+              onChange={({ detail }) => setDocTab(detail.activeTabId as DocTab)}
               tabs={[
                 {
                   id: "upload",
@@ -2253,6 +2361,149 @@ export const ConnectSource: React.FC = () => {
                           />
                         </FormField>
                       </ExpandableSection>
+                    </SpaceBetween>
+                  ),
+                },
+                {
+                  // Fork (ADR 0011): the Knowledge Base is the document store.
+                  // COA reads its chunks and runs extraction only; retrieval at
+                  // query time goes back to the KB with the asking user's
+                  // identity, so the KB's own document permissions decide what
+                  // each user sees, and the graph built from it is gated to the
+                  // same answer.
+                  id: "kb",
+                  label: t("Bedrock Knowledge Base"),
+                  content: (
+                    <SpaceBetween size="l">
+                      <Container
+                        header={
+                          <Header variant="h2">{t("Source details")}</Header>
+                        }
+                      >
+                        <FormField
+                          label={
+                            <>
+                              {t("Name")}{" "}
+                              <Box variant="span" color="text-status-error">
+                                *
+                              </Box>
+                            </>
+                          }
+                          errorText={step2Errs.docKbName}
+                        >
+                          <Input
+                            value={model.docKbName}
+                            onChange={({ detail }) =>
+                              setField("docKbName", detail.value)
+                            }
+                            placeholder="e.g. knowledge-hub"
+                          />
+                        </FormField>
+                      </Container>
+                      <Container
+                        header={
+                          <Header variant="h2">{t("Knowledge base")}</Header>
+                        }
+                      >
+                        <SpaceBetween size="l">
+                          <FormField
+                            label={
+                              <>
+                                {t("Knowledge base ID")}{" "}
+                                <Box variant="span" color="text-status-error">
+                                  *
+                                </Box>
+                              </>
+                            }
+                            description={t(
+                              "An Amazon Bedrock Knowledge Base whose documents are already parsed, chunked and embedded. Nothing is copied: Context Ontology Accelerator reads the knowledge base's own chunks and extracts entities, facts and topics from them.",
+                            )}
+                            constraintText={t(
+                              "The knowledge base keeps the vectors and the document permissions. Each question is answered from what the knowledge base returns for the asking user, and the knowledge graph is filtered to the same documents.",
+                            )}
+                            errorText={step2Errs.docKbKnowledgeBaseId}
+                          >
+                            <Input
+                              value={model.docKbKnowledgeBaseId}
+                              onChange={({ detail }) =>
+                                setField("docKbKnowledgeBaseId", detail.value)
+                              }
+                              placeholder="ABCDEFGHIJ"
+                            />
+                          </FormField>
+                          <FormField
+                            label={t("Region")}
+                            description={t(
+                              "Optional. The knowledge base's AWS Region; this deployment's Region when left blank.",
+                            )}
+                          >
+                            <Input
+                              value={model.docKbRegion}
+                              onChange={({ detail }) =>
+                                setField("docKbRegion", detail.value)
+                              }
+                              placeholder="us-east-1"
+                            />
+                          </FormField>
+                          <FormField
+                            label={t("Data source IDs")}
+                            description={t(
+                              "Optional. Only these data sources of the knowledge base are read; all of them when left blank. Separate several with commas.",
+                            )}
+                            errorText={step2Errs.docKbDataSourceIds}
+                          >
+                            <Input
+                              value={model.docKbDataSourceIds}
+                              onChange={({ detail }) =>
+                                setField("docKbDataSourceIds", detail.value)
+                              }
+                              placeholder="KLMNOPQRST, UVWXYZ0123"
+                            />
+                          </FormField>
+                        </SpaceBetween>
+                      </Container>
+                      <Container
+                        header={
+                          <Header variant="h2">
+                            {t("Knowledge base access")}
+                          </Header>
+                        }
+                      >
+                        <SpaceBetween size="l">
+                          <FormField
+                            label={t("Knowledge base access role ARN")}
+                            description={t(
+                              "The IAM role Context Ontology Accelerator assumes to read the knowledge base. Required when the knowledge base is in another AWS account; leave blank when it is in this deployment's account. The role's name must start with {prefix}, its trust policy must name this deployment's extraction task role and serve runtime role and require the External ID below, and its permissions decide which knowledge bases this namespace can read.",
+                              {
+                                prefix: requiredRoleNamePrefix(
+                                  resourcePrefix,
+                                  t,
+                                ),
+                              },
+                            )}
+                            constraintText={t(
+                              "The role is used twice: once by the extraction task, which reads every document to build the graph, and on every question by the serve runtime, which reads as the asking user.",
+                            )}
+                            errorText={step2Errs.docKbCrossAccountRoleArn}
+                          >
+                            <Input
+                              value={model.docKbCrossAccountRoleArn}
+                              onChange={({ detail }) =>
+                                setField(
+                                  "docKbCrossAccountRoleArn",
+                                  detail.value,
+                                )
+                              }
+                              placeholder="arn:aws:iam::222222222222:role/coa-dev-datasource-access-kb"
+                            />
+                          </FormField>
+                          <CrossAccountExternalIdField
+                            externalId={datasourceExternalId}
+                            isLoading={namespaceLoading}
+                            loadFailed={namespaceLoadFailed}
+                          />
+                        </SpaceBetween>
+                      </Container>
                     </SpaceBetween>
                   ),
                 },
@@ -2654,18 +2905,47 @@ export const ConnectSource: React.FC = () => {
                   {
                     label: t("Mode"),
                     value:
-                      docTab === "upload" ? t("File upload") : t("S3 bucket"),
+                      docTab === "upload"
+                        ? t("File upload")
+                        : docTab === "s3"
+                          ? t("S3 bucket")
+                          : t("Bedrock Knowledge Base"),
                   },
                   ...(docTab === "s3"
                     ? [{ label: t("Bucket ARN"), value: model.docS3BucketArn }]
-                    : [
-                        {
-                          label: t("Files"),
-                          value: t("{count} file(s)", {
-                            count: model.docUploadFiles.length,
-                          }),
-                        },
-                      ]),
+                    : docTab === "kb"
+                      ? [
+                          {
+                            label: t("Knowledge base ID"),
+                            value: model.docKbKnowledgeBaseId,
+                          },
+                          {
+                            label: t("Region"),
+                            value:
+                              model.docKbRegion || t("(this deployment's)"),
+                          },
+                          {
+                            label: t("Data source IDs"),
+                            value:
+                              parseBedrockDataSourceIds(
+                                model.docKbDataSourceIds,
+                              ).join(", ") || t("(all)"),
+                          },
+                          {
+                            label: t("Knowledge base access role ARN"),
+                            value:
+                              model.docKbCrossAccountRoleArn ||
+                              t("(this deployment's account)"),
+                          },
+                        ]
+                      : [
+                          {
+                            label: t("Files"),
+                            value: t("{count} file(s)", {
+                              count: model.docUploadFiles.length,
+                            }),
+                          },
+                        ]),
                 ]}
               />
             </Container>

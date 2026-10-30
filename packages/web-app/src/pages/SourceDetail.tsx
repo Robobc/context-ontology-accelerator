@@ -1387,30 +1387,68 @@ export const SourceDetail: React.FC = () => {
               <ValueWithLabel label={t("Source")}>
                 {source.sourceSubType === "LOCAL_UPLOAD"
                   ? t("File upload")
-                  : t("S3 bucket")}
+                  : source.sourceSubType === "BEDROCK_MANAGED_KB"
+                    ? t("Bedrock Knowledge Base")
+                    : t("S3 bucket")}
               </ValueWithLabel>
-              {source.sourceSubType !== "LOCAL_UPLOAD" && (
+              {/* Fork (ADR 0011): the Knowledge Base is the document store, so
+                  its identity and the role it is read through are the facts to
+                  show; the S3 trio below would read as three dashes. */}
+              {source.sourceSubType === "BEDROCK_MANAGED_KB" && (
                 <>
-                  <ValueWithLabel label={t("S3 Prefixes")}>
-                    {docDetails?.s3Prefixes &&
-                    docDetails.s3Prefixes.length > 0 ? (
-                      docDetails.s3Prefixes.map((p, i) => (
-                        <div key={i}>
-                          <Box variant="code">{p}</Box>
-                        </div>
-                      ))
-                    ) : (
-                      <span>{t("— (entire bucket)")}</span>
-                    )}
+                  <ValueWithLabel label={t("Knowledge base ID")}>
+                    <Box variant="code">
+                      {String(
+                        docDetails?.bedrockKnowledgeBaseConfiguration
+                          ?.knowledgeBaseId ?? "—",
+                      )}
+                    </Box>
                   </ValueWithLabel>
-                  <ValueWithLabel label={t("Source Bucket ARN")}>
-                    {String(docDetails?.sourceBucketArn ?? "—")}
+                  <ValueWithLabel label={t("Region")}>
+                    {docDetails?.bedrockKnowledgeBaseConfiguration?.region ??
+                      t("(this deployment's)")}
                   </ValueWithLabel>
-                  <ValueWithLabel label={t("Cross-account Role")}>
-                    {String(docDetails?.roleArn ?? "—")}
+                  <ValueWithLabel label={t("Data source IDs")}>
+                    {docDetails?.bedrockKnowledgeBaseConfiguration
+                      ?.dataSourceIds?.length
+                      ? docDetails.bedrockKnowledgeBaseConfiguration.dataSourceIds.map(
+                          (id) => (
+                            <div key={id}>
+                              <Box variant="code">{id}</Box>
+                            </div>
+                          ),
+                        )
+                      : t("(all)")}
+                  </ValueWithLabel>
+                  <ValueWithLabel label={t("Knowledge base access role ARN")}>
+                    {docDetails?.bedrockKnowledgeBaseConfiguration
+                      ?.crossAccountRoleArn ?? t("(this deployment's account)")}
                   </ValueWithLabel>
                 </>
               )}
+              {source.sourceSubType !== "LOCAL_UPLOAD" &&
+                source.sourceSubType !== "BEDROCK_MANAGED_KB" && (
+                  <>
+                    <ValueWithLabel label={t("S3 Prefixes")}>
+                      {docDetails?.s3Prefixes &&
+                      docDetails.s3Prefixes.length > 0 ? (
+                        docDetails.s3Prefixes.map((p, i) => (
+                          <div key={i}>
+                            <Box variant="code">{p}</Box>
+                          </div>
+                        ))
+                      ) : (
+                        <span>{t("— (entire bucket)")}</span>
+                      )}
+                    </ValueWithLabel>
+                    <ValueWithLabel label={t("Source Bucket ARN")}>
+                      {String(docDetails?.sourceBucketArn ?? "—")}
+                    </ValueWithLabel>
+                    <ValueWithLabel label={t("Cross-account Role")}>
+                      {String(docDetails?.roleArn ?? "—")}
+                    </ValueWithLabel>
+                  </>
+                )}
               <ValueWithLabel label={t("Created")}>
                 {formatTimestamp(source.createdAt)}
               </ValueWithLabel>
