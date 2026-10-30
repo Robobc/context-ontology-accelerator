@@ -80,6 +80,7 @@ _BEDROCK_KB_FLAT_DEFAULTS: dict[str, str] = {
     "bedrock_kb_data_source_ids": "",
     "bedrock_kb_region": "",
     "bedrock_kb_cross_account_role_arn": "",
+    "bedrock_kb_extraction_user_id": "",
 }
 
 
@@ -102,6 +103,7 @@ def _flatten_bedrock_kb(body: dict) -> None:
             bedrock_kb_data_source_ids=",".join(str(s) for s in kb.get("dataSourceIds") or []),
             bedrock_kb_region=str(kb.get("region") or ""),
             bedrock_kb_cross_account_role_arn=str(kb.get("crossAccountRoleArn") or ""),
+            bedrock_kb_extraction_user_id=str(kb.get("extractionUserId") or ""),
         )
     body.update(flat)
 

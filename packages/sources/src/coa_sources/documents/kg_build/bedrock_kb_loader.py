@@ -7,10 +7,14 @@ Fork addition (``INPUT_MODE=BEDROCK_KB``). The staged-file path re-chunks raw
 text with the toolkit's ``SentenceSplitter`` and lets ``IdRewriter`` mint chunk
 ids. Here the Knowledge Base already parsed, chunked and embedded the documents,
 so this loader hands the toolkit the KB's own chunks and *keeps the KB's chunk
-ids*: every node id starts with ``aws:`` and the toolkit's ``IdRewriter._new_id``
-passes such ids through unchanged (verified at graphrag-lexical-graph 3.18.7).
-A vector hit from Bedrock ``Retrieve`` (``metadata._chunk_id``) therefore maps
-1-to-1 onto the ``__Chunk__`` node id ``aws:<_chunk_id>``.
+ids*. Two toolkit stages touch ids (graphrag-lexical-graph 3.18.7): the extract
+stage's ``IdRewriter._new_id`` leaves any ``aws:`` id alone, and the build
+stage's ``NodeBuilders.pre_process`` rewrites segment 1 of every id to the
+tenant. Ids are therefore emitted as ``aws::kb:<_chunk_id>`` (empty segment 1)
+and stored as ``aws:<tenant>:kb:<_chunk_id>``; the shape lives in
+:mod:`coa_common.kb_ids`, shared with serve. A vector hit from Bedrock
+``Retrieve`` (``metadata._chunk_id``) therefore maps 1-to-1 onto the
+``__Chunk__`` node of the namespace's tenant.
 
 Bedrock has no chunk-enumeration API, so chunks are collected with a
 document-scoped ``Retrieve`` scan: a generic query, ``numberOfResults=100``,
@@ -21,10 +25,17 @@ documents are discovered by sampling ``Retrieve`` until no new document appears
 for ``discovery_quiet_pages`` consecutive pages (imperfect by construction; the
 caller logs discovered-vs-indexed counts).
 
-Extraction runs under the source's extraction role *without* ``userContext``
-and therefore sees every document. Retrieval-time ACL is enforced elsewhere
-(the serve-side ``BedrockKnowledgeBaseRetriever`` passes the caller's
-``userContext``); this loader never decides what a user may see.
+Extraction runs as the source's **extraction identity** (``userContext.userId``,
+the email of an account the knowledge base owner granted read access to the
+documents to extract). It does NOT see every document by right: Bedrock returns
+nothing from an ACL-enabled data source to a call without a user context and
+offers no administrative bypass (verified live and in the service docs), so the
+graph's coverage is exactly that identity's entitlement, which the owner sets.
+A scan that lists documents but can read none of them fails with
+``ExtractionIdentityRequiredError`` instead of building an empty graph.
+Retrieval-time ACL for end users is enforced elsewhere (the serve-side
+``BedrockKnowledgeBaseRetriever`` passes the caller's ``userContext``); this
+loader never decides what an end user may see.
 
 Output contract (what the toolkit's builders read):
 - a ``TextNode`` per chunk, ``id_ = "aws:" + _chunk_id``, ``text`` = the chunk,
@@ -44,18 +55,16 @@ Output contract (what the toolkit's builders read):
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from coa_common.kb_ids import emit_chunk_id, emit_document_id
 
 logger = structlog.get_logger(__name__)
 
-ID_PREFIX = "aws:"
-DOC_ID_PREFIX = "aws:doc:"
 RETRIEVE_PAGE_SIZE = 100  # Bedrock's maximum numberOfResults per Retrieve call
 DISCOVERY_QUERY = "document"  # a query string is required; the filter does the scoping
 # Bedrock system metadata keys that are promoted to named properties; every
@@ -69,7 +78,6 @@ _SYSTEM_KEY_MAP = {
 }
 # ``_chunk_id`` and ``documentId`` are handled explicitly, never copied as-is.
 _RESERVED_TOOLKIT_KEYS = frozenset({"source", "chunk", "topics", "chunkId", "sourceId"})
-_ID_SEGMENT_OK = re.compile(r"^[A-Za-z0-9:._-]+$")
 
 
 @dataclass
@@ -92,6 +100,9 @@ class KbLoadResult:
     manifest: dict[str, set[str]]  # documentId -> set(_chunk_id); input to the incremental diff
     documents_discovered: int = 0
     documents_without_chunks: int = 0
+    # Listed by the KB but not returned to the extraction identity (ACL-enabled
+    # data source, identity granted some documents and not others).
+    documents_not_visible: int = 0
     retrieve_calls: int = 0
     duplicate_chunks_skipped: int = 0
 
@@ -124,20 +135,17 @@ def sanitize_metadata_keys(
 
 
 def chunk_node_id(bedrock_chunk_id: str) -> str:
-    """``aws:<_chunk_id>``: the toolkit keeps ids with this prefix verbatim."""
-    if not bedrock_chunk_id or not _ID_SEGMENT_OK.match(bedrock_chunk_id):
-        raise ValueError("Bedrock _chunk_id is empty or carries characters the toolkit rejects in ids")
-    return f"{ID_PREFIX}{bedrock_chunk_id}"
+    """``aws::kb:<_chunk_id>``; the toolkit's tenant rewrite stores it as ``aws:<tenant>:kb:<_chunk_id>``.
+
+    The shape is owned by :mod:`coa_common.kb_ids`, shared with serve and the
+    ontology engine; see there for why the empty second segment matters.
+    """
+    return emit_chunk_id(bedrock_chunk_id)
 
 
 def document_node_id(document_id: str) -> str:
-    """``aws:doc:<documentId>`` with ``#`` -> ``_`` (observed format ``4#<uuid>#<sha256>``)."""
-    if not document_id:
-        raise ValueError("Bedrock documentId is empty")
-    safe = document_id.replace("#", "_")
-    if not _ID_SEGMENT_OK.match(safe):
-        raise ValueError("Bedrock documentId carries characters the toolkit rejects in ids")
-    return f"{DOC_ID_PREFIX}{safe}"
+    """``aws::doc:<tail>``; stored as ``aws:<tenant>:doc:<tail>``. See :mod:`coa_common.kb_ids`."""
+    return emit_document_id(document_id)
 
 
 def _public_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -172,6 +180,31 @@ def _filter(data_source_id: str, source_uri: str | None = None) -> dict[str, Any
     return {"andAll": [ds, {"equals": {"key": "_source_uri", "value": source_uri}}]}
 
 
+def _user_context(extraction_user_id: str | None) -> dict[str, Any]:
+    """The ``userContext`` kwarg for the extraction identity, or nothing.
+
+    Bedrock applies a data source's ACL to ``Retrieve`` and ``GetDocumentContent``
+    by the ``userContext.userId`` on the call and returns NOTHING from an
+    ACL-enabled data source to a call without one; there is no administrative
+    bypass. The identity is therefore what the graph can see, and the knowledge
+    base owner controls coverage through that one account's permissions. A
+    non-ACL data source returns every document to any identity, so passing it
+    always is harmless.
+    """
+    return {"userContext": {"userId": extraction_user_id}} if extraction_user_id else {}
+
+
+class ExtractionIdentityRequiredError(RuntimeError):
+    """A data source listed documents, but the scan could read none of their chunks.
+
+    That is the signature of an ACL-enabled data source read without an
+    extraction identity (or with one the knowledge base owner has not granted
+    access): the documents exist, ``Retrieve`` returns none of them, and nothing
+    else distinguishes it from an empty data source. Raised so the scan fails
+    rather than build an empty graph that looks like a successful one.
+    """
+
+
 def _retrieve_pages(
     runtime: Any,
     *,
@@ -180,6 +213,7 @@ def _retrieve_pages(
     result: KbLoadResult,
     max_pages: int | None = None,
     backoff_s: float = 1.0,
+    extraction_user_id: str | None = None,
 ) -> Iterator[list[dict[str, Any]]]:
     """Page through ``Retrieve`` for one filter; yields each page's results.
 
@@ -198,6 +232,7 @@ def _retrieve_pages(
                     "filter": retrieval_filter,
                 }
             },
+            **_user_context(extraction_user_id),
         }
         if token:
             kwargs["nextToken"] = token
@@ -230,14 +265,22 @@ def discover_documents(
     result: KbLoadResult,
     discovery_quiet_pages: int = 3,
     max_discovery_pages: int = 200,
+    extraction_user_id: str | None = None,
 ) -> list[KbDocument]:
     """Documents of one data source: ``ListKnowledgeBaseDocuments`` when it works, else ``Retrieve`` sampling.
 
     The list API is document-level and rejects SharePoint data sources; for those
     the Retrieve scan collects distinct ``documentId`` values until
     ``discovery_quiet_pages`` consecutive pages add nothing new. The S3 listing
-    yields URIs, not ``documentId``s, so even on that path the ``documentId`` and
-    title are filled in from the first Retrieve page of each document.
+    yields the ``documentId`` (an ``s3://`` URI) but not the ``_source_uri`` the
+    KB filters on (an ``https://`` URL for S3), so on that path each listed
+    document is located through the data-source-wide scan by ``documentId`` and
+    its ``_source_uri`` and title are read off its first result.
+
+    The listing is a control-plane call and names every document regardless of
+    ACL; the scan is subject to it. Listed documents that the scan cannot see at
+    all are the ACL-without-identity signature and raise
+    :class:`ExtractionIdentityRequiredError` (see there).
     """
     docs: dict[str, KbDocument] = {}
 
@@ -264,36 +307,56 @@ def discover_documents(
         logger.info("bedrock_kb_list_documents_unavailable", data_source_id=data_source_id, error=type(exc).__name__)
         listed_uris = None
 
-    if listed_uris is not None:
-        for uri in listed_uris:
-            # One page is enough to learn the documentId/title; the chunk scan
-            # re-reads the document in full later.
-            for page in _retrieve_pages(
-                runtime,
-                knowledge_base_id=knowledge_base_id,
-                retrieval_filter=_filter(data_source_id, uri),
-                result=result,
-                max_pages=1,
-            ):
-                for r in page:
-                    _note_document(docs, r, data_source_id)
-        return list(docs.values())
-
     quiet = 0
     for page in _retrieve_pages(
         runtime,
         knowledge_base_id=knowledge_base_id,
         retrieval_filter=_filter(data_source_id),
         result=result,
-        max_pages=max_discovery_pages,
+        # The listed path knows when it is done (every listed document seen) and
+        # must not be capped, or a large data source reports phantom invisibility.
+        max_pages=None if listed_uris is not None else max_discovery_pages,
+        extraction_user_id=extraction_user_id,
     ):
         before = len(docs)
         for r in page:
             _note_document(docs, r, data_source_id)
         quiet = quiet + 1 if len(docs) == before else 0
-        if quiet >= discovery_quiet_pages:
+        if listed_uris is not None:
+            # Listed path: stop as soon as every listed document has been seen.
+            if all(uri in docs for uri in listed_uris):
+                break
+        elif quiet >= discovery_quiet_pages:
             break
-    logger.info("bedrock_kb_documents_sampled", data_source_id=data_source_id, count=len(docs), quiet_pages=quiet)
+
+    if listed_uris is not None:
+        unseen = [uri for uri in listed_uris if uri not in docs]
+        if listed_uris and len(unseen) == len(listed_uris):
+            raise ExtractionIdentityRequiredError(
+                f"data source {data_source_id} lists {len(listed_uris)} indexed document(s) but Retrieve "
+                f"returned none of them: the data source is ACL-enabled and the scan "
+                + (
+                    "ran without an extraction identity"
+                    if not extraction_user_id
+                    else f"ran as {extraction_user_id!r}, which has no access to them"
+                )
+                + ". Set bedrockKnowledgeBaseConfiguration.extractionUserId to an account the knowledge "
+                "base owner granted read access to the documents to extract."
+            )
+        if unseen:
+            # Partial visibility: the identity is granted some documents, not all.
+            # Coverage is the owner's call; report it rather than guess.
+            result.documents_not_visible += len(unseen)
+            logger.warning(
+                "bedrock_kb_documents_not_visible_to_extraction_identity",
+                data_source_id=data_source_id,
+                listed=len(listed_uris),
+                visible=len(listed_uris) - len(unseen),
+                extraction_user_id=extraction_user_id or "",
+            )
+        logger.info("bedrock_kb_documents_located", data_source_id=data_source_id, count=len(docs))
+    else:
+        logger.info("bedrock_kb_documents_sampled", data_source_id=data_source_id, count=len(docs), quiet_pages=quiet)
     return list(docs.values())
 
 
@@ -318,6 +381,7 @@ def load_bedrock_kb_chunks(
     runtime: Any,
     agent: Any,
     on_collision: Callable[..., None] | None = None,
+    extraction_user_id: str | None = None,
 ) -> KbLoadResult:
     """Collect every chunk of the selected data sources as toolkit nodes.
 
@@ -326,7 +390,9 @@ def load_bedrock_kb_chunks(
     ``data_source_ids`` is empty or ``None`` every data source of the KB is used.
     Chunks are emitted grouped per document (the extraction pipeline groups
     consecutive nodes by their SOURCE relationship) and de-duplicated on
-    ``_chunk_id`` within a document.
+    ``_chunk_id`` within a document. ``extraction_user_id`` is the identity every
+    ``Retrieve`` runs as (see :func:`_user_context`); what it may read is what
+    the graph will contain.
     """
     from llama_index.core.schema import Document, NodeRelationship, RelatedNodeInfo, TextNode
 
@@ -347,7 +413,12 @@ def load_bedrock_kb_chunks(
 
     for ds in data_source_ids:
         kb_docs = discover_documents(
-            agent, runtime, knowledge_base_id=knowledge_base_id, data_source_id=ds, result=result
+            agent,
+            runtime,
+            knowledge_base_id=knowledge_base_id,
+            data_source_id=ds,
+            result=result,
+            extraction_user_id=extraction_user_id,
         )
         result.documents_discovered += len(kb_docs)
         for kb_doc in kb_docs:
@@ -373,6 +444,7 @@ def load_bedrock_kb_chunks(
                 knowledge_base_id=knowledge_base_id,
                 retrieval_filter=_filter(ds, kb_doc.source_uri) if kb_doc.source_uri else _filter(ds),
                 result=result,
+                extraction_user_id=extraction_user_id,
             ):
                 for r in page:
                     if kb_doc.source_uri == "" and r.get("documentId") != kb_doc.document_id:
@@ -412,6 +484,8 @@ def load_bedrock_kb_chunks(
         documents=len(result.documents),
         documents_discovered=result.documents_discovered,
         documents_without_chunks=result.documents_without_chunks,
+        documents_not_visible=result.documents_not_visible,
+        extraction_user_id=extraction_user_id or "",
         chunks=len(result.chunks),
         duplicate_chunks_skipped=result.duplicate_chunks_skipped,
         retrieve_calls=result.retrieve_calls,
@@ -420,14 +494,21 @@ def load_bedrock_kb_chunks(
 
 
 def coverage_ratio(
-    runtime: Any, *, knowledge_base_id: str, data_source_id: str, document_id: str, chunk_texts: Iterable[str]
+    runtime: Any,
+    *,
+    knowledge_base_id: str,
+    data_source_id: str,
+    document_id: str,
+    chunk_texts: Iterable[str],
+    extraction_user_id: str | None = None,
 ) -> float:
     """Share of chunks that are verbatim substrings of the KB's pre-chunking text.
 
     Uses ``GetDocumentContent(outputFormat=EXTRACTED)`` (a 5-minute presigned URL
     to ``{nonPlainTextDocumentContent:[{text,...}]}``), whitespace-normalised on
     both sides. Optional completeness check; a ratio under 0.99 means the scan
-    missed chunks or the KB re-chunked since the scan.
+    missed chunks or the KB re-chunked since the scan. Runs as the extraction
+    identity: an ACL-enabled data source refuses the call without one.
     """
     import json
     import urllib.request
@@ -437,6 +518,7 @@ def coverage_ratio(
         dataSourceId=data_source_id,
         documentId=document_id,
         outputFormat="EXTRACTED",
+        **_user_context(extraction_user_id),
     )
     with urllib.request.urlopen(resp["presignedUrl"], timeout=60) as fh:  # noqa: S310 - AWS presigned URL
         payload = json.loads(fh.read())

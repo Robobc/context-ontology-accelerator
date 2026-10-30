@@ -18,6 +18,8 @@ import boto3
 import structlog
 from botocore.config import Config as BotoConfig
 from coa_common import resolve_region
+from coa_common.constants import to_graphrag_tenant_id
+from coa_common.kb_ids import stored_chunk_id
 
 from ..clients.base import instrumented
 from ..request_identity import get_request_user
@@ -40,9 +42,9 @@ _CHUNK_METADATA_KEYS = (
 _LABEL_METADATA_KEYS = ("_document_title", "title", "document_title", "name")
 
 # Chunk ids carried into the graph by kg_build/bedrock_kb_loader.py are the KB's
-# own ids under this prefix (the toolkit keeps 'aws:' ids verbatim), so a
-# Retrieve hit and its __Chunk__ node share one identifier.
-KB_CHUNK_ID_PREFIX = "aws:"
+# own ids in the shape coa_common.kb_ids owns (``aws:<tenant>:kb:<_chunk_id>``
+# once the toolkit has rewritten them for the namespace's tenant), so a Retrieve
+# hit and its __Chunk__ node share one identifier.
 
 
 def _first_string(mapping: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -213,9 +215,10 @@ class BedrockKnowledgeBaseRetriever:
             source_doc = _first_string(metadata, _SOURCE_METADATA_KEYS) or location
             chunk_id = _first_string(metadata, _CHUNK_METADATA_KEYS)
             if chunk_id:
-                # Same identifier the kg-build loader gave the __Chunk__ node, so
-                # the hit pivots straight into graph traversal.
-                chunk_id = f"{KB_CHUNK_ID_PREFIX}{chunk_id}"
+                # The identifier the __Chunk__ node has in this namespace's graph
+                # (kg-build emitted aws::kb:<id>; the toolkit stored it under the
+                # tenant), so the hit pivots straight into graph traversal.
+                chunk_id = stored_chunk_id(to_graphrag_tenant_id(namespace), chunk_id)
             else:
                 digest = hashlib.sha256(f"{self._knowledge_base_id}\0{source_doc}\0{text}".encode()).hexdigest()
                 chunk_id = f"bedrock-kb:{digest[:24]}"

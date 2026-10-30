@@ -376,6 +376,7 @@ class TestBedrockKbFlattening:
                 "dataSourceIds": ["EFLHLJMXMZ", "IBFPVKIBZU"],
                 "region": "eu-central-1",
                 "crossAccountRoleArn": "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb",
+                "extractionUserId": "extractor@example.com",
             },
         }
         index.handler(_make_event(_make_record(body)), None)
@@ -386,6 +387,7 @@ class TestBedrockKbFlattening:
         assert call_input["bedrock_kb_data_source_ids"] == "EFLHLJMXMZ,IBFPVKIBZU"
         assert call_input["bedrock_kb_region"] == "eu-central-1"
         assert call_input["bedrock_kb_cross_account_role_arn"].endswith("coa-dev-datasource-access-kb")
+        assert call_input["bedrock_kb_extraction_user_id"] == "extractor@example.com"
         # Every flat value is a string: ECS env values must be.
         flat_keys = [k for k in call_input if k.startswith(("bedrock_kb_", "input_", "vector_"))]
         assert all(isinstance(call_input[k], str) for k in flat_keys)
@@ -398,6 +400,7 @@ class TestBedrockKbFlattening:
         assert call_input["input_mode"] == "BEDROCK_KB"
         assert call_input["bedrock_kb_data_source_ids"] == ""
         assert call_input["bedrock_kb_region"] == ""
+        assert call_input["bedrock_kb_extraction_user_id"] == ""
 
     @patch.object(index, "sfn_client")
     def test_malformed_kb_object_falls_back_to_staging(self, mock_sfn):

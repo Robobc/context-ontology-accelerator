@@ -11,7 +11,7 @@ statements, an entity label matched by keyword, a lexical-baseline traversal)
 would show a user text from a document the KB would never have returned to them.
 
 This gate closes those hops. Every piece of graph content has provenance to a
-``__Source__`` node (``aws:doc:<documentId>``, property ``source_uri``). Before
+``__Source__`` node (``aws:<tenant>:doc:<...>``, property ``source_uri``). Before
 content is returned, the gate resolves the distinct source documents behind it
 with one openCypher query and asks the KB, per document, whether *this* caller
 may read it (``BedrockKnowledgeBaseRetriever.probe_source_uris``: one filtered
@@ -35,8 +35,9 @@ Four filters, one per shape of graph content:
 
 Scope: active only for namespaces whose document retriever is a per-user Bedrock
 KB (``enforces_user_context``); everything else passes through untouched. Only
-KB-sourced content (chunk ids ``aws:...``, source ids ``aws:doc:...``) is under
-the KB's ACL; content the toolkit minted itself passes through, logged.
+KB-sourced content (ids carrying the ``kb`` / ``doc`` marker, see
+``coa_common.kb_ids``) is under the KB's ACL; content the toolkit minted itself
+passes through, logged.
 
 Not covered here, by design (see ADR 0011): the SPARQL *ontology* graph read by
 ``graphTraverse`` and the non-agentic ``KnowledgeRetriever``. It holds induced
@@ -53,6 +54,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import structlog
+from coa_common.kb_ids import is_kb_chunk_id, is_kb_source_id
 
 from ..request_identity import get_request_user
 from .graph_traverser import GraphEntity
@@ -61,8 +63,6 @@ from .vector_retriever import ChunkResult
 logger = structlog.get_logger(__name__)
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="coa-entitlement")
-KB_CHUNK_ID_PREFIX = "aws:"
-KB_SOURCE_ID_PREFIX = "aws:doc:"
 
 # Chunk -> source document. Chunks are keyed by Neptune node id (the toolkit's
 # ``chunkId`` property is null on the dev graph; see chunk_tool schema notes).
@@ -220,14 +220,14 @@ class DocumentEntitlementGate:
         """
         if not chunks or not self.applies_to(namespace):
             return chunks
-        kb_ids = [c.chunk_id for c in chunks if c.chunk_id.startswith(KB_CHUNK_ID_PREFIX)]
+        kb_ids = [c.chunk_id for c in chunks if is_kb_chunk_id(c.chunk_id)]
         self._log_passthrough(namespace, "chunks", len(chunks) - len(kb_ids))
         if not kb_ids:
             return chunks
         rows = await self._run_cypher(CHUNK_PROVENANCE.format(**self._labels(namespace)), {"chunk_ids": kb_ids})
         uri_of = {str(r.get("chunkId")): str(r.get("uri") or "") for r in rows}
         allowed = await self.entitled_uris(namespace, uri_of.values(), user_id)
-        kept = [c for c in chunks if not c.chunk_id.startswith(KB_CHUNK_ID_PREFIX) or uri_of.get(c.chunk_id) in allowed]
+        kept = [c for c in chunks if not is_kb_chunk_id(c.chunk_id) or uri_of.get(c.chunk_id) in allowed]
         self._log_dropped(namespace, "chunks", len(chunks), len(kept))
         return kept
 
@@ -288,7 +288,7 @@ class DocumentEntitlementGate:
         ``nodes`` are the ``NodeWithScore`` results of a graphrag-toolkit
         retrieval (lexical-baseline path, agentic ``strategy:*`` tools); each
         names its source document under ``metadata.source.sourceId`` (the
-        ``__Source__`` node id, ``aws:doc:...`` for KB documents). Nodes from a
+        ``__Source__`` node id, ``aws:<tenant>:doc:...`` for KB documents). Nodes from a
         source the toolkit minted itself pass through; nodes that name no source
         at all are dropped when the gate applies (their text cannot be placed).
         """
@@ -297,10 +297,8 @@ class DocumentEntitlementGate:
         from ..lexical.baseline_retriever import _extract_source_doc  # lazy: avoids an import cycle
 
         source_of = {id(n): _extract_source_doc(getattr(n, "metadata", None) or {}) for n in nodes}
-        kb_sources = sorted({s for s in source_of.values() if s.startswith(KB_SOURCE_ID_PREFIX)})
-        self._log_passthrough(
-            namespace, "lexical", sum(1 for s in source_of.values() if s and not s.startswith(KB_SOURCE_ID_PREFIX))
-        )
+        kb_sources = sorted({s for s in source_of.values() if is_kb_source_id(s)})
+        self._log_passthrough(namespace, "lexical", sum(1 for s in source_of.values() if s and not is_kb_source_id(s)))
         uri_of: dict[str, str] = {}
         if kb_sources:
             rows = await self._run_cypher(
@@ -313,7 +311,7 @@ class DocumentEntitlementGate:
             source = source_of[id(n)]
             if not source:
                 continue  # unplaceable text: fail closed
-            if not source.startswith(KB_SOURCE_ID_PREFIX) or uri_of.get(source) in allowed:
+            if not is_kb_source_id(source) or uri_of.get(source) in allowed:
                 kept.append(n)
         self._log_dropped(namespace, "lexical", len(nodes), len(kept))
         return kept

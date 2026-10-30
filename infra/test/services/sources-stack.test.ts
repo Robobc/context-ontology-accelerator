@@ -2868,6 +2868,7 @@ describe("SourcesStack", () => {
           BEDROCK_KB_REGION: "$.bedrock_kb_region",
           BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN:
             "$.bedrock_kb_cross_account_role_arn",
+          BEDROCK_KB_EXTRACTION_USER_ID: "$.bedrock_kb_extraction_user_id",
           // Unchanged: the staging path's prefix binding is shared.
           STAGING_PREFIX: "$.preprocessResult.staging_prefix",
         }),

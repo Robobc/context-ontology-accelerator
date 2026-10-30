@@ -630,8 +630,10 @@ class TestHasAccessControlledSources:
         mock_client.execute_query.return_value = _make_payload([{"acl": True}])
         assert _make_store(mock_client).has_access_controlled_sources() is True
         sent = mock_client.execute_query.call_args.kwargs
-        assert "__Source__" in sent["queryString"] and "STARTS WITH $prefix" in sent["queryString"]
-        assert sent["parameters"] == {"prefix": "aws:doc:"}
+        # The predicate is the one coa_common.kb_ids owns: a KB document id is
+        # aws:<tenant>:doc:<...> once the toolkit has rewritten it for the tenant.
+        assert "__Source__" in sent["queryString"]
+        assert "STARTS WITH 'aws:'" in sent["queryString"] and "CONTAINS ':doc:'" in sent["queryString"]
 
     def test_false_for_an_ordinary_graph(self):
         mock_client = MagicMock()

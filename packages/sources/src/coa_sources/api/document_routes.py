@@ -166,7 +166,7 @@ def _validate_bedrock_kb_configuration(kb_req: Any) -> tuple[dict[str, Any] | No
     Returns ``(stored, None)`` or ``(None, error_response)``.
     """
     stored: dict[str, Any] = {"knowledgeBaseId": kb_req.knowledge_base_id}
-    role_arn = normalise_arn(kb_req.cross_account_role_arn)
+    role_arn = normalise_arn(getattr(kb_req, "cross_account_role_arn", None))
     if role_arn:
         if arn_has_inner_whitespace(role_arn) or not role_arn_is_connector_assumable(role_arn):
             return None, api_response(
@@ -195,6 +195,23 @@ def _validate_bedrock_kb_configuration(kb_req: Any) -> tuple[dict[str, Any] | No
     region = (kb_req.region or "").strip()
     if region:
         stored["region"] = region
+    # The identity the scan reads the KB as. The generated model pins "no
+    # whitespace"; the one thing worth adding is the shape Bedrock documents for
+    # it (an email), because a typo here is not an error at scan time but an
+    # empty graph: an ACL-enabled data source returns nothing to an unknown user.
+    extraction_user_id = (getattr(kb_req, "extraction_user_id", None) or "").strip()
+    if extraction_user_id:
+        if "@" not in extraction_user_id[1:-1]:
+            return None, api_response(
+                400,
+                {
+                    "error": (
+                        "extractionUserId must be the email address of the account the knowledge base "
+                        "owner granted read access to the documents to extract (Bedrock userContext.userId)"
+                    )
+                },
+            )
+        stored["extractionUserId"] = extraction_user_id
     return stored, None
 
 

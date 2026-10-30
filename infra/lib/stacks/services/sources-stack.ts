@@ -2635,6 +2635,12 @@ export class SourcesStack extends SCLStack {
                 "$.bedrock_kb_cross_account_role_arn",
               ),
             },
+            {
+              // The identity the scan reads the KB as (userContext.userId); an
+              // ACL-enabled data source returns nothing without one.
+              name: "BEDROCK_KB_EXTRACTION_USER_ID",
+              value: sfn.JsonPath.stringAt("$.bedrock_kb_extraction_user_id"),
+            },
           ],
         },
       ],

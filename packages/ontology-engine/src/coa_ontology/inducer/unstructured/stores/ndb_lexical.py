@@ -21,6 +21,7 @@ import time
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from coa_common.kb_ids import KB_SOURCE_ID_CYPHER_PREDICATE
 
 from coa_ontology.inducer.unstructured.stores.na_lexical import (
     _BATCH_SIZE,
@@ -279,10 +280,13 @@ class NeptuneDatabaseLexicalStore:
         return ClassSchemaResult(classes=classes, relations=relations)
 
     def has_access_controlled_sources(self) -> bool:
-        """True when any ``__Source__`` node is a Bedrock KB document (``aws:doc:`` id); fork, ADR 0011."""
+        """True when any ``__Source__`` node is a Bedrock KB document; fork, ADR 0011.
+
+        The id shape (``aws:<tenant>:doc:<...>``) is owned by ``coa_common.kb_ids``,
+        which also supplies the predicate, so this store and kg-build cannot drift.
+        """
         results = self._oc_query(
-            f"MATCH (s:{self._label('Source')}) WHERE id(s) STARTS WITH $prefix RETURN count(s) > 0 AS acl",
-            {"prefix": "aws:doc:"},
+            f"MATCH (s:{self._label('Source')}) WHERE {KB_SOURCE_ID_CYPHER_PREDICATE} RETURN count(s) > 0 AS acl",
         )
         return bool(results and results[0].get("acl"))
 

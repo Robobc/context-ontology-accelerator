@@ -579,8 +579,10 @@ def _load_bedrock_kb_documents(namespace_id: str) -> tuple[list, int]:
 
     Env: ``BEDROCK_KB_ID`` (required), ``BEDROCK_KB_DATA_SOURCE_IDS`` (comma list,
     empty = all), ``BEDROCK_KB_REGION`` (default AWS_REGION),
-    ``BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN`` (optional; assumed for the Bedrock calls so
-    extraction sees every document regardless of the task role's own grants).
+    ``BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN`` (optional; the IAM role assumed for the
+    Bedrock calls when the KB is in another account), ``BEDROCK_KB_EXTRACTION_USER_ID``
+    (optional; the ``userContext.userId`` the scan reads the KB as, which decides
+    which documents an ACL-enabled data source returns to it; none = nothing).
 
     The assume goes through ``assume_datasource_session`` with the namespace's
     ExternalId, exactly like every other customer-supplied datasource role: the
@@ -604,6 +606,7 @@ def _load_bedrock_kb_documents(namespace_id: str) -> tuple[list, int]:
     ds_ids = [s.strip() for s in os.environ.get("BEDROCK_KB_DATA_SOURCE_IDS", "").split(",") if s.strip()]
     region = os.environ.get("BEDROCK_KB_REGION", "").strip() or AWS_REGION
     role_arn = os.environ.get("BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN", "").strip()
+    extraction_user_id = os.environ.get("BEDROCK_KB_EXTRACTION_USER_ID", "").strip() or None
 
     if role_arn:
         session = assume_datasource_session(
@@ -626,13 +629,16 @@ def _load_bedrock_kb_documents(namespace_id: str) -> tuple[list, int]:
         runtime=runtime,
         agent=agent,
         on_collision=_log_collision,
+        extraction_user_id=extraction_user_id,
     )
     logger.info(
         "Loaded Bedrock KB chunks",
         knowledge_base_id=kb_id,
+        extraction_user_id=extraction_user_id or "",
         documents=len(result.documents),
         chunks=len(result.chunks),
         documents_without_chunks=result.documents_without_chunks,
+        documents_not_visible=result.documents_not_visible,
         retrieve_calls=result.retrieve_calls,
     )
     return result.chunks, result.documents_without_chunks
@@ -1736,12 +1742,16 @@ def main() -> None:
             documents, load_failed = _load_bedrock_kb_documents(namespace_id)
         else:
             documents, load_failed = _load_staged_documents(bucket_name, staging_prefix)
-    except Exception:
+    except Exception as exc:
         tb = traceback.format_exc()
         logger.error("Failed to load staged documents", staging_prefix=staging_prefix, error=tb)
-        ddb.update(
-            ddb_key, {"status": SourceStatus.SCAN_FAILED, "errorMessage": _stage_failure_message("SCAN_FAILED_LOAD")}
-        )
+        error_message = _stage_failure_message("SCAN_FAILED_LOAD")
+        # Fork: the one load failure whose fix is a configuration the steward
+        # controls (ADR 0011). Its message names the field; the generic text would
+        # send them to the logs for something the status row can say.
+        if type(exc).__name__ == "ExtractionIdentityRequiredError":
+            error_message = f"SCAN_FAILED_LOAD: {exc}"
+        ddb.update(ddb_key, {"status": SourceStatus.SCAN_FAILED, "errorMessage": error_message})
         sys.exit(1)
     if not documents:
         # Genuinely empty prefix (listing succeeded, zero usable docs). If some

@@ -44,8 +44,25 @@ from .test_tier3_agentic_factory import make_clients, make_config
 NS = "0f1e2d3c-4b5a-4697-8899-aabbccddeeff"  # tenant labels derive from a UUID namespace id
 GRAPH_URI = "neptune-db://h:8182"
 
-CHUNK_OF = {"aws:fin1": FINANCE, "aws:hr1": HR, "aws:sh1": SHARED}
-SOURCE_OF = {"aws:doc:fin": FINANCE, "aws:doc:hr": HR, "aws:doc:sh": SHARED}
+
+# Stored id shapes (coa_common.kb_ids): what the toolkit leaves in the graph of the
+# test namespace "ns" after rewriting the loader's aws::kb:<id> / aws::doc:<id>.
+from coa_common.constants import to_graphrag_tenant_id as _tenant
+from coa_common.kb_ids import stored_chunk_id as _stored_chunk_id
+
+NS_TENANT = _tenant(NS)
+
+
+def kb_chunk(bedrock_chunk_id: str) -> str:
+    return _stored_chunk_id(NS_TENANT, bedrock_chunk_id)
+
+
+def kb_doc(tail: str) -> str:
+    return f"aws:{NS_TENANT}:doc:{tail}"
+
+
+CHUNK_OF = {kb_chunk("fin1"): FINANCE, kb_chunk("hr1"): HR, kb_chunk("sh1"): SHARED}
+SOURCE_OF = {kb_doc("fin"): FINANCE, kb_doc("hr"): HR, kb_doc("sh"): SHARED}
 ENTITIES = {
     "e_rev": ("Q3 Revenue", "Q3 revenue grew 8%.", FINANCE),
     "e_band": ("Band 4", "Band 4 pays 120k.", HR),
@@ -164,7 +181,7 @@ class TestLexicalBaselineThroughTheFactory:
         def node(text, source):
             return SimpleNamespace(node_id=text, text=text, score=0.5, metadata={"source": {"sourceId": source}})
 
-        return [node("Q3 revenue grew 8%.", "aws:doc:fin"), node("Band 4 pays 120k.", "aws:doc:hr")]
+        return [node("Q3 revenue grew 8%.", kb_doc("fin")), node("Band 4 pays 120k.", kb_doc("hr"))]
 
     def _retriever(self, gate):
         from coa_serve.clients.factory import build_lexical_retriever
@@ -210,7 +227,7 @@ class TestLexicalBaselineThroughTheFactory:
                     }
                 ]
             }
-            meta = {"source": {"sourceId": "aws:doc:fin"}, "entity_contexts": contexts}
+            meta = {"source": {"sourceId": kb_doc("fin")}, "entity_contexts": contexts}
             return SimpleNamespace(node_id="n", text="Q3 revenue grew 8%.", score=0.5, metadata=meta)
 
         retriever = self._retriever(gate)
@@ -232,8 +249,8 @@ class TestOtherAgenticToolsThroughTheRegistry:
         from coa_serve.tier3.vector_retriever import ChunkResult
 
         hits = [
-            ChunkResult("aws:fin1", "Q3 revenue grew 8%.", FINANCE, 0.9),
-            ChunkResult("aws:hr1", "Band 4 pays 120k.", HR, 0.8),
+            ChunkResult(kb_chunk("fin1"), "Q3 revenue grew 8%.", FINANCE, 0.9),
+            ChunkResult(kb_chunk("hr1"), "Band 4 pays 120k.", HR, 0.8),
         ]
         for g, expect_hr in ((gate, False), (None, True)):
             tool = _registry(g).get("vector_search")
@@ -252,14 +269,17 @@ class TestOtherAgenticToolsThroughTheRegistry:
 
         async def _window(cypher, params):
             if "__NEXT__" in cypher:
-                return [{"chunkId": "aws:fin1", "text": "Q3 revenue grew 8%."}, {"chunkId": "aws:hr1", "text": "120k."}]
+                return [
+                    {"chunkId": kb_chunk("fin1"), "text": "Q3 revenue grew 8%."},
+                    {"chunkId": kb_chunk("hr1"), "text": "120k."},
+                ]
             return await fake_neptune(cypher, params)
 
         for g, expect_hr in ((gate, False), (None, True)):
             tool = _registry(g).get("chunk_window")
             assert tool is not None, "chunk_window must register when AGENTIC_ENABLE_CHUNK_WINDOW=1"
             with patch.object(type(tool), "_run_cypher", staticmethod(_window)):
-                result = await tool.invoke(namespace=NS, chunk_ids=["aws:sh1"])
+                result = await tool.invoke(namespace=NS, chunk_ids=[kb_chunk("sh1")])
             assert ("120k" in repr(result)) is expect_hr
 
 

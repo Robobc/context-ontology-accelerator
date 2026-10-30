@@ -209,7 +209,8 @@ class LexicalGraphStore(Protocol):
         """True when the lexical graph was built from an access-controlled document store.
 
         kg-build gives documents loaded from a Bedrock Knowledge Base with
-        document-level ACL a ``__Source__`` node id prefixed ``aws:doc:``. Such a
+        document-level ACL a ``__Source__`` node id of the shape
+        ``coa_common.kb_ids`` owns (``aws:<tenant>:doc:<...>``). Such a
         graph holds every document's facts under one tenant while the Knowledge
         Base authorizes per user; promoting its entities into a namespace-wide
         ontology would leak restricted documents into every caller's view, so

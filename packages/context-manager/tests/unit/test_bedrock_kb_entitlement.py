@@ -39,6 +39,27 @@ FINANCE = "sp://site/finance/q3.docx"
 HR = "sp://site/hr/salaries.docx"
 SHARED = "sp://site/shared/handbook.docx"
 # Which documents each user may read, per the KB's ACL.
+
+# The retriever derives the chunk node id from the namespace's tenant, so the test
+# namespace must be UUID-shaped like a real one.
+NS = "0f1e2d3c-4b5a-4697-8899-aabbccddeeff"
+
+# Stored id shapes (coa_common.kb_ids): what the toolkit leaves in the graph of NS
+# after rewriting the loader's aws::kb:<id> / aws::doc:<id>.
+from coa_common.constants import to_graphrag_tenant_id as _tenant
+from coa_common.kb_ids import stored_chunk_id as _stored_chunk_id
+
+NS_TENANT = _tenant(NS)
+
+
+def kb_chunk(bedrock_chunk_id: str) -> str:
+    return _stored_chunk_id(NS_TENANT, bedrock_chunk_id)
+
+
+def kb_doc(tail: str) -> str:
+    return f"aws:{NS_TENANT}:doc:{tail}"
+
+
 ACL = {"alice@example.com": {FINANCE, SHARED}, "bob@example.com": {HR, SHARED}, "carol@example.com": set()}
 
 
@@ -84,8 +105,8 @@ class TestRetriever:
     async def test_hits_carry_graph_ids_and_source_uri(self):
         client = AclKbClient()
         r = BedrockKnowledgeBaseRetriever(KB, client=client)  # today's defaults: vector, no userContext
-        chunks = await r.retrieve("revenue", "ns", top_k=10)
-        assert sorted(c.chunk_id for c in chunks) == ["aws:fin1", "aws:hr1", "aws:sh1"]
+        chunks = await r.retrieve("revenue", NS, top_k=10)
+        assert sorted(c.chunk_id for c in chunks) == [kb_chunk("fin1"), kb_chunk("hr1"), kb_chunk("sh1")]
         assert {c.source_doc for c in chunks} == {FINANCE, HR, SHARED}
         assert "vectorSearchConfiguration" in client.calls[0]["retrievalConfiguration"]
         assert "userContext" not in client.calls[0]
@@ -96,40 +117,40 @@ class TestRetriever:
         client.retrieve.return_value = {
             "retrievalResults": [{"content": {"text": "x"}, "metadata": {"source_uri": "s3://b/k"}, "score": 0.1}]
         }
-        chunks = await BedrockKnowledgeBaseRetriever(KB, client=client).retrieve("q", "ns")
+        chunks = await BedrockKnowledgeBaseRetriever(KB, client=client).retrieve("q", NS)
         assert chunks[0].chunk_id.startswith("bedrock-kb:")
 
     @pytest.mark.asyncio
     async def test_managed_mode_with_user_context(self, alice):
         client = AclKbClient()
         r = BedrockKnowledgeBaseRetriever(KB, client=client, search_mode="managed", enforce_user_context=True)
-        chunks = await r.retrieve("anything", "ns", top_k=10)
+        chunks = await r.retrieve("anything", NS, top_k=10)
         call = client.calls[0]
         assert "managedSearchConfiguration" in call["retrievalConfiguration"]
         assert call["userContext"] == {"userId": alice}
-        assert sorted(c.chunk_id for c in chunks) == ["aws:fin1", "aws:sh1"]  # alice: finance + shared
+        assert sorted(c.chunk_id for c in chunks) == [kb_chunk("fin1"), kb_chunk("sh1")]  # alice: finance + shared
 
     @pytest.mark.asyncio
     async def test_explicit_user_id_overrides_request_identity(self, alice):
         client = AclKbClient()
         r = BedrockKnowledgeBaseRetriever(KB, client=client, enforce_user_context=True)
-        chunks = await r.retrieve("anything", "ns", user_id="bob@example.com")
+        chunks = await r.retrieve("anything", NS, user_id="bob@example.com")
         assert client.calls[0]["userContext"] == {"userId": "bob@example.com"}
-        assert sorted(c.chunk_id for c in chunks) == ["aws:hr1", "aws:sh1"]
+        assert sorted(c.chunk_id for c in chunks) == [kb_chunk("hr1"), kb_chunk("sh1")]
 
     @pytest.mark.asyncio
     async def test_enforced_without_caller_returns_nothing_and_never_calls(self):
         assert get_request_user() == ""
         client = AclKbClient()
         r = BedrockKnowledgeBaseRetriever(KB, client=client, enforce_user_context=True)
-        assert await r.retrieve("anything", "ns") == []
+        assert await r.retrieve("anything", NS) == []
         assert client.calls == []
 
     @pytest.mark.asyncio
     async def test_carol_sees_nothing(self):
         client = AclKbClient()
         r = BedrockKnowledgeBaseRetriever(KB, client=client, enforce_user_context=True)
-        assert await r.retrieve("anything", "ns", user_id="carol@example.com") == []
+        assert await r.retrieve("anything", NS, user_id="carol@example.com") == []
 
     @pytest.mark.asyncio
     async def test_entitled_source_uris_probe(self, alice):
@@ -199,33 +220,37 @@ class TestGate:
             _per_user_retriever(),
             {
                 "__EXTRACTED_FROM__`]->(s:": [
-                    {"chunkId": "aws:fin2", "uri": FINANCE},
-                    {"chunkId": "aws:hr2", "uri": HR},
-                    {"chunkId": "aws:sh2", "uri": SHARED},
+                    {"chunkId": kb_chunk("fin2"), "uri": FINANCE},
+                    {"chunkId": kb_chunk("hr2"), "uri": HR},
+                    {"chunkId": kb_chunk("sh2"), "uri": SHARED},
                 ]
             },
         )
         chunks = [
-            ChunkResult("aws:fin2", "finance text", "", 1.0),
-            ChunkResult("aws:hr2", "hr text", "", 1.0),
-            ChunkResult("aws:sh2", "shared text", "", 1.0),
-            ChunkResult("aws:orphan", "no provenance", "", 1.0),
+            ChunkResult(kb_chunk("fin2"), "finance text", "", 1.0),
+            ChunkResult(kb_chunk("hr2"), "hr text", "", 1.0),
+            ChunkResult(kb_chunk("sh2"), "shared text", "", 1.0),
+            ChunkResult(kb_chunk("orphan"), "no provenance", "", 1.0),
             ChunkResult("toolkit-minted-id", "not from the KB", "", 1.0),
         ]
-        kept = await gate.filter_chunks(chunks, "ns")
-        assert [c.chunk_id for c in kept] == ["aws:fin2", "aws:sh2", "toolkit-minted-id"]
+        kept = await gate.filter_chunks(chunks, NS)
+        assert [c.chunk_id for c in kept] == [kb_chunk("fin2"), kb_chunk("sh2"), "toolkit-minted-id"]
 
     @pytest.mark.asyncio
     async def test_carol_gets_no_kb_chunks(self):
-        gate = _gate(_per_user_retriever(), {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": "aws:fin2", "uri": FINANCE}]})
-        kept = await gate.filter_chunks([ChunkResult("aws:fin2", "t", "", 1.0)], "ns", user_id="carol@example.com")
+        gate = _gate(
+            _per_user_retriever(), {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": kb_chunk("fin2"), "uri": FINANCE}]}
+        )
+        kept = await gate.filter_chunks([ChunkResult(kb_chunk("fin2"), "t", "", 1.0)], NS, user_id="carol@example.com")
         assert kept == []
 
     @pytest.mark.asyncio
     async def test_no_caller_keeps_nothing_from_the_kb(self):
         assert get_request_user() == ""
-        gate = _gate(_per_user_retriever(), {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": "aws:fin2", "uri": FINANCE}]})
-        assert await gate.filter_chunks([ChunkResult("aws:fin2", "t", "", 1.0)], "ns") == []
+        gate = _gate(
+            _per_user_retriever(), {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": kb_chunk("fin2"), "uri": FINANCE}]}
+        )
+        assert await gate.filter_chunks([ChunkResult(kb_chunk("fin2"), "t", "", 1.0)], NS) == []
 
     @pytest.mark.asyncio
     async def test_statements_need_one_entitled_supporting_document(self, alice):
@@ -246,7 +271,7 @@ class TestGate:
             ChunkResult("e2#stmt0", "Both docs say this.", "", 1.0, uri="e2"),
             ChunkResult("e3#stmt0", "Unknown provenance.", "", 1.0, uri="e3"),
         ]
-        kept = await gate.filter_statement_chunks(chunks, "ns")
+        kept = await gate.filter_statement_chunks(chunks, NS)
         assert [c.text for c in kept] == ["Revenue grew 8%.", "Both docs say this."]
         assert "__MENTIONED_IN__" in gate.cypher_calls[0] and "__EXTRACTED_FROM__" in gate.cypher_calls[0]
 
@@ -254,26 +279,26 @@ class TestGate:
     async def test_passthrough_when_namespace_is_not_a_per_user_kb(self):
         plain = BedrockKnowledgeBaseRetriever(KB, client=AclKbClient())  # enforce_user_context=False
         gate = _gate(plain, {})
-        chunks = [ChunkResult("aws:fin2", "t", "", 1.0)]
-        assert await gate.filter_chunks(chunks, "ns") is chunks
-        assert not gate.applies_to("ns") and gate.cypher_calls == []
+        chunks = [ChunkResult(kb_chunk("fin2"), "t", "", 1.0)]
+        assert await gate.filter_chunks(chunks, NS) is chunks
+        assert not gate.applies_to(NS) and gate.cypher_calls == []
         gate_none = _gate(None, {})
-        assert await gate_none.filter_statement_chunks(chunks, "ns") is chunks
+        assert await gate_none.filter_statement_chunks(chunks, NS) is chunks
 
     @pytest.mark.asyncio
     async def test_entitlement_answers_are_cached_per_user(self, alice):
         retriever = _per_user_retriever()
-        gate = _gate(retriever, {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": "aws:fin2", "uri": FINANCE}]})
-        chunks = [ChunkResult("aws:fin2", "t", "", 1.0)]
-        await gate.filter_chunks(chunks, "ns")
-        await gate.filter_chunks(chunks, "ns")
+        gate = _gate(retriever, {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": kb_chunk("fin2"), "uri": FINANCE}]})
+        chunks = [ChunkResult(kb_chunk("fin2"), "t", "", 1.0)]
+        await gate.filter_chunks(chunks, NS)
+        await gate.filter_chunks(chunks, NS)
         probes = [
             c
             for c in retriever._client.calls
             if c["retrievalConfiguration"]["managedSearchConfiguration"]["numberOfResults"] == 1
         ]
         assert len(probes) == 1  # second call answered from cache
-        await gate.filter_chunks(chunks, "ns", user_id="bob@example.com")
+        await gate.filter_chunks(chunks, NS, user_id="bob@example.com")
         assert len([c for c in retriever._client.calls if c.get("userContext") == {"userId": "bob@example.com"}]) == 1
 
     def test_templates_resolve_provenance_via_source_uri(self):
@@ -303,9 +328,9 @@ class TestGate:
             GraphEntity(uri="e3", label="Handbook", type="T"),  # HR + shared: one entitled is enough
             GraphEntity(uri="e4", label="Orphan", type="T"),  # no provenance: withheld
         ]
-        kept = await gate.filter_entities(entities, "ns")
+        kept = await gate.filter_entities(entities, NS)
         assert [e.label for e in kept] == ["Q3 Revenue", "Handbook"]
-        assert await gate.filter_entities(entities, "ns", user_id="carol@example.com") == []
+        assert await gate.filter_entities(entities, NS, user_id="carol@example.com") == []
 
     @pytest.mark.asyncio
     async def test_lexical_nodes_are_gated_by_their_source_document(self, alice):
@@ -315,8 +340,8 @@ class TestGate:
             _per_user_retriever(),
             {
                 "WHERE id(s) IN $source_ids": [
-                    {"sourceId": "aws:doc:fin", "uri": FINANCE},
-                    {"sourceId": "aws:doc:hr", "uri": HR},
+                    {"sourceId": kb_doc("fin"), "uri": FINANCE},
+                    {"sourceId": kb_doc("hr"), "uri": HR},
                 ]
             },
         )
@@ -326,16 +351,16 @@ class TestGate:
             return SimpleNamespace(node_id=text, text=text, score=0.5, metadata=meta)
 
         nodes = [
-            node("finance text", "aws:doc:fin"),
-            node("hr text", "aws:doc:hr"),
+            node("finance text", kb_doc("fin")),
+            node("hr text", kb_doc("hr")),
             node("staged text", "7f3a-toolkit-hash"),  # not a KB source: passes through
             node("unplaceable text", None),  # no provenance: fail closed
-            node("orphan kb text", "aws:doc:unknown"),  # KB source the graph does not know: fail closed
+            node("orphan kb text", kb_doc("unknown")),  # KB source the graph does not know: fail closed
         ]
-        kept = await gate.filter_lexical_nodes(nodes, "ns")
+        kept = await gate.filter_lexical_nodes(nodes, NS)
         assert [n.text for n in kept] == ["finance text", "staged text"]
         assert "hr text" not in [n.text for n in kept]
-        assert await gate.filter_lexical_nodes(nodes, "ns", user_id="carol@example.com") == [nodes[2]]
+        assert await gate.filter_lexical_nodes(nodes, NS, user_id="carol@example.com") == [nodes[2]]
 
     @pytest.mark.asyncio
     async def test_unresolved_probe_withholds_without_caching_a_denial(self, alice):
@@ -350,12 +375,12 @@ class TestGate:
             return real_retrieve(**kwargs)
 
         retriever._client.retrieve = retrieve
-        gate = _gate(retriever, {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": "aws:fin2", "uri": FINANCE}]})
-        chunks = [ChunkResult("aws:fin2", "t", "", 1.0)]
-        assert await gate.filter_chunks(chunks, "ns") == []  # withheld for this request
+        gate = _gate(retriever, {"__EXTRACTED_FROM__`]->(s:": [{"chunkId": kb_chunk("fin2"), "uri": FINANCE}]})
+        chunks = [ChunkResult(kb_chunk("fin2"), "t", "", 1.0)]
+        assert await gate.filter_chunks(chunks, NS) == []  # withheld for this request
         assert gate._cache == {}  # but not remembered as a denial
         flaky["fail"] = False
-        assert [c.chunk_id for c in await gate.filter_chunks(chunks, "ns")] == ["aws:fin2"]
+        assert [c.chunk_id for c in await gate.filter_chunks(chunks, NS)] == [kb_chunk("fin2")]
 
     @pytest.mark.asyncio
     async def test_cache_is_bounded(self, alice):
@@ -363,7 +388,7 @@ class TestGate:
         retriever._client.docs = {f"sp://d/{i}": (f"c{i}", "t") for i in range(6)}
         gate = _gate(retriever, {})
         gate._cache_max_entries = 4
-        await gate.entitled_uris("ns", list(retriever._client.docs))
+        await gate.entitled_uris(NS, list(retriever._client.docs))
         assert len(gate._cache) <= 4
 
 
@@ -423,16 +448,16 @@ class TestRegistryDocumentRetriever:
         per_user = _per_user_retriever()
         retriever = RegistryDocumentRetriever(default=default)
 
-        assert retriever.backend_name("docs") == "opensearch"
-        assert retriever.requires_query_embedding("docs") is True
-        token = bind_request_document_source(BoundDocumentSource(namespace="docs", retriever=per_user))
+        assert retriever.backend_name(NS) == "opensearch"
+        assert retriever.requires_query_embedding(NS) is True
+        token = bind_request_document_source(BoundDocumentSource(namespace=NS, retriever=per_user))
         try:
-            assert retriever.backend_name("docs") == "bedrock-kb"
-            assert retriever.requires_query_embedding("docs") is False
-            chunks = await retriever.retrieve("revenue", "docs", user_id="alice@example.com")
+            assert retriever.backend_name(NS) == "bedrock-kb"
+            assert retriever.requires_query_embedding(NS) is False
+            chunks = await retriever.retrieve("revenue", NS, user_id="alice@example.com")
             assert {c.source_doc for c in chunks} == {FINANCE, SHARED}
             # A different namespace in the same request is not the bound KB's business.
-            assert retriever.backend_name("other") == "opensearch"
+            assert retriever.backend_name("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d") == "opensearch"
         finally:
             reset_request_document_source(token)
         default.retrieve.assert_not_called()
@@ -448,18 +473,18 @@ class TestToolWiring:
 
         async def _filter(chunks, namespace, user_id=None):
             assert user_id == "alice@example.com"
-            return [c for c in chunks if c.chunk_id != "aws:hr9"]
+            return [c for c in chunks if c.chunk_id != kb_chunk("hr9")]
 
         gate.filter_chunks = _filter
         tool = ChunkExpansionTool("neptune-db://h:8182", entitlement_gate=gate)
 
         async def _rows(cypher, params):
-            return [{"chunkId": "aws:fin9", "text": "fin"}, {"chunkId": "aws:hr9", "text": "hr"}]
+            return [{"chunkId": kb_chunk("fin9"), "text": "fin"}, {"chunkId": kb_chunk("hr9"), "text": "hr"}]
 
         tool._run_cypher = _rows  # type: ignore[method-assign]
         tool._chunk_label = staticmethod(lambda ns: "`__Chunk__`")  # type: ignore[method-assign]
-        result = await tool.invoke(namespace="ns", chunk_ids=["aws:x"], profile={"email": "alice@example.com"})
-        assert [c.chunk_id for c in result.chunks] == ["aws:fin9"]
+        result = await tool.invoke(namespace=NS, chunk_ids=[kb_chunk("x")], profile={"email": "alice@example.com"})
+        assert [c.chunk_id for c in result.chunks] == [kb_chunk("fin9")]
 
     @pytest.mark.asyncio
     async def test_chunk_tool_fails_closed_when_gate_errors(self):
@@ -474,11 +499,11 @@ class TestToolWiring:
         tool = ChunkExpansionTool("neptune-db://h:8182", entitlement_gate=gate)
 
         async def _rows(cypher, params):
-            return [{"chunkId": "aws:fin9", "text": "fin"}]
+            return [{"chunkId": kb_chunk("fin9"), "text": "fin"}]
 
         tool._run_cypher = _rows  # type: ignore[method-assign]
         tool._chunk_label = staticmethod(lambda ns: "`__Chunk__`")  # type: ignore[method-assign]
-        result = await tool.invoke(namespace="ns", chunk_ids=["aws:x"], profile={"userId": "u"})
+        result = await tool.invoke(namespace=NS, chunk_ids=[kb_chunk("x")], profile={"userId": "u"})
         assert result.chunks == () and "entitlement" in result.detail
 
     @pytest.mark.asyncio
@@ -517,7 +542,7 @@ class TestToolWiring:
             return inner
 
         tool._invoke = _inner  # type: ignore[method-assign]
-        result = await tool.invoke(namespace="ns", mode="edge_typed", profile={"email": "alice@example.com"})
+        result = await tool.invoke(namespace=NS, mode="edge_typed", profile={"email": "alice@example.com"})
         assert [c.text for c in result.chunks] == ["ok"]
         assert result.entities == (e1,)
         assert "Project Falcon" not in repr(result)
@@ -550,7 +575,7 @@ class TestToolWiring:
             return inner
 
         tool._invoke = _inner  # type: ignore[method-assign]
-        result = await tool.invoke(namespace="ns", mode="keyword", query="x", profile={"userId": "alice@example.com"})
+        result = await tool.invoke(namespace=NS, mode="keyword", query="x", profile={"userId": "alice@example.com"})
         assert [e.label for e in result.entities] == ["Public"]
 
     @pytest.mark.asyncio
@@ -573,7 +598,7 @@ class TestToolWiring:
             return inner
 
         tool._invoke = _inner  # type: ignore[method-assign]
-        result = await tool.invoke(namespace="ns", mode="keyword", query="x", profile={"userId": "u"})
+        result = await tool.invoke(namespace=NS, mode="keyword", query="x", profile={"userId": "u"})
         assert result.entities == () and result.chunks == () and "entitlement" in result.detail
 
     @pytest.mark.asyncio
@@ -588,7 +613,7 @@ class TestToolWiring:
             return inner
 
         tool._invoke = _inner  # type: ignore[method-assign]
-        assert await tool.invoke(namespace="ns") is inner
+        assert await tool.invoke(namespace=NS) is inner
 
 
 @pytest.mark.unit

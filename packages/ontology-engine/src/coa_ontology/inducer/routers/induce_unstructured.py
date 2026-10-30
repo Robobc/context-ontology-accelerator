@@ -378,7 +378,7 @@ def _run_unstructured_induction(
         if lexical_store.has_access_controlled_sources():
             raise AccessControlledGraphError(
                 "unstructured induction is not available for a namespace whose documents live in an "
-                "access-controlled Knowledge Base (graph sources are 'aws:doc:*'); see ADR 0011"
+                "access-controlled Knowledge Base (graph sources are Knowledge Base documents); see ADR 0011"
             )
         from coa_common import DEFAULT_EMBED_MODEL_ID
 

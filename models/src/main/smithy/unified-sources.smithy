@@ -988,7 +988,27 @@ structure BedrockKnowledgeBaseConfiguration {
     /// opaque AccessDenied at first scan. There is no externalId member: the
     /// value is derived from the namespace.
     crossAccountRoleArn: IamRoleArn
+
+    /// The identity the KG build reads the knowledge base as: the email of a
+    /// service account the knowledge base owner has granted read access to
+    /// every document the graph should cover. Passed as `userContext.userId` on
+    /// every Retrieve and GetDocumentContent of the scan.
+    ///
+    /// Required in practice when any selected data source is ACL-enabled: Bedrock
+    /// returns nothing from such a data source to a request without a user
+    /// context, there is no administrative bypass, and the scan then fails
+    /// rather than build an empty graph. Harmless on non-ACL data sources, which
+    /// return every document to any identity. What this identity may read is
+    /// exactly what the graph will contain, so the knowledge base owner controls
+    /// the graph's coverage through this one account's permissions.
+    extractionUserId: BedrockUserContextId
 }
+
+/// A Bedrock `userContext.userId`: the user's email address as known to the
+/// data source. No whitespace.
+@pattern("^\\S+$")
+@length(min: 3, max: 320)
+string BedrockUserContextId
 
 /// Type of per-file preprocessing issue.
 enum PreprocessingIssueType {

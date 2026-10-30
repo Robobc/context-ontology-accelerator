@@ -30,6 +30,7 @@ from typing import Any
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
+from coa_common.kb_ids import KB_SOURCE_ID_CYPHER_PREDICATE
 
 from coa_ontology.inducer.unstructured.stores.protocol import (
     ClassRecord,
@@ -772,10 +773,12 @@ class NeptuneAnalyticsLexicalStore:
         ]
 
     def has_access_controlled_sources(self) -> bool:
-        """True when any ``__Source__`` node is a Bedrock KB document (``aws:doc:`` id); fork, ADR 0011."""
+        """True when any ``__Source__`` node is a Bedrock KB document; fork, ADR 0011.
+
+        Predicate from ``coa_common.kb_ids`` (``aws:<tenant>:doc:<...>``), shared with kg-build.
+        """
         results = self._oc_query(
-            "MATCH (s:`__Source__`) WHERE id(s) STARTS WITH $prefix RETURN count(s) > 0 AS acl",
-            {"prefix": "aws:doc:"},
+            f"MATCH (s:`__Source__`) WHERE {KB_SOURCE_ID_CYPHER_PREDICATE} RETURN count(s) > 0 AS acl",
         )
         return bool(results and results[0].get("acl"))
 

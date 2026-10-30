@@ -423,12 +423,13 @@ class TestCreateDocumentSource:
 _KB_ROLE = "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb"
 
 
-def _make_kb_cfg(role_arn=_KB_ROLE, kb_id="71RZ44THV5", data_source_ids=None, region=None):
+def _make_kb_cfg(role_arn=_KB_ROLE, kb_id="71RZ44THV5", data_source_ids=None, region=None, extraction_user_id=None):
     cfg = MagicMock()
     cfg.knowledge_base_id = kb_id
     cfg.data_source_ids = data_source_ids
     cfg.region = region
     cfg.cross_account_role_arn = role_arn
+    cfg.extraction_user_id = extraction_user_id
     return cfg
 
 
@@ -492,6 +493,32 @@ class TestCreateBedrockManagedKbSource:
             "knowledgeBaseId": "71RZ44THV5",
             "crossAccountRoleArn": _KB_ROLE,
         }
+
+    def test_extraction_identity_is_stored_trimmed_and_forwarded_to_the_job(self):
+        """The identity the scan reads the KB as (ADR 0011): an ACL-enabled data
+        source returns nothing to a scan without one, so it rides on the item and
+        the job body like the rest of the configuration."""
+        req = _make_doc_req(
+            name="kb-acl",
+            s3_prefixes=[],
+            upload_id=None,
+            bedrock_kb=_make_kb_cfg(extraction_user_id=" extractor@example.com "),
+        )
+        status, _, dao, sqs = self._create(req)
+        assert status == 201
+        stored = dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"]
+        assert stored["extractionUserId"] == "extractor@example.com"
+        assert json.loads(sqs.send_message.call_args.kwargs["MessageBody"])["bedrock_kb"] == stored
+
+    @pytest.mark.parametrize("bad", ["extractor", "@example.com", "extractor@"])
+    def test_extraction_identity_must_look_like_an_email(self, bad):
+        """A typo here is not an error at scan time but an empty graph; refuse at submit."""
+        req = _make_doc_req(
+            name="kb-bad-id", s3_prefixes=[], upload_id=None, bedrock_kb=_make_kb_cfg(extraction_user_id=bad)
+        )
+        status, body, dao, _ = self._create(req)
+        assert status == 400 and "extractionUserId" in body["error"]
+        dao.put.assert_not_called()
 
     @pytest.mark.parametrize(
         "extra",
