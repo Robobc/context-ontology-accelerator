@@ -2630,8 +2630,8 @@ export class SourcesStack extends SCLStack {
               value: sfn.JsonPath.stringAt("$.bedrock_kb_region"),
             },
             {
-              name: "BEDROCK_KB_EXTRACTION_ROLE_ARN",
-              value: sfn.JsonPath.stringAt("$.bedrock_kb_extraction_role_arn"),
+              name: "BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN",
+              value: sfn.JsonPath.stringAt("$.bedrock_kb_cross_account_role_arn"),
             },
           ],
         },

@@ -159,34 +159,36 @@ def _validate_bedrock_kb_configuration(kb_req: Any) -> tuple[dict[str, Any] | No
     against ``arn:aws:iam::*:role/{prefix}-datasource-access-*`` in the ``aws``
     partition, so a role outside that shape registers cleanly and then fails
     every extraction with an AccessDenied that reads as a policy defect. Refused
-    at submit instead, naming the prefix.
+    at submit instead, naming the prefix. Optional, like Glue's ``crossAccountRoleArn``:
+    a KB in this deployment's own account is read directly under the task and
+    serve roles, so no role is stored.
 
     Returns ``(stored, None)`` or ``(None, error_response)``.
     """
-    role_arn = normalise_arn(kb_req.extraction_role_arn)
-    if arn_has_inner_whitespace(role_arn) or not role_arn_is_connector_assumable(role_arn):
-        return None, api_response(
-            400,
-            {
-                "error": (
-                    "extractionRoleArn must be an IAM role ARN in the aws partition: arn:aws:iam::<account>:role/<name>"
-                )
-            },
-        )
-    if not role_name_is_reserved(role_arn):
-        return None, api_response(
-            400,
-            {
-                "error": (
-                    f"extractionRoleArn must be named '{reserved_role_name_prefix()}*' at the root IAM path; "
-                    "it is the only role shape this deployment is allowed to assume."
-                )
-            },
-        )
-    stored: dict[str, Any] = {
-        "knowledgeBaseId": kb_req.knowledge_base_id,
-        "extractionRoleArn": role_arn,
-    }
+    stored: dict[str, Any] = {"knowledgeBaseId": kb_req.knowledge_base_id}
+    role_arn = normalise_arn(kb_req.cross_account_role_arn)
+    if role_arn:
+        if arn_has_inner_whitespace(role_arn) or not role_arn_is_connector_assumable(role_arn):
+            return None, api_response(
+                400,
+                {
+                    "error": (
+                        "crossAccountRoleArn must be an IAM role ARN in the aws partition: "
+                        "arn:aws:iam::<account>:role/<name>"
+                    )
+                },
+            )
+        if not role_name_is_reserved(role_arn):
+            return None, api_response(
+                400,
+                {
+                    "error": (
+                        f"crossAccountRoleArn must be named '{reserved_role_name_prefix()}*' at the root IAM path; "
+                        "it is the only role shape this deployment is allowed to assume."
+                    )
+                },
+            )
+        stored["crossAccountRoleArn"] = role_arn
     data_source_ids = [s for s in (kb_req.data_source_ids or []) if s]
     if data_source_ids:
         stored["dataSourceIds"] = sorted(set(data_source_ids))

@@ -579,7 +579,7 @@ def _load_bedrock_kb_documents(namespace_id: str) -> tuple[list, int]:
 
     Env: ``BEDROCK_KB_ID`` (required), ``BEDROCK_KB_DATA_SOURCE_IDS`` (comma list,
     empty = all), ``BEDROCK_KB_REGION`` (default AWS_REGION),
-    ``BEDROCK_KB_EXTRACTION_ROLE_ARN`` (optional; assumed for the Bedrock calls so
+    ``BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN`` (optional; assumed for the Bedrock calls so
     extraction sees every document regardless of the task role's own grants).
 
     The assume goes through ``assume_datasource_session`` with the namespace's
@@ -603,7 +603,7 @@ def _load_bedrock_kb_documents(namespace_id: str) -> tuple[list, int]:
     kb_id = _require_env("BEDROCK_KB_ID")
     ds_ids = [s.strip() for s in os.environ.get("BEDROCK_KB_DATA_SOURCE_IDS", "").split(",") if s.strip()]
     region = os.environ.get("BEDROCK_KB_REGION", "").strip() or AWS_REGION
-    role_arn = os.environ.get("BEDROCK_KB_EXTRACTION_ROLE_ARN", "").strip()
+    role_arn = os.environ.get("BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN", "").strip()
 
     if role_arn:
         session = assume_datasource_session(

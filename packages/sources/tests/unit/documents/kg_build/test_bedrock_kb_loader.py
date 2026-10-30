@@ -338,7 +338,7 @@ class TestGraphBuildHooks:
             INPUT_MODE="BEDROCK_KB",
             BEDROCK_KB_ID=KB,
             BEDROCK_KB_DATA_SOURCE_IDS=f"{DS_S3}, ",
-            BEDROCK_KB_EXTRACTION_ROLE_ARN=role,
+            BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN=role,
         )
         runtime, agent = _s3_fixture()
         assumed = MagicMock()
@@ -353,7 +353,7 @@ class TestGraphBuildHooks:
         assert assume.call_args.kwargs["session_name"].startswith("coa-kg-build-")
 
     def test_bedrock_loader_wrapper_without_role_uses_task_credentials(self, gb):
-        mod = gb(INPUT_MODE="BEDROCK_KB", BEDROCK_KB_ID=KB, BEDROCK_KB_EXTRACTION_ROLE_ARN="")
+        mod = gb(INPUT_MODE="BEDROCK_KB", BEDROCK_KB_ID=KB, BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN="")
         runtime, agent = _s3_fixture()
         fake_session = MagicMock()
         fake_session.client.side_effect = lambda name: {"bedrock-agent-runtime": runtime, "bedrock-agent": agent}[name]

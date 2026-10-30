@@ -1051,7 +1051,7 @@ Create via `POST /namespaces/{namespaceId}/sources` with `sourceType:
       "knowledgeBaseId": "ABCDEFGHIJ",
       "dataSourceIds": ["KLMNOPQRST"],
       "region": "eu-central-1",
-      "extractionRoleArn": "arn:aws:iam::<kb-account>:role/coa-datasource-access-knowledge-hub"
+      "crossAccountRoleArn": "arn:aws:iam::<kb-account>:role/coa-datasource-access-knowledge-hub"
     }
   }
 }
@@ -1062,7 +1062,7 @@ Create via `POST /namespaces/{namespaceId}/sources` with `sourceType:
 | `knowledgeBaseId` | ✅ | The Knowledge Base id (10 characters). |
 | `dataSourceIds` | | Restrict extraction to these data sources; all of them when omitted. |
 | `region` | | Region of the Knowledge Base; the deployment's region when omitted. |
-| `extractionRoleArn` | ✅ | Role in the Knowledge Base's account that the KG build assumes to read it. |
+| `crossAccountRoleArn` | | Role in the Knowledge Base's account, named `{prefix}datasource-access-*`, that the KG build (extraction) and serve (per-user retrieval, entitlement probe) assume with the namespace's External ID. Omit when the Knowledge Base is in the deployment's own account. Same member as on Glue, JDBC and Databricks sources. |
 
 The extraction role follows the same rules as a database source's
 cross-account role: its name must start with `{prefix}-datasource-access-` at

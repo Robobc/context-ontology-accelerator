@@ -428,7 +428,7 @@ def _make_kb_cfg(role_arn=_KB_ROLE, kb_id="71RZ44THV5", data_source_ids=None, re
     cfg.knowledge_base_id = kb_id
     cfg.data_source_ids = data_source_ids
     cfg.region = region
-    cfg.extraction_role_arn = role_arn
+    cfg.cross_account_role_arn = role_arn
     return cfg
 
 
@@ -475,7 +475,7 @@ class TestCreateBedrockManagedKbSource:
         assert "sourceBucketArn" not in item and "roleArn" not in item
         assert item["bedrockKnowledgeBaseConfiguration"] == {
             "knowledgeBaseId": "71RZ44THV5",
-            "extractionRoleArn": _KB_ROLE,
+            "crossAccountRoleArn": _KB_ROLE,
             "dataSourceIds": ["EFLHLJMXMZ", "IBFPVKIBZU"],
             "region": "eu-central-1",
         }
@@ -490,7 +490,7 @@ class TestCreateBedrockManagedKbSource:
         assert status == 201
         assert dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"] == {
             "knowledgeBaseId": "71RZ44THV5",
-            "extractionRoleArn": _KB_ROLE,
+            "crossAccountRoleArn": _KB_ROLE,
         }
 
     @pytest.mark.parametrize(
@@ -532,7 +532,19 @@ class TestCreateBedrockManagedKbSource:
         )
         status, _, dao, _ = self._create(req)
         assert status == 201
-        assert dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"]["extractionRoleArn"] == _KB_ROLE
+        assert dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"]["crossAccountRoleArn"] == _KB_ROLE
+
+    @pytest.mark.parametrize("role", [None, "", "   "])
+    def test_same_account_kb_needs_no_role(self, role):
+        """Like Glue's crossAccountRoleArn: absent means the KB is in this account and
+        the task/serve roles read it directly, so nothing is stored or validated."""
+        req = _make_doc_req(name="kb-local", s3_prefixes=[], upload_id=None, bedrock_kb=_make_kb_cfg(role_arn=role))
+        status, _, dao, sqs = self._create(req)
+        assert status == 201
+        stored = dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"]
+        assert stored == {"knowledgeBaseId": "71RZ44THV5"}
+        job = json.loads(sqs.send_message.call_args.kwargs["MessageBody"])
+        assert "crossAccountRoleArn" not in job["bedrock_kb"]
 
 
 # ===================================================================

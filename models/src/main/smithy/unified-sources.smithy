@@ -952,13 +952,14 @@ list BedrockDataSourceIdList {
 /// Bedrock Managed Knowledge Base config. Required for the BEDROCK_MANAGED_KB
 /// sub-type and selects it; mutually exclusive with sourceBucketArn/uploadId.
 ///
-/// Extraction reads the KB under extractionRoleArn, a role in the KB owner's
-/// account named `{prefix}-datasource-access-*` that trusts this deployment's
-/// KG-build task role with the namespace's External ID (shown on GetNamespace),
-/// and grants `bedrock:Retrieve`, `bedrock:GetDocumentContent` and
-/// `bedrock:ListKnowledgeBaseDocuments` on the knowledge base. That role sees
-/// every document — extraction has to — which is why the registration binds it
-/// to the namespace with the External ID exactly as database sources do.
+/// The knowledge base is reached exactly as a database source's warehouse is:
+/// through crossAccountRoleArn when the KB lives in another account, directly
+/// under this deployment's own roles when it lives in this one. Both the
+/// KG-build task (extraction, which must see every document) and the serve
+/// runtime (per-user Retrieve and the document entitlement probe) assume that
+/// one role with the namespace's External ID, so the KB owner decides which
+/// namespaces may read which knowledge bases by what the role's trust policy
+/// and permissions name — the same governance lever as for Databricks.
 structure BedrockKnowledgeBaseConfiguration {
     @required
     knowledgeBaseId: BedrockKnowledgeBaseId
@@ -969,8 +970,24 @@ structure BedrockKnowledgeBaseConfiguration {
     /// Region of the knowledge base. This deployment's region when omitted.
     region: AwsRegion
 
-    @required
-    extractionRoleArn: IamRoleArn
+    /// Customer-owned IAM role in the KB owner's account. Same member name,
+    /// type and meaning as on GlueConfiguration, JdbcConfiguration and
+    /// DatabricksSqlWarehouseConfiguration. Optional like Glue's: omit it when
+    /// the KB is in this deployment's account.
+    ///
+    /// Its trust policy must name this deployment's KG-build task role AND
+    /// serve runtime role, conditioned on NamespaceDetail$datasourceExternalId
+    /// (one role can trust several namespaces by listing their External IDs).
+    /// Its permission policy grants `bedrock:Retrieve`,
+    /// `bedrock:GetDocumentContent` and `bedrock:ListKnowledgeBaseDocuments` on
+    /// the knowledge bases it chooses to expose.
+    ///
+    /// The role MUST be named {RESOURCE_PREFIX}datasource-access-*, because this
+    /// deployment's assume grant is scoped to that prefix, so registration
+    /// rejects any other name explicitly rather than letting it fail as an
+    /// opaque AccessDenied at first scan. There is no externalId member: the
+    /// value is derived from the namespace.
+    crossAccountRoleArn: IamRoleArn
 }
 
 /// Type of per-file preprocessing issue.

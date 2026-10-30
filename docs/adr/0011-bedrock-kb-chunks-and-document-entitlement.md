@@ -106,7 +106,7 @@ queried without a caller would return the extraction role's view to everyone.
 
 **Registration (`BEDROCK_MANAGED_KB` sub-type).** A document source carrying
 `bedrockKnowledgeBaseConfiguration` (`knowledgeBaseId`, optional
-`dataSourceIds`/`region`, `extractionRoleArn`) is the sub-type; it is mutually
+`dataSourceIds`/`region`, `crossAccountRoleArn`) is the sub-type; it is mutually
 exclusive with `sourceBucketArn`, `uploadId`, `s3Prefixes` and `roleArn`, and
 stages no files (`s3Prefixes` is stored empty). The extraction role is a
 customer-supplied cross-account role and is treated exactly like the Databricks
@@ -168,7 +168,7 @@ kg-build task environment (`packages/sources/.../kg_build/graph_build.py`):
 | `BEDROCK_KB_ID` | required when `INPUT_MODE=BEDROCK_KB` | Knowledge Base to read. |
 | `BEDROCK_KB_DATA_SOURCE_IDS` | empty = all | Comma-separated data source ids to scope the scan. |
 | `BEDROCK_KB_REGION` | `AWS_REGION` | Region of the Knowledge Base. |
-| `BEDROCK_KB_EXTRACTION_ROLE_ARN` | empty = task role | `{prefix}-datasource-access-*` role assumed with the namespace ExternalId for the Bedrock calls; must see every document. |
+| `BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN` | empty = task role | `{prefix}-datasource-access-*` role assumed with the namespace ExternalId for the Bedrock calls; must see every document. |
 | `RESOURCE_PREFIX` | set by CDK | The `{prefix}-{env}-` the ExternalId is derived from; the task fails the assume rather than default it. |
 | `CHUNK_SIZE` | toolkit default | Ignored under `BEDROCK_KB` (logged). |
 

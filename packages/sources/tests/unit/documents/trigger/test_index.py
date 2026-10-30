@@ -362,7 +362,7 @@ class TestBedrockKbFlattening:
             "bedrock_kb_id",
             "bedrock_kb_data_source_ids",
             "bedrock_kb_region",
-            "bedrock_kb_extraction_role_arn",
+            "bedrock_kb_cross_account_role_arn",
         ):
             assert call_input[key] == ""
 
@@ -375,7 +375,7 @@ class TestBedrockKbFlattening:
                 "knowledgeBaseId": "71RZ44THV5",
                 "dataSourceIds": ["EFLHLJMXMZ", "IBFPVKIBZU"],
                 "region": "eu-central-1",
-                "extractionRoleArn": "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb",
+                "crossAccountRoleArn": "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb",
             },
         }
         index.handler(_make_event(_make_record(body)), None)
@@ -385,14 +385,14 @@ class TestBedrockKbFlattening:
         assert call_input["bedrock_kb_id"] == "71RZ44THV5"
         assert call_input["bedrock_kb_data_source_ids"] == "EFLHLJMXMZ,IBFPVKIBZU"
         assert call_input["bedrock_kb_region"] == "eu-central-1"
-        assert call_input["bedrock_kb_extraction_role_arn"].endswith("coa-dev-datasource-access-kb")
+        assert call_input["bedrock_kb_cross_account_role_arn"].endswith("coa-dev-datasource-access-kb")
         # Every flat value is a string: ECS env values must be.
         flat_keys = [k for k in call_input if k.startswith(("bedrock_kb_", "input_", "vector_"))]
         assert all(isinstance(call_input[k], str) for k in flat_keys)
 
     @patch.object(index, "sfn_client")
     def test_kb_message_without_optional_fields(self, mock_sfn):
-        body = {**_VALID_BODY, "bedrock_kb": {"knowledgeBaseId": "71RZ44THV5", "extractionRoleArn": "arn:x"}}
+        body = {**_VALID_BODY, "bedrock_kb": {"knowledgeBaseId": "71RZ44THV5", "crossAccountRoleArn": "arn:x"}}
         index.handler(_make_event(_make_record(body)), None)
         call_input = json.loads(mock_sfn.start_execution.call_args.kwargs["input"])
         assert call_input["input_mode"] == "BEDROCK_KB"
