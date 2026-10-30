@@ -926,9 +926,10 @@ describe("SourcesStack", () => {
       // doc KG-build task each get their own grant. The sources API's validates
       // the customer's credential-access role at source-create, so a broken trust
       // policy is reported at submit rather than at first scan. The KG-build task
-      // assumes a BEDROCK_MANAGED_KB source's extraction role. The Databricks
-      // connector holds the same shape from its own CDK app, which this template
-      // does not contain (it is deployed separately, on purpose).
+      // assumes a BEDROCK_MANAGED_KB source's cross-account role for extraction;
+      // the serve runtime holds the same shape for per-user retrieval from its own
+      // stack (serve-stack.test.ts), as does the Databricks connector from its own
+      // CDK app. Neither is in this template (deployed separately, on purpose).
       expect(assumeStatements().length).toBe(4);
     });
 
@@ -2052,7 +2053,9 @@ describe("SourcesStack", () => {
     // built when it triggered the job; they never re-read the namespace.
     const flatDefinitions = (): string =>
       JSON.stringify(
-        Object.values(template.findResources("AWS::StepFunctions::StateMachine")),
+        Object.values(
+          template.findResources("AWS::StepFunctions::StateMachine"),
+        ),
       ).replace(/\\+"/g, '"');
 
     it("passes NAMESPACE_LANGUAGE from $.namespaceLanguage to the enrichment task", () => {
@@ -2779,7 +2782,10 @@ describe("SourcesStack", () => {
       expect(machine).toBeDefined();
       // DefinitionString is an Fn::Join over literal fragments and refs; the
       // literal fragments carry every state name, path and env binding.
-      return { states: JSON.parse(reassemble(machine.Properties.DefinitionString)).States };
+      return {
+        states: JSON.parse(reassemble(machine.Properties.DefinitionString))
+          .States,
+      };
     };
     // Join the Fn::Join fragments with a placeholder for each ref so the
     // definition parses as JSON. Refs always sit inside a quoted string value
@@ -2830,7 +2836,8 @@ describe("SourcesStack", () => {
           BEDROCK_KB_ID: "$.bedrock_kb_id",
           BEDROCK_KB_DATA_SOURCE_IDS: "$.bedrock_kb_data_source_ids",
           BEDROCK_KB_REGION: "$.bedrock_kb_region",
-          BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN: "$.bedrock_kb_cross_account_role_arn",
+          BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN:
+            "$.bedrock_kb_cross_account_role_arn",
           // Unchanged: the staging path's prefix binding is shared.
           STAGING_PREFIX: "$.preprocessResult.staging_prefix",
         }),

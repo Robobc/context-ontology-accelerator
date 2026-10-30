@@ -91,7 +91,11 @@ export interface CustomDomainConfig {
 // ── SSM Config (JSON-serializable) ─────────────────────────────────
 
 export interface OuterAgentSourceTargetConfig {
-  readonly kind: "MANAGED_KB" | "GOVERNED_QUERY" | "EXTERNAL_GRAPH" | "COA_GRAPH";
+  readonly kind:
+    | "MANAGED_KB"
+    | "GOVERNED_QUERY"
+    | "EXTERNAL_GRAPH"
+    | "COA_GRAPH";
   /** Administrator-bound managed KBs. Required only for MANAGED_KB. */
   readonly knowledgeBaseIds?: string[];
   /** Maximum AgenticRetrieveStream planning/retrieval iterations. @default 5 */
@@ -181,22 +185,6 @@ export interface SsmConfig {
   /** Model IDs allowed for per-request override via options.modelId.
    *  When omitted or empty, any valid model ID is accepted. */
   readonly allowedOverrideModels?: string[];
-
-  /** Default passage-retrieval backend. OpenSearch remains the ontology vector
-   * index even when this is BEDROCK_KB. */
-  readonly documentRetrieverBackend?: "opensearch" | "bedrock-kb";
-
-  /** Default existing Bedrock Knowledge Base id for document retrieval. */
-  readonly bedrockKnowledgeBaseId?: string;
-
-  /** Namespace id to existing Bedrock Knowledge Base id overrides. */
-  readonly bedrockKnowledgeBaseByNamespace?: Record<string, string>;
-
-  /** Fork: Bedrock KB search mode, `vector` (default) or `managed` (Managed KB). */
-  readonly bedrockKbSearchMode?: "vector" | "managed";
-
-  /** Fork: pass the caller as `userContext` on every KB Retrieve (document ACL). */
-  readonly bedrockKbEnforceUserContext?: boolean;
 
   /** Generation backend; embeddings remain on Bedrock in both modes. */
   readonly generationBackend?: "bedrock" | "portkey";
