@@ -452,6 +452,7 @@ In addition to full query resolution:
 - `POST /namespaces/{namespaceId}/translate` — translate NL to SPARQL without executing (**TranslateSPARQL**)
 - `POST /namespaces/{namespaceId}/kb/search` — semantic search across the knowledge base (**KBSearch**)
 - `POST /namespaces/{namespaceId}/graph/traverse` — traverse the knowledge graph (**GraphTraverse**)
+- `POST /namespaces/{namespaceId}/graph/expand` — expand the document graph from Knowledge Base chunks you retrieved (**GraphExpandChunks**)
 - `GET /namespaces/{namespaceId}/schema` — discover the queryable schema (**DescribeSchema**)
 
 `KBSearch` identifies a document in two different ways. `sourceDocumentId` is
@@ -469,6 +470,22 @@ of at most 2048 characters. `maxDepth` (1–5, default 2; depths above 2 current
 traverse 2 hops) and `maxResults` (1–1000 entities, default 100) are applied.
 `direction` and `relationshipFilter` are validated but not yet applied:
 traversal currently follows every relationship in both directions.
+
+`GraphExpandChunks` is for an agent that runs Bedrock `Retrieve` against the
+namespace's Knowledge Base itself, as the user, and wants the graph context
+around the chunks it got back. Pass the hits' `_chunk_id` values (1 to 50) and
+receive the facts and entities extracted from those chunks plus, through the
+entities, the facts and chunks of other documents that mention them.
+Everything returned lies in documents the caller may read: each seed chunk is
+checked against the Knowledge Base under the caller's identity (a chunk the
+caller could not have retrieved is not expanded), and `scope` bounds the rest:
+`SEED_DOCUMENTS` (default) stays inside the seed chunks' documents;
+`ENTITLED_DOCUMENTS` follows shared entities into every document the Knowledge
+Base shows the caller. Withheld items come back as counts only, never named,
+so a count does not confirm that a document exists. Chunk text is never
+returned; fetch it from the Knowledge Base, and pass `relatedChunks` ids back
+to keep navigating. `maxFacts` (1–500, default 100) bounds the facts. A
+namespace whose documents do not come from a Knowledge Base expands nothing.
 
 `DescribeSchema` returns the classes and properties currently loaded into the namespace's ontologies, so a caller can find the entities available before writing a query. Optional query params: `includeProperties` (default `true`) to include class properties, and `maxResults` (1–1000) to cap the class count. The same schema is what the MCP `describe_schema` tool exposes — REST and MCP read from one source.
 

@@ -12,12 +12,15 @@ There are two ways agents connect, both under the same delegated-auth model:
 
 - **MCP (Model Context Protocol)** — the primary path for AI agents (Claude,
   Amazon Q, IDE integrations like Kiro/Claude Desktop/Cursor). Ontology
-  Accelerator runs an MCP server on AgentCore Runtime exposing 7 tools —
+  Accelerator runs an MCP server on AgentCore Runtime exposing nine tools —
   `list_metrics` and `describe_schema` for discovery, plus `query`,
-  `semantic_execution_plan`, `translate_sparql`, `rag_retrieval`, and
-  `graph_traversal` for execution. Use `semantic_execution_plan` when a domain
-  agent must retain source-native authorization/execution; use `query` for the
-  turnkey COA path.
+  `semantic_execution_plan`, `translate_sparql`, `translate_sql`,
+  `rag_retrieval`, `graph_traversal` and `expand_chunks` for execution. Use
+  `semantic_execution_plan` when a domain agent must retain source-native
+  authorization/execution; use `query` for the turnkey COA path. An agent that
+  retrieves from a Bedrock Knowledge Base itself, as the user, uses
+  `expand_chunks` to get COA's graph context around the chunks it got back,
+  confined to the documents that user may read.
   See "MCP Server Setup" below.
 - **Direct REST API** — for scripts, notebooks, or custom automation that
   isn't going through an MCP client. Uses the same endpoints the web app

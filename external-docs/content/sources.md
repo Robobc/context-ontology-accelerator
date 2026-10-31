@@ -1226,6 +1226,12 @@ What differs from file sources:
 - A namespace holds **one** Knowledge Base source. Registering a second makes
   the namespace's queries fail (`DataSourceUnavailableError`) until one is
   deleted, rather than silently serving one and hiding the other.
+- An agent that runs `Retrieve` against the Knowledge Base itself can pivot
+  into the namespace's graph with `expand_chunks` (MCP) or
+  `POST .../graph/expand` (REST), passing the `_chunk_id` values it got back.
+  COA verifies each seed chunk against the Knowledge Base under the caller's
+  identity before expanding and confines the result to that caller's
+  documents; withheld items are counted, never named.
 - Ontology induction over such a source yields **classes and properties
   only**. Individuals and topics are never emitted, and class descriptions are
   built from the schema, not from sampled entities, because the lexical graph

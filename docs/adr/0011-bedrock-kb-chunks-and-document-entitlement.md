@@ -10,7 +10,10 @@ real Managed Knowledge Base with an ACL data source on 2026-10-31 (results
 under Verification); the per-user entitlement held end to end for one real
 user in two ACL states. Supersedes the last consequence of ADR 0003
 ("per-document ACL-to-retrieval-filter translation is not yet wired") and
-ADR 0003's deployment-level namespace-to-Knowledge-Base routing.
+ADR 0003's deployment-level namespace-to-Knowledge-Base routing. Extended by
+ADR 0012, which adds the entry point for an agent that runs `Retrieve` itself
+and hands COA the chunk ids to expand (the query path below stays the console's
+COA-driven one).
 
 The guiding decision, taken with the customer on 2026-10-30: **a Knowledge
 Base is a source like any other.** It is registered, trusted, scanned,
