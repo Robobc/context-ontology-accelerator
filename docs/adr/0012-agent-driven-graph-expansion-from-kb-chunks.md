@@ -5,9 +5,11 @@
 Proposed. Implemented on `feature/bedrock-kb-chunk-source` in three layers,
 each committed on its own: serve (`GraphExpandChunks` on the data-layer
 surface, `tier3/chunk_expander.py`), the REST edge and the `expand_chunks` MCP
-tool, and the outer agent's chaining of `Retrieve` into `expand_chunks`. Not
-yet deployed; the deployed-run record is to be added under Verification once
-it has run against the ACL fixture of ADR 0011.
+tool, and the outer agent's chaining of `Retrieve` into `expand_chunks`.
+Deployed to syngenta-eba-dev and run against the ACL fixture of ADR 0011 on
+2026-10-31 (results under Verification): the pivot and the seed verification
+held through MCP and REST for one real user; the cross-document cut and the
+outer-agent leg are not yet exercised, for the reasons recorded there.
 
 Extends ADR 0011 (a Knowledge Base is a source like any other; the graph is
 gated per document) and ADR 0008 (the source-native outer agent). Changes
@@ -194,9 +196,50 @@ Unit coverage, all local, at the three commits:
   `OFF`, no chunk ids, and an unavailable graph each leave the plan as the
   only COA call and the trace says why.
 
-Deployed run against the ADR 0011 fixture (`fmkb-acl-test`, Knowledge Base
-`71RZ44THV5`): not yet done. The observation to record is the two-reader case
-from the ADR 0011 run, driven through the outer agent: the finance reader's
-answer carries the budget facts and a `withheld` count for HR; the HR reader's
-answer carries the manager and a `withheld` count for finance; neither answer
-names the other's document.
+### Deployed run, 2026-10-31 (syngenta-eba-dev, `f4c4e5c`)
+
+Stacks `api` (route + authorizer), `data-layer`, `serve`, `mcp`, `outer-agent`
+redeployed; serve v16 and mcp v7 share one image, outer-agent v6, all `READY`;
+`POST /namespaces/{id}/graph/expand` present on the REST API; a fresh MCP
+session lists nine tools including `expand_chunks`. Fixture: namespace
+`fmkb-acl-test`, Knowledge Base `71RZ44THV5` (eu-central-1), data source
+`22THWQRHON` holding three documents (finance: alice + the caller below; HR and
+shared: bob only; extractor: all three). The probe
+(`sim/ppm/onboarding/coa_expand_probe.sh`) plays the agent: `Retrieve` on the
+Knowledge Base as the signed-in user, then `expand_chunks` over MCP (and
+`/graph/expand` over REST) with that user's Entra token.
+
+| Step | Caller `catalanoroberto@outlook.com` (finance only) | Result |
+|---|---|---|
+| `Retrieve` as the user, scoped to the data source | 1 chunk: `budget-2026.txt` (`Ukhx_oqNv…`) | the KB's own ACL; the unscoped KB also returns copies from other, un-ACL'd data sources, which is why serve scopes every call (ADR 0011) |
+| `expand_chunks`, `SEED_DOCUMENTS` | 5 entities (Zafrilon, Crop Protection R&D, Seed Treatment Trials, Digital Agronomy, Reserve Buffer), 14 facts, all from `budget-2026.txt`; related 0; withheld 0/0/0; 1.1 s | hop 1 as designed |
+| `expand_chunks`, `ENTITLED_DOCUMENTS` | identical | the three fixture documents share no entity (each was written with its own invented term), so hop 2 has nothing to reach and no probe fires |
+| forged seed: the HR chunk id (`bnSIaOW…`), which this caller cannot retrieve | entities 0, facts 0; `withheld.seedChunks` 1 | the trust rule: the caller's claim is not believed |
+| forged seed: the shared handbook chunk id | same | |
+| unknown chunk id | same shape, 90 ms | unknown and denied are one count |
+| REST `/graph/expand`, real seed | HTTP 200, 5 entities, 14 facts | same gate behind the API Gateway authorizer |
+| REST, `chunkIds: ["bad id;DROP"]`, `scope: EVERYTHING` | HTTP 400 naming `chunkIds`, value not echoed | contract enforced at the edge |
+| REST, forged HR seed | HTTP 200, facts 0, `withheld.seedChunks` 1 | |
+
+What the run did not cover, and why:
+
+- **The second reader and the cross-document cut.** The fixture's documents
+  share no entity, so hop 2 is empty for every reader and the
+  `SEED_DOCUMENTS` / `ENTITLED_DOCUMENTS` difference cannot show. The
+  two-reader contrast is visible only through the forged-seed rows above. To
+  observe the cut itself the fixture needs one entity named in two documents
+  (for example a project named in both the finance and the HR file); that is
+  an S3 upload the agent's host policy blocks (a human runs the fixture
+  script), a Knowledge Base sync and a COA rescan. The second reader is the
+  same person with a changed ACL, as in the ADR 0011 run, since one Entra
+  identity is available.
+- **The outer-agent leg.** Deployed (v6, `COA_GRAPH_EXPANSION_SCOPE` set) but
+  not exercised against this fixture: the runtime's Bedrock client and IAM
+  grant are bound to the stack Region (us-east-1) while the test Knowledge
+  Base is in eu-central-1, its `SOURCE_TARGETS_JSON` names only the
+  `KSNNIPAVKJ` target, and the namespace's integration profile names only a
+  `COA_GRAPH` target the agent has no adapter for. Running it needs a
+  per-target `region` in the outer agent's target config (code), the fixture
+  Knowledge Base added to the deployment's targets (SSM), and the namespace
+  profile pointed at that target (control plane). None of these is a defect of
+  the operation; they are the cost of a fixture in another Region.
