@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import replace
 from typing import Any
 
 from pydantic import ValidationError
 
-from .evidence import assemble_context
+from .evidence import assemble_context, graph_evidence, knowledge_base_chunk_ids
 from .identity import TrustedIdentity
 from .mcp_client import McpJsonClient, McpToolError
 from .plan_models import SemanticExecutionPlan
@@ -19,6 +20,10 @@ from .source_adapters import SourceAdapterRegistry, SourceExecutionError
 
 class UnresolvedSemanticPlanError(ValueError):
     """Raised when COA does not return a resolved, executable plan."""
+
+
+# ``ExpansionScope`` in serve.smithy.
+GRAPH_EXPANSION_SCOPES = frozenset({"SEED_DOCUMENTS", "ENTITLED_DOCUMENTS"})
 
 
 class OuterAgent:
@@ -33,14 +38,26 @@ class OuterAgent:
         max_evidence_items: int = 12,
         max_evidence_characters: int = 30000,
         mcp_client_factory=McpJsonClient,
+        graph_expansion_scope: str | None = "SEED_DOCUMENTS",
+        graph_expansion_max_facts: int = 100,
     ):
-        """Configure downstream endpoints and deterministic evidence limits."""
+        """Configure downstream endpoints and deterministic evidence limits.
+
+        ``graph_expansion_scope`` (ADR 0012) turns the Knowledge Base hits into
+        COA graph context: after the sources run, the ``_chunk_id`` of every
+        ``MANAGED_KB`` evidence item is handed to COA ``expand_chunks`` and the
+        facts it returns join the evidence. ``None`` disables the step.
+        """
         self._coa_url = coa_mcp_url
         self._source_adapters = source_adapters
         self._generator = generator
         self._max_evidence_items = max_evidence_items
         self._max_evidence_characters = max_evidence_characters
         self._mcp_client_factory = mcp_client_factory
+        if graph_expansion_scope is not None and graph_expansion_scope not in GRAPH_EXPANSION_SCOPES:
+            raise ValueError(f"graph_expansion_scope must be one of {sorted(GRAPH_EXPANSION_SCOPES)} or None")
+        self._graph_expansion_scope = graph_expansion_scope
+        self._graph_expansion_max_facts = graph_expansion_max_facts
 
     async def resolve(
         self,
@@ -90,6 +107,57 @@ class OuterAgent:
             # answer from a partial set when one source cannot enforce/execute.
             raise
         evidence = [item for batch in batches for item in batch]
+        trace.append(
+            _step(
+                "sources.execute",
+                source_started,
+                "resolved",
+                {"items": len(evidence)},
+            )
+        )
+
+        # ADR 0012: pivot the Knowledge Base hits into COA's graph. The seeds
+        # are the chunks the Knowledge Base just showed THIS user; COA verifies
+        # that again under the same token and returns only facts from documents
+        # the user may read. Enrichment, not a plan directive: when COA cannot
+        # expand, the answer is generated from the source evidence alone and
+        # the trace says so.
+        seeds = knowledge_base_chunk_ids(evidence) if self._graph_expansion_scope else []
+        if seeds:
+            expand_started = time.perf_counter()
+            try:
+                raw_expansion = await self._mcp(identity, self._coa_url).call_tool(
+                    "expand_chunks",
+                    {
+                        "chunkIds": seeds,
+                        "namespaceId": namespace,
+                        "scope": self._graph_expansion_scope,
+                        "maxFacts": self._graph_expansion_max_facts,
+                    },
+                )
+            except McpToolError as exc:
+                trace.append(_step("coa.expand_chunks", expand_started, "unavailable", {"error": str(exc)[:200]}))
+            else:
+                expansion = _find_mapping_with(raw_expansion, "facts") or {}
+                graph_items = graph_evidence(expansion)
+                evidence.extend(graph_items)
+                withheld = expansion.get("withheld")
+                related = expansion.get("relatedChunks")
+                trace.append(
+                    _step(
+                        "coa.expand_chunks",
+                        expand_started,
+                        "resolved",
+                        {
+                            "seeds": len(seeds),
+                            "scope": self._graph_expansion_scope,
+                            "facts": len(graph_items),
+                            "relatedChunks": len(related) if isinstance(related, list) else 0,
+                            "withheld": withheld if isinstance(withheld, dict) else {},
+                        },
+                    )
+                )
+
         evidence = [replace(item, evidence_id=f"E{index}") for index, item in enumerate(evidence, start=1)]
         context, selected = assemble_context(
             evidence,
@@ -97,12 +165,7 @@ class OuterAgent:
             max_characters=self._max_evidence_characters,
         )
         trace.append(
-            _step(
-                "sources.execute",
-                source_started,
-                "resolved",
-                {"items": len(evidence), "selected": len(selected)},
-            )
+            _step("evidence.assemble", source_started, "resolved", {"items": len(evidence), "selected": len(selected)})
         )
 
         if not selected:
@@ -146,6 +209,28 @@ def _find_value(value: Any, key: str) -> Any:
     elif isinstance(value, list):
         for nested in value:
             found = _find_value(nested, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_mapping_with(value: Any, key: str) -> dict[str, Any] | None:
+    """The first dict (searching depth-first, parsing JSON strings) that carries ``key``."""
+    if isinstance(value, str):
+        try:
+            return _find_mapping_with(json.loads(value), key)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(value, dict):
+        if key in value:
+            return value
+        for nested in value.values():
+            found = _find_mapping_with(nested, key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_mapping_with(nested, key)
             if found is not None:
                 return found
     return None

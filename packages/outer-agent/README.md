@@ -12,8 +12,9 @@ The public request accepts only `query` and `namespace`. AgentCore validates the
 2. Strictly validate plan version, status, ontology version, directives, and read-only invariant.
 3. Resolve directive target IDs against `SOURCE_TARGETS_JSON` supplied by the deployment.
 4. Execute all required source directives or stop.
-5. Bound and label evidence.
-6. Call Portkey once. The response is accepted only when every claim cites evidence IDs present in the authorized context.
+5. Pivot into COA's graph (ADR 0012): hand the `_chunk_id` of every `MANAGED_KB` hit to COA MCP `expand_chunks` with the same JWT; the facts COA returns (only from documents the user may read, verified again by COA) join the evidence as `COA_GRAPH` items. If COA cannot expand, the trace records `coa.expand_chunks: unavailable` and the answer is generated from the source evidence alone.
+6. Bound and label evidence.
+7. Call Portkey once. The response is accepted only when every claim cites evidence IDs present in the authorized context.
 
 ## Source adapters
 
@@ -41,6 +42,8 @@ Deployments register source-owned implementations by target kind through the pub
 ```
 
 The namespace profile names only these logical IDs. Unknown fields, endpoints, credentials, malformed IDs, kind mismatches, and unavailable adapter kinds fail closed.
+
+`COA_GRAPH_EXPANSION_SCOPE` controls step 5: `SEED_DOCUMENTS` (default) keeps the graph context inside the documents the Knowledge Base returned; `ENTITLED_DOCUMENTS` lets COA follow shared entities into every document the Knowledge Base shows the caller (one entitlement probe per document reached); `OFF` disables the step. `COA_GRAPH_EXPANSION_MAX_FACTS` (default 100, max 500) bounds the facts asked for.
 
 ## Validation
 

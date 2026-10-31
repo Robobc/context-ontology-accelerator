@@ -49,3 +49,37 @@ def test_rejects_endpoint_or_credential_fields(monkeypatch):
     )
     with pytest.raises(ValueError, match="unsupported fields"):
         OuterAgentConfig.from_env()
+
+
+# ── ADR 0012: graph expansion knobs ──────────────────────────────────────────
+
+
+def test_graph_expansion_defaults_to_seed_documents(monkeypatch):
+    _set_required(monkeypatch)
+    config = OuterAgentConfig.from_env()
+    assert config.graph_expansion_scope == "SEED_DOCUMENTS"
+    assert config.graph_expansion_max_facts == 100
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("ENTITLED_DOCUMENTS", "ENTITLED_DOCUMENTS"), ("off", None), (" OFF ", None)]
+)
+def test_graph_expansion_scope_is_read_from_env(monkeypatch, raw, expected):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("COA_GRAPH_EXPANSION_SCOPE", raw)
+    assert OuterAgentConfig.from_env().graph_expansion_scope == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("COA_GRAPH_EXPANSION_SCOPE", "EVERYTHING"),
+        ("COA_GRAPH_EXPANSION_MAX_FACTS", "0"),
+        ("COA_GRAPH_EXPANSION_MAX_FACTS", "501"),
+    ],
+)
+def test_graph_expansion_knobs_outside_the_contract_are_rejected(monkeypatch, name, value):
+    _set_required(monkeypatch)
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        OuterAgentConfig.from_env()

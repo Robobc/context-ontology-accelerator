@@ -94,6 +94,9 @@ class OuterAgentConfig:
     group_claim_name: str
     max_evidence_items: int
     max_evidence_characters: int
+    # ADR 0012: ``SEED_DOCUMENTS`` | ``ENTITLED_DOCUMENTS`` | ``None`` (off).
+    graph_expansion_scope: str | None
+    graph_expansion_max_facts: int
 
     @classmethod
     def from_env(cls) -> OuterAgentConfig:
@@ -116,4 +119,29 @@ class OuterAgentConfig:
             group_claim_name=os.environ.get("GROUP_CLAIM_NAME", "groups"),
             max_evidence_items=_positive_int("MAX_EVIDENCE_ITEMS", 12),
             max_evidence_characters=_positive_int("MAX_EVIDENCE_CHARACTERS", 30000),
+            graph_expansion_scope=_graph_expansion_scope(),
+            graph_expansion_max_facts=_bounded_int("COA_GRAPH_EXPANSION_MAX_FACTS", 100, 1, 500),
         )
+
+
+_GRAPH_EXPANSION_SCOPES = {"SEED_DOCUMENTS", "ENTITLED_DOCUMENTS"}
+_GRAPH_EXPANSION_OFF = "OFF"
+
+
+def _graph_expansion_scope() -> str | None:
+    """``COA_GRAPH_EXPANSION_SCOPE``: a serve.smithy ``ExpansionScope`` value or ``OFF``; default ``SEED_DOCUMENTS``."""
+    raw = os.environ.get("COA_GRAPH_EXPANSION_SCOPE", "SEED_DOCUMENTS").strip().upper()
+    if raw == _GRAPH_EXPANSION_OFF:
+        return None
+    if raw not in _GRAPH_EXPANSION_SCOPES:
+        raise ValueError(
+            f"COA_GRAPH_EXPANSION_SCOPE must be one of {sorted(_GRAPH_EXPANSION_SCOPES)} or {_GRAPH_EXPANSION_OFF}"
+        )
+    return raw
+
+
+def _bounded_int(name: str, default: int, lo: int, hi: int) -> int:
+    value = _positive_int(name, default)
+    if not lo <= value <= hi:
+        raise ValueError(f"{name} must be an integer from {lo} to {hi}")
+    return value

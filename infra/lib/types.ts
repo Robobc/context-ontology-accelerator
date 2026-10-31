@@ -107,6 +107,13 @@ export interface OuterAgentConfig {
   readonly sourceTargets: Record<string, OuterAgentSourceTargetConfig>;
   readonly maxEvidenceItems?: number;
   readonly maxEvidenceCharacters?: number;
+  /**
+   * ADR 0012: how far COA `expand_chunks` may reach from the Knowledge Base
+   * chunks the agent retrieved. `SEED_DOCUMENTS` (default) stays within the
+   * documents of those chunks; `ENTITLED_DOCUMENTS` follows entities into
+   * every document the Knowledge Base shows the caller; `OFF` skips the step.
+   */
+  readonly graphExpansionScope?: "SEED_DOCUMENTS" | "ENTITLED_DOCUMENTS" | "OFF";
 }
 
 /**

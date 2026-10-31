@@ -125,6 +125,10 @@ export class OuterAgentStack extends SCLStack {
         MAX_EVIDENCE_CHARACTERS: String(
           props.config.maxEvidenceCharacters ?? 30000,
         ),
+        // ADR 0012: after the Knowledge Base returns the user's chunks, the
+        // agent asks COA expand_chunks for the graph context around them.
+        COA_GRAPH_EXPANSION_SCOPE:
+          props.config.graphExpansionScope ?? "SEED_DOCUMENTS",
       },
       description:
         "Semantic planning, source-native retrieval, evidence assembly, and final generation",

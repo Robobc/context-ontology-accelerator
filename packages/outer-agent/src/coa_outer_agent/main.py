@@ -61,6 +61,8 @@ def _get_agent() -> OuterAgent:
         max_evidence_items=_config.max_evidence_items,
         max_evidence_characters=_config.max_evidence_characters,
         mcp_client_factory=McpJsonClient,
+        graph_expansion_scope=_config.graph_expansion_scope,
+        graph_expansion_max_facts=_config.graph_expansion_max_facts,
     )
     return _agent
 
