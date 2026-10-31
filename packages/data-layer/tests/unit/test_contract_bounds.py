@@ -45,6 +45,7 @@ _SERVE_SMITHY = Path(__file__).resolve().parents[4] / "models" / "src" / "main" 
 _QUERY = "/namespaces/{namespaceId}/query"
 _KB_SEARCH = "/namespaces/{namespaceId}/kb/search"
 _GRAPH_TRAVERSE = "/namespaces/{namespaceId}/graph/traverse"
+_GRAPH_EXPAND = "/namespaces/{namespaceId}/graph/expand"
 _SCHEMA = "/namespaces/{namespaceId}/schema"
 
 
@@ -179,6 +180,12 @@ class TestBoundsMatchSmithyModel:
                 contract.GRAPH_TRAVERSE_MAX_RESULTS_MIN,
                 contract.GRAPH_TRAVERSE_MAX_RESULTS_MAX,
             ),
+            (
+                "GraphExpandChunks",
+                "maxFacts",
+                contract.GRAPH_EXPAND_MAX_FACTS_MIN,
+                contract.GRAPH_EXPAND_MAX_FACTS_MAX,
+            ),
         ],
     )
     def test_range_matches(self, operation, member, lo, hi):
@@ -230,6 +237,30 @@ class TestBoundsMatchSmithyModel:
             c.GRAPH_TRAVERSE_MAX_RESULTS_MIN <= c.GRAPH_TRAVERSE_MAX_RESULTS_DEFAULT <= c.GRAPH_TRAVERSE_MAX_RESULTS_MAX
         )
         assert c.KB_SEARCH_TOP_K_MIN <= c.KB_SEARCH_TOP_K_DEFAULT <= c.KB_SEARCH_TOP_K_MAX
+
+    def test_graph_expand_chunk_ids_match(self):
+        """Fork (ADR 0012): list and member bounds plus the id pattern mirror the model."""
+        text = _model()
+        target, _ = _input_members(text, "GraphExpandChunks")["chunkIds"]
+        assert _bound(_shape_traits(text, target), "length") == (
+            contract.GRAPH_EXPAND_CHUNK_IDS_MIN_ITEMS,
+            contract.GRAPH_EXPAND_CHUNK_IDS_MAX_ITEMS,
+        )
+        id_shape = _list_member_target(text, target)
+        traits = _shape_traits(text, id_shape)
+        assert _bound(traits, "length") == (
+            contract.GRAPH_EXPAND_CHUNK_ID_MIN_LENGTH,
+            contract.GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH,
+        )
+        assert _pattern(traits) == contract.GRAPH_EXPAND_CHUNK_ID_PATTERN
+
+    def test_graph_expand_scope_enum_matches(self):
+        text = _model()
+        target, _ = _input_members(text, "GraphExpandChunks")["scope"]
+        assert _enum_values(text, target) == contract.GRAPH_EXPAND_SCOPES
+        assert contract.GRAPH_EXPAND_SCOPE_DEFAULT in contract.GRAPH_EXPAND_SCOPES
+        c = contract
+        assert c.GRAPH_EXPAND_MAX_FACTS_MIN <= c.GRAPH_EXPAND_MAX_FACTS_DEFAULT <= c.GRAPH_EXPAND_MAX_FACTS_MAX
 
     def test_dimension_bounds_match(self):
         text = _model()
@@ -556,6 +587,88 @@ def test_graph_traverse_accepts_boundary_values(body):
     assert result["statusCode"] == 200
     options = invoke.call_args.args[0]["options"]
     assert {k: options[k] for k in body} == body
+
+
+# ── GraphExpandChunks (fork, ADR 0012) ───────────────────────────────────────
+
+
+_CHUNK = "Ukhx_oqNvL1daHhnb6mECpjhUOdYSeMwVnj6HnadKZw"
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("chunkIds", "abc"),
+        ("chunkIds", []),
+        ("chunkIds", [7]),
+        ("chunkIds", [""]),
+        ("chunkIds", ["a" * 257]),
+        ("chunkIds", ["has space"]),
+        ("chunkIds", ["semi;colon"]),
+        ("chunkIds", ["x" + _SENTINEL + "'"]),
+        ("chunkIds", [_CHUNK] * 51),
+        ("scope", "EVERYTHING"),
+        ("scope", ["SEED_DOCUMENTS"]),
+        ("scope", _SENTINEL),
+        ("maxFacts", 0),
+        ("maxFacts", 501),
+        ("maxFacts", "100"),
+        ("maxFacts", 10.0),
+        ("maxFacts", True),
+    ],
+)
+def test_graph_expand_rejects_out_of_contract_member(field, bad):
+    body = {"chunkIds": [_CHUNK], field: bad}
+    result, invoke = _post(_GRAPH_EXPAND, body)
+    assert result["statusCode"] == 400
+    assert field in json.loads(result["body"])["message"]
+    assert _SENTINEL not in result["body"]
+    invoke.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [{}, {"chunkIds": None}, {"scope": "SEED_DOCUMENTS"}])
+def test_graph_expand_requires_chunk_ids(body):
+    result, invoke = _post(_GRAPH_EXPAND, body)
+    assert result["statusCode"] == 400
+    assert json.loads(result["body"])["message"] == "Missing required field: chunkIds"
+    invoke.assert_not_called()
+
+
+def test_graph_expand_applies_defaults_and_forwards_the_action():
+    result, invoke = _post(_GRAPH_EXPAND, {"chunkIds": [_CHUNK]})
+    assert result["statusCode"] == 200
+    payload = invoke.call_args.args[0]
+    assert payload["action"] == "graphExpand"
+    assert payload["options"] == {
+        "chunkIds": [_CHUNK],
+        "scope": contract.GRAPH_EXPAND_SCOPE_DEFAULT,
+        "maxFacts": contract.GRAPH_EXPAND_MAX_FACTS_DEFAULT,
+    }
+
+
+def test_graph_expand_accepts_boundary_values():
+    body = {"chunkIds": ["a" * 256] * 50, "scope": "ENTITLED_DOCUMENTS", "maxFacts": 500}
+    result, invoke = _post(_GRAPH_EXPAND, body)
+    assert result["statusCode"] == 200
+    assert invoke.call_args.args[0]["options"] == body
+
+
+def test_graph_expand_returns_the_contract_members_and_nothing_else():
+    upstream = {
+        "statusCode": 200,
+        "entities": [{"id": "e1", "label": "Project Atlas", "class": "Project"}],
+        "facts": [],
+        "relatedChunks": [],
+        "withheld": {"seedChunks": 0, "facts": 1, "relatedChunks": 1},
+        "trace": [{"step": "t3.graph_expand", "status": "success"}],
+        "requestId": "r-1",
+        "debugInternal": "never forwarded",
+    }
+    with patch.object(handler_module, "_invoke_context_manager", return_value=upstream):
+        result = handler(_event("POST", _GRAPH_EXPAND, {"chunkIds": [_CHUNK]}), None)
+    body = json.loads(result["body"])
+    assert set(body) == {"entities", "facts", "relatedChunks", "withheld", "trace"}
+    assert body["withheld"] == {"seedChunks": 0, "facts": 1, "relatedChunks": 1}
 
 
 def test_graph_traverse_empty_relationship_filter_is_not_forwarded():

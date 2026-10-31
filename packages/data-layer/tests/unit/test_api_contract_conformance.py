@@ -61,6 +61,7 @@ _CHECKED_OPERATIONS = (
     "TranslateSPARQL",
     "KBSearch",
     "GraphTraverse",
+    "GraphExpandChunks",
     "DescribeSchema",
     "PlanSemanticExecution",
 )

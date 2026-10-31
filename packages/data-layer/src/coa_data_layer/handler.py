@@ -521,6 +521,67 @@ def _handle_graph_traverse(namespace: str, event: dict) -> dict:
     )
 
 
+def _parse_graph_expand_options(body: dict) -> dict[str, Any]:
+    """Validate the ``GraphExpandChunks`` members and return the CM ``options`` map.
+
+    ``chunkIds`` is required; ``scope`` and ``maxFacts`` take their documented
+    defaults when absent.
+
+    Raises:
+        ValueError: ``chunkIds`` is absent.
+        ContractViolation: A member has the wrong type or is out of range.
+    """
+    chunk_ids = body.get("chunkIds")
+    if chunk_ids is None:
+        raise ValueError("Missing required field: chunkIds")
+    scope = body.get("scope")
+    max_facts = body.get("maxFacts")
+    return {
+        "chunkIds": contract.require_chunk_ids(chunk_ids),
+        "scope": contract.GRAPH_EXPAND_SCOPE_DEFAULT
+        if scope is None
+        else contract.require_enum(scope, "scope", contract.GRAPH_EXPAND_SCOPES),
+        "maxFacts": contract.GRAPH_EXPAND_MAX_FACTS_DEFAULT
+        if max_facts is None
+        else contract.require_int(
+            max_facts, "maxFacts", contract.GRAPH_EXPAND_MAX_FACTS_MIN, contract.GRAPH_EXPAND_MAX_FACTS_MAX
+        ),
+    }
+
+
+def _handle_graph_expand(namespace: str, event: dict) -> dict:
+    """Fork (ADR 0012): expand the lexical graph from Knowledge Base chunks the caller retrieved."""
+    body = _parse_body(event) or {}
+    try:
+        options = _parse_graph_expand_options(body)
+    except ValueError as exc:  # includes ContractViolation
+        return _error_response(400, str(exc))
+
+    payload = {
+        "action": "graphExpand",
+        "namespace": namespace,
+        "profile": _get_caller_profile(event),
+        "options": options,
+    }
+
+    result = _invoke_context_manager(payload, _get_bearer_token(event))
+
+    status_code = result.get("statusCode", 200)
+    if status_code >= 400:
+        return _error_response(status_code, result.get("message", "Internal error"))
+
+    return _success_response(
+        200,
+        {
+            "entities": result.get("entities", []),
+            "facts": result.get("facts", []),
+            "relatedChunks": result.get("relatedChunks", []),
+            "withheld": result.get("withheld", {"seedChunks": 0, "facts": 0, "relatedChunks": 0}),
+            "trace": result.get("trace", []),
+        },
+    )
+
+
 def _handle_describe_schema(namespace: str, event: dict) -> dict:
     """Describe the namespace's queryable schema.
 
@@ -671,6 +732,7 @@ _ROUTE_MAP = {
     ("POST", "/namespaces/{namespaceId}/translate"): _handle_translate,
     ("POST", "/namespaces/{namespaceId}/kb/search"): _handle_kb_search,
     ("POST", "/namespaces/{namespaceId}/graph/traverse"): _handle_graph_traverse,
+    ("POST", "/namespaces/{namespaceId}/graph/expand"): _handle_graph_expand,
     ("GET", "/namespaces/{namespaceId}/schema"): _handle_describe_schema,
 }
 

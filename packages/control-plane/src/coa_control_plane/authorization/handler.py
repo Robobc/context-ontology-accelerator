@@ -638,6 +638,13 @@ _PATH_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
     "/namespaces/{namespaceId}/graph/traverse": {
         "POST": ("traverseGraph", "Namespace"),
     },
+    # Fork (ADR 0012): GraphExpandChunks returns document-derived facts and
+    # entities reached from Knowledge Base chunks, the same class of content as
+    # kb/search, so it is gated under ``searchDocuments`` (as MCP ``expand_chunks``
+    # is), not under the ontology-graph ``traverseGraph`` action.
+    "/namespaces/{namespaceId}/graph/expand": {
+        "POST": ("searchDocuments", "Namespace"),
+    },
     # DescribeSchema is a read of the namespace's ontology summary — gated
     # under the same ``viewNamespace`` action as the other schema/ontology
     # reads, matching MCP's ``describe_schema`` Cedar action mapping.

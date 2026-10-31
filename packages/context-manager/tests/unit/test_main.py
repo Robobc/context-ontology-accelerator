@@ -1706,7 +1706,7 @@ class TestHandleGraphExpandOptions:
         assert enum, "ExpansionScope enum not found in serve.smithy"
         from coa_serve.tier3.chunk_expander import SCOPES
 
-        assert set(re.findall(r"^\s{4}([A-Z_]+)$", enum.group(1), re.M)) == SCOPES
+        assert set(re.findall(r'=\s*"([^"]+)"', enum.group(1))) == SCOPES
 
 
 @pytest.mark.unit

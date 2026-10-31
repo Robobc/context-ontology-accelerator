@@ -777,6 +777,78 @@ async def graph_traversal(
         raise
 
 
+@mcp.tool()
+async def expand_chunks(
+    ctx: Context,
+    chunkIds: list[str],
+    namespaceId: str,
+    scope: str = "SEED_DOCUMENTS",
+    maxFacts: int = 100,
+) -> str:
+    """Expand the document knowledge graph from Knowledge Base chunks you already retrieved.
+
+    Use after calling Bedrock ``Retrieve`` on the namespace's Knowledge Base
+    yourself (as the user): pass the ``_chunk_id`` values of the hits and get
+    back the facts and entities extracted from those chunks plus, through the
+    entities, the facts and chunks of other documents that mention them.
+    Everything returned lies in documents the caller may read; seed chunks the
+    caller could not have retrieved are not expanded. Withheld items come back
+    as counts only. Chunk text is never returned: fetch it from the Knowledge
+    Base, and pass ``relatedChunks`` ids back here to keep navigating.
+
+    Input keys match the Smithy ``GraphExpandChunks`` operation on the
+    data-layer surface (``POST /namespaces/{namespaceId}/graph/expand``).
+
+    Args:
+        ctx: MCP request context carrying the caller's identity and bearer token.
+        chunkIds: Knowledge Base ``_chunk_id`` values to expand from (1 to 50).
+        namespaceId: The namespace whose graph to expand within.
+        scope: ``SEED_DOCUMENTS`` (default) keeps the expansion inside the seed
+            chunks' documents; ``ENTITLED_DOCUMENTS`` reaches every document the
+            Knowledge Base shows the caller.
+        maxFacts: Maximum facts to return (default 100, max 500).
+
+    Returns:
+        JSON ``{entities, facts, relatedChunks, withheld, trace}`` matching the
+        Smithy ``GraphExpandChunks`` output.
+    """
+    start = time.perf_counter()
+    caller = None
+    try:
+        caller, profile = await _resolve_caller_and_profile(
+            namespaceId, ctx, cedar_action=TOOL_CEDAR_ACTION["expand_chunks"]
+        )
+        token = _extract_bearer_token(ctx)
+        cm = _get_cm_client()
+        result = await execution.execute_expand_chunks(
+            cm,
+            chunkIds,
+            namespaceId,
+            profile,
+            token,
+            scope=scope,
+            max_facts=maxFacts,
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        if caller:
+            log_tool_invocation(caller, "expand_chunks", namespaceId, duration_ms=duration_ms)
+        return json.dumps(result, indent=2, default=str)
+
+    except (ClaimsExtractionError, GrantResolutionError) as e:
+        if caller:
+            log_tool_invocation(caller, "expand_chunks", namespaceId, success=False, error=str(e))
+        raise ValueError(str(e)) from e
+    except ContextManagerError as e:
+        if caller:
+            log_tool_invocation(caller, "expand_chunks", namespaceId, success=False, error=str(e))
+        raise ValueError(f"CM {e.status_code}: {e.message}") from e
+    except Exception as e:
+        logger.error("expand_chunks_failed", namespace=namespaceId, error=str(e))
+        if caller:
+            log_tool_invocation(caller, "expand_chunks", namespaceId, success=False, error=str(e))
+        raise
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -797,6 +869,7 @@ if __name__ == "__main__":
             "translate_sql",
             "rag_retrieval",
             "graph_traversal",
+            "expand_chunks",
         ],
     )
 

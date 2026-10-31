@@ -624,6 +624,53 @@ class TestGraphTraversalTool:
 
 
 @pytest.mark.unit
+class TestExpandChunksTool:
+    """Fork (ADR 0012): expand_chunks is a thin, identity-preserving adapter over graphExpand."""
+
+    @pytest.mark.asyncio
+    async def test_forwards_smithy_members_and_serializes_the_result(self, monkeypatch, _local_dev):
+        captured: dict = {}
+
+        async def fake_delegate(cm, chunk_ids, ns, profile, token, **kwargs):
+            captured.update(kwargs, chunk_ids=chunk_ids, ns=ns)
+            return {"entities": [], "facts": [{"id": "f1"}], "relatedChunks": [], "withheld": {"facts": 1}}
+
+        monkeypatch.setattr(server.execution, "execute_expand_chunks", fake_delegate)
+        out = await server.expand_chunks(None, ["c1", "c2"], "sales", scope="ENTITLED_DOCUMENTS", maxFacts=7)
+        parsed = json.loads(out)
+        assert parsed["facts"] == [{"id": "f1"}] and parsed["withheld"] == {"facts": 1}
+        assert captured == {"chunk_ids": ["c1", "c2"], "ns": "sales", "scope": "ENTITLED_DOCUMENTS", "max_facts": 7}
+
+    @pytest.mark.asyncio
+    async def test_defaults_match_the_contract(self, monkeypatch, _local_dev):
+        captured: dict = {}
+
+        async def fake_delegate(cm, chunk_ids, ns, profile, token, **kwargs):
+            captured.update(kwargs)
+            return {"entities": [], "facts": [], "relatedChunks": [], "withheld": {}}
+
+        monkeypatch.setattr(server.execution, "execute_expand_chunks", fake_delegate)
+        await server.expand_chunks(None, ["c1"], "sales")
+        assert captured == {"scope": "SEED_DOCUMENTS", "max_facts": 100}
+
+    @pytest.mark.asyncio
+    async def test_cm_error_keeps_its_status(self, monkeypatch, _local_dev):
+        from coa_mcp.tools.execution import ContextManagerError
+
+        async def denied(*args, **kwargs):
+            raise ContextManagerError(403, "denied")
+
+        monkeypatch.setattr(server.execution, "execute_expand_chunks", denied)
+        with pytest.raises(ValueError, match="CM 403"):
+            await server.expand_chunks(None, ["c1"], "sales")
+
+    def test_gated_under_search_documents(self):
+        from coa_mcp.auth.grant_resolver import TOOL_CEDAR_ACTION
+
+        assert TOOL_CEDAR_ACTION["expand_chunks"] == TOOL_CEDAR_ACTION["rag_retrieval"] == "searchDocuments"
+
+
+@pytest.mark.unit
 class TestQueryToolStrategySchema:
     """``strategy`` must reach the published tool schema as an optional enum.
 

@@ -1108,12 +1108,12 @@ string KnowledgeBaseChunkId
 /// Which documents a chunk expansion may reach.
 enum ExpansionScope {
     /// Only the documents the seed chunks belong to.
-    SEED_DOCUMENTS
+    SEED_DOCUMENTS = "SEED_DOCUMENTS"
 
     /// Every document the Knowledge Base shows the caller. Each document
     /// reached is checked against the Knowledge Base under the caller's
     /// identity before anything from it is returned.
-    ENTITLED_DOCUMENTS
+    ENTITLED_DOCUMENTS = "ENTITLED_DOCUMENTS"
 }
 
 /// An entity extracted from documents, as stored in the lexical graph.
