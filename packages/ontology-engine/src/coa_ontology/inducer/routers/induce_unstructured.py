@@ -64,6 +64,7 @@ from coa_ontology.inducer.unstructured.services.iri_resolver import (
     InMemoryIRIResolver,
 )
 from coa_ontology.inducer.unstructured.services.pipeline import (
+    AccessControlledGraphError,  # noqa: F401 — re-exported; the fork's guard moved into the pipeline
     UnstructuredInductionPipeline,
 )
 from coa_ontology.inducer.unstructured.stores.na_lexical import (
@@ -261,10 +262,6 @@ def get_job(job_id: str, namespace: str) -> dict:
 # ── Worker thread ───────────────────────────────────────────────────────
 
 
-class AccessControlledGraphError(RuntimeError):
-    """The lexical graph belongs to a per-user document store; induction over it is refused (fork)."""
-
-
 def _build_lexical_store(graph_arn: str, region: str, app_config: dict, namespace: str = ""):
     """Build the appropriate lexical store for the given graph endpoint.
 
@@ -373,13 +370,11 @@ def _run_unstructured_induction(
 
         lexical_store = _build_lexical_store(body.graph_arn, region, app_config, namespace=ns)
         # Fork (ADR 0011): a graph built from an access-controlled Knowledge Base
-        # must not be promoted into a namespace-wide ontology. Checked before any
-        # LLM work; the job fails and no proposal is created.
-        if lexical_store.has_access_controlled_sources():
-            raise AccessControlledGraphError(
-                "unstructured induction is not available for a namespace whose documents live in an "
-                "access-controlled Knowledge Base (graph sources are Knowledge Base documents); see ADR 0011"
-            )
+        # holds every document's entities under one tenant while the Knowledge
+        # Base authorizes per user. Such a graph is induced T-Box only: the
+        # pipeline refuses individuals and instance-fed descriptions and skips
+        # topics. Probed once here, before any LLM work.
+        tbox_only = lexical_store.has_access_controlled_sources()
         from coa_common import DEFAULT_EMBED_MODEL_ID
 
         embedding_client = BedrockEmbeddingClient(
@@ -477,6 +472,7 @@ def _run_unstructured_induction(
             grounding_ontology_ids=resolved_grounding_ids,
             grounding_mode=body.grounding_mode,
             rerank_max_tokens=body.rerank_max_tokens,
+            tbox_only=tbox_only,
             lexical_store=lexical_store,
             embedding_client=embedding_client,
             description_llm=description_llm,

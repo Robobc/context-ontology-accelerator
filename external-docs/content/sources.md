@@ -1226,8 +1226,13 @@ What differs from file sources:
 - A namespace holds **one** Knowledge Base source. Registering a second makes
   the namespace's queries fail (`DataSourceUnavailableError`) until one is
   deleted, rather than silently serving one and hiding the other.
-- Such a source produces no ontology induction proposal: an ontology induced
-  over an access-controlled corpus would leak its structure to every reader.
+- Ontology induction over such a source yields **classes and properties
+  only**. Individuals and topics are never emitted, and class descriptions are
+  built from the schema, not from sampled entities, because the lexical graph
+  holds every document's entities while the Knowledge Base authorizes per
+  user. The proposal records this in its warnings. A request that asks for
+  individuals or an instance-fed description mode fails rather than being
+  silently downgraded.
 - **RescanSource** re-extracts from the Knowledge Base; run it after a
   Knowledge Base sync that changed documents.
 

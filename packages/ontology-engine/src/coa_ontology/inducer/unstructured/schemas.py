@@ -153,6 +153,15 @@ class UnstructuredInductionConfig(BaseModel):
     # the request; mirrors the structured path). Default 1000.
     rerank_max_tokens: int = 1000
 
+    # Fork (ADR 0011). Set by the router, never by the request, when the lexical
+    # graph was built from an access-controlled Knowledge Base
+    # (``LexicalGraphStore.has_access_controlled_sources``). The graph holds
+    # every document's entities under one tenant while the Knowledge Base
+    # authorizes per user, so the pipeline emits schema terms only: Rule 2
+    # (individuals) and instance-fed descriptions are refused, Rule 5 (topics,
+    # LLM summaries of chunk text) is skipped.
+    tbox_only: bool = False
+
     # Already-constructed dependency-injected clients
     lexical_store: LexicalGraphStore
     embedding_client: BedrockEmbeddingClient

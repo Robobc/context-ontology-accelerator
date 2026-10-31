@@ -180,14 +180,38 @@ caller.
 and the non-agentic `KnowledgeRetriever` is **not** gated per document. It is
 authorized at namespace level by the Cedar admission gate, and it holds induced
 classes and properties, not document text. That holds only as long as
-unstructured induction is **not** run over a per-user Knowledge Base's lexical
-graph (it would promote document-derived individuals into the ontology). This
-is enforced, not assumed: the graph declares its own origin (KB documents are
-`__Source__` nodes with ids `aws:<tenant>:doc:*`, tested with the shared
-`KB_SOURCE_ID_CYPHER_PREDICATE`), and the unstructured induction worker checks
-`LexicalGraphStore.has_access_controlled_sources()` right after connecting; a
-positive answer fails the job before any LLM call and creates no proposal
-(`AccessControlledGraphError`). No second source of truth is needed.
+unstructured induction over a per-user Knowledge Base's lexical graph emits
+**schema terms only**. The graph holds every document's entities under one
+tenant while the Knowledge Base authorizes per user, so the inducer's
+entity-level shapes would leak restricted documents into every reader's view:
+Rule 2 (`owl:NamedIndividual` from sampled entities), Rule 5 (`skos:Concept`
+from `__Topic__` nodes, which are LLM summaries of chunk text) and the
+`label_only` / `instance` description modes (sampled entity labels sent to the
+LLM, listed verbatim by the fallback). Rules 1, 3 and 4 and the `schema`
+description mode emit class names, predicate names, domains, XSD ranges and
+observation counts; they read entity data but write none of it.
+
+This is enforced, not assumed: the graph declares its own origin (KB documents
+are `__Source__` nodes with ids `aws:<tenant>:doc:*`, tested with the shared
+`KB_SOURCE_ID_CYPHER_PREDICATE`), and the unstructured induction worker probes
+`LexicalGraphStore.has_access_controlled_sources()` right after connecting and
+threads the answer into the pipeline config as `tbox_only`. On such a run the
+pipeline does not read topics and skips Rule 5, and it refuses (not downgrades)
+a request for `include_individuals=true` or a description mode other than
+`schema` before any store or LLM call (`AccessControlledGraphError`; the job
+fails, no proposal). The web console's request already uses those defaults, so
+the Ontology page's "induce" button works on a Knowledge Base namespace and
+yields classes and properties. Every T-Box-only proposal carries the
+`TBOX_ONLY_WARNING` string in its `warnings` so the steward knows which shapes
+were withheld. Class and predicate *names* still come from the corpus; a class
+named after a restricted subject reveals that the subject exists. That is the
+same exposure as the serve-side ontology graph already accepts at namespace
+level, and it is the line this ADR draws: terms yes, instances no.
+
+Not built, kept as the next lever if Syngenta wants individuals or topics for
+deep-reasoning steering: an induction identity (`inductionUserId`, defaulting
+to `extractionUserId`) with a provenance filter in the lexical stores, so the
+full rule set runs over exactly the documents that identity may read.
 
 **Registration (`BEDROCK_MANAGED_KB` sub-type).** A document source carrying
 `bedrockKnowledgeBaseConfiguration` (`knowledgeBaseId`, optional
@@ -360,7 +384,9 @@ tests; all four are closed above and the end-to-end file was the response to
 the last one. A second independent review of the fixed state returned no
 blocker and two majors, both closed: entity labels the lexical path aggregates
 from a node's `entity_contexts` (which span documents) are now gated per entity,
-and the induction suppression is enforced in the worker rather than asserted.
+and the induction restriction is enforced in the pipeline rather than asserted
+(first as a blanket refusal in the worker, then narrowed to T-Box only once the
+per-rule leak surface was traced; see the ontology-graph paragraph above).
 It also had the agentic `vector_search` tool gated (the OpenSearch chunk index
 holds every document's text under `VECTOR_STORE_MODE=AOSS`), a `chunk_window`
 end-to-end control added, and the `main.py` wiring pinned statically.

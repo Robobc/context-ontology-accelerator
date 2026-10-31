@@ -45,7 +45,9 @@ from coa_ontology.inducer.unstructured.services.iri_resolver import (
     InMemoryIRIResolver,
 )
 from coa_ontology.inducer.unstructured.services.pipeline import (
+    TBOX_ONLY_WARNING,
     V0_WARNINGS,
+    AccessControlledGraphError,
     UnstructuredInductionPipeline,
     _build_embedding_text,
     _build_grounding_inputs,
@@ -284,6 +286,8 @@ def _make_config(
     grounding_service=None,
     grounding_ontology_ids: list[str] | None = None,
     grounding_mode: str = "ENHANCED",
+    tbox_only: bool = False,
+    lexical_store: MagicMock | None = None,
 ) -> UnstructuredInductionConfig:
     """Build a fully-populated :class:`UnstructuredInductionConfig`.
 
@@ -295,6 +299,7 @@ def _make_config(
     unchanged.
     """
     return UnstructuredInductionConfig(
+        tbox_only=tbox_only,
         namespace=_NS,
         name=_NAME,
         ontology_uri_prefix=_ONTOLOGY_URI_PREFIX,
@@ -306,7 +311,7 @@ def _make_config(
         entailment_enabled=entailment_enabled,
         grounding_ontology_ids=grounding_ontology_ids,
         grounding_mode=grounding_mode,
-        lexical_store=_make_lexical_store(),
+        lexical_store=lexical_store if lexical_store is not None else _make_lexical_store(),
         embedding_client=_make_embedding_client(),
         description_llm=_make_description_llm(),
         iri_resolver=_make_iri_resolver(),
@@ -659,6 +664,71 @@ class TestIncludeIndividualsGate:
         """
         report = UnstructuredInductionPipeline().run(_make_config(include_individuals=True))
         assert report.individualCount > 0
+
+
+# ── T-Box-only runs over access-controlled graphs (fork, ADR 0011) ──────
+
+
+class TestTboxOnly:
+    """``tbox_only=True`` keeps classes and properties, drops every entity-level shape."""
+
+    def test_default_run_keeps_the_full_rule_set(self):
+        """Counterweight: an ordinary graph still reads topics and emits concepts."""
+        store = _make_lexical_store()
+        report = UnstructuredInductionPipeline().run(_make_config(lexical_store=store))
+        store.get_topics.assert_called_once()
+        assert report.conceptCount == len(_topics())
+        assert TBOX_ONLY_WARNING not in report.warnings
+
+    def test_topics_are_neither_read_nor_emitted(self):
+        store = _make_lexical_store()
+        report = UnstructuredInductionPipeline().run(_make_config(tbox_only=True, lexical_store=store))
+        store.get_topics.assert_not_called()
+        assert report.conceptCount == 0
+        assert "skos:Concept" not in report.turtle
+        assert "skos:ConceptScheme" not in report.turtle
+
+    def test_classes_and_properties_survive(self):
+        """The schema half is unchanged: same class count as the full run, properties present."""
+        full = UnstructuredInductionPipeline().run(_make_config())
+        tbox = UnstructuredInductionPipeline().run(_make_config(tbox_only=True))
+        assert tbox.tboxClassCount == full.tboxClassCount
+        assert tbox.objectPropertyCount == full.objectPropertyCount
+        assert tbox.individualCount == 0
+        assert "owl:NamedIndividual" not in tbox.turtle
+
+    def test_no_entity_surface_form_reaches_the_turtle(self):
+        """Every sampled entity label is absent from the serialized ontology."""
+        report = UnstructuredInductionPipeline().run(_make_config(tbox_only=True))
+        for cls in _CLASSES:
+            for entity in _entities_for(cls.value):
+                assert entity.value not in report.turtle, entity.value
+        for topic in _topics():
+            assert topic.value not in report.turtle, topic.value
+
+    def test_warning_recorded_for_the_steward(self):
+        report = UnstructuredInductionPipeline().run(_make_config(tbox_only=True))
+        assert TBOX_ONLY_WARNING in report.warnings
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"include_individuals": True},
+            {"description_mode": "label_only"},
+            {"description_mode": "instance"},
+        ],
+    )
+    def test_entity_level_requests_are_refused_before_any_work(self, kwargs):
+        """Refused, not downgraded: the store is never queried and FAILED is emitted once."""
+        store = _make_lexical_store()
+        recorder = StageRecorder()
+        with pytest.raises(AccessControlledGraphError, match="ADR 0011"):
+            UnstructuredInductionPipeline().run(
+                _make_config(tbox_only=True, lexical_store=store, **kwargs),
+                on_status=recorder,
+            )
+        store.get_graph_schema.assert_not_called()
+        assert recorder.stages == [InductionJobStatus.FAILED]
 
 
 # ── Foundational grounding (Phase 1) ────────────────────────────────────

@@ -214,7 +214,8 @@ class LexicalGraphStore(Protocol):
         graph holds every document's facts under one tenant while the Knowledge
         Base authorizes per user; promoting its entities into a namespace-wide
         ontology would leak restricted documents into every caller's view, so
-        induction over it is refused (fork, ADR 0011).
+        induction over it runs T-Box only (``UnstructuredInductionConfig.tbox_only``;
+        fork, ADR 0011).
         """
         ...
 
