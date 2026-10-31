@@ -160,6 +160,20 @@ class DocumentEntitlementGate:
         rows = await asyncio.wait_for(asyncio.shield(fut), timeout=self._query_timeout_s)
         return list(rows or [])
 
+    async def run_query(self, template: str, namespace: str, params: dict, **extra_labels: str) -> list[dict]:
+        """Run a lexical-graph openCypher ``template`` for ``namespace`` on the gate's store.
+
+        ``template`` is formatted with this namespace's tenant-qualified node
+        labels (``chunk_label``, ``source_label``, ``entity_label``,
+        ``statement_label``) plus any ``extra_labels`` (a bare toolkit label such
+        as ``__Fact__`` is formatted the same way); every value is passed as a
+        query parameter. Shared with readers that walk the same graph (the chunk
+        expander) so one store and one timeout serve them all.
+        """
+        labels = self._labels(namespace)
+        labels.update({name: self._label(namespace, value) for name, value in extra_labels.items()})
+        return await self._run_cypher(template.format(**labels), params)
+
     # ── entitlement ─────────────────────────────────────────────────────
 
     def _cache_put(self, key: tuple[str, str, str], entitled: bool, expiry: float) -> None:

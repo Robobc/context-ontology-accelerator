@@ -41,6 +41,7 @@ service DataLayerService {
         TranslateSPARQL
         KBSearch
         GraphTraverse
+        GraphExpandChunks
         DescribeSchema
     ]
     errors: [

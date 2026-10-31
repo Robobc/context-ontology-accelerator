@@ -83,6 +83,7 @@ if TYPE_CHECKING:
     from .clients.sources_registry import SourcesRegistry
     from .deadline import Deadline
     from .tier3.bedrock_kb_retriever import KbRetrieverCache
+    from .tier3.chunk_expander import ChunkExpander
 
 from .trace import TraceCollector
 
@@ -100,6 +101,8 @@ _sources_registry: SourcesRegistry | None = None
 # Fork: per-user retrievers for registered BEDROCK_MANAGED_KB sources, one per
 # (namespace, KB, region, role); the admission gate binds one to each request.
 _kb_retrievers: KbRetrieverCache | None = None
+# Fork (ADR 0012): agent-driven lexical-graph expansion from Knowledge Base chunk ids.
+_chunk_expander: ChunkExpander | None = None
 _nl_to_sparql: NLtoSPARQL | None = None
 _nl_to_sql_strategy: NLtoSQLStrategy | None = None
 _init_lock = asyncio.Lock()
@@ -142,7 +145,7 @@ _NAMESPACE_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 async def _ensure_initialized():
     """Initialize config and orchestrator on first request."""
     global _config, _guardrail_provider, _orchestrator, _session_manager
-    global _session_metadata, _sources_registry, _kb_retrievers, _nl_to_sparql, _nl_to_sql_strategy
+    global _session_metadata, _sources_registry, _kb_retrievers, _chunk_expander, _nl_to_sparql, _nl_to_sql_strategy
     if _orchestrator is not None:
         return
     async with _init_lock:
@@ -335,6 +338,13 @@ async def _ensure_initialized():
             _graph_store_uri(config.neptune_endpoint) if config.neptune_endpoint else "", document_retriever
         )
         lexical_retriever = build_lexical_retriever(config, entitlement_gate=entitlement_gate)
+        # Fork (ADR 0012): the agent-driven chunk expansion shares the gate's store
+        # and entitlement cache; without a gate no per-user KB can be served, so
+        # the action reports itself unconfigured rather than walking ungated.
+        if entitlement_gate is not None:
+            from .tier3.chunk_expander import ChunkExpander
+
+            _chunk_expander = ChunkExpander(entitlement_gate)
 
         knowledge_retriever = KnowledgeRetriever(
             vector_retriever=document_retriever,
@@ -1060,6 +1070,106 @@ async def _handle_graph_traverse(payload: dict, request_id: str) -> dict:
     }
 
 
+# GraphExpandChunks bounds and defaults, per ``serve.smithy``. Enforced here as
+# well as at the REST edge because the MCP server invokes this action directly.
+GRAPH_EXPAND_MAX_CHUNK_IDS = 50  # KnowledgeBaseChunkIdList @length(min: 1, max: 50)
+GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH = 256  # KnowledgeBaseChunkId @length(min: 1, max: 256)
+_GRAPH_EXPAND_CHUNK_ID = re.compile(r"^[A-Za-z0-9._-]+$")  # KnowledgeBaseChunkId @pattern
+GRAPH_EXPAND_MIN_FACTS = 1
+GRAPH_EXPAND_MAX_FACTS = 500  # maxFacts @range(min: 1, max: 500)
+GRAPH_EXPAND_DEFAULT_FACTS = 100
+
+
+def _parse_graph_expand_options(options: Any) -> tuple[list[str], str, int]:
+    """Return ``(chunk_ids, scope, max_facts)`` from graphExpand ``options``, or raise ``ValueError``.
+
+    Out-of-range values are rejected, not clamped. Messages name the field,
+    never the rejected value (a chunk id is a Knowledge Base identifier the
+    caller already holds, but it is still not echoed).
+    """
+    from .tier3.chunk_expander import SCOPE_SEED_DOCUMENTS, SCOPES
+
+    if options is None:
+        options = {}
+    if not isinstance(options, dict):
+        raise ValueError("Invalid options. Must be an object.")
+    chunk_ids = options.get("chunkIds")
+    if (
+        not isinstance(chunk_ids, list)
+        or not 1 <= len(chunk_ids) <= GRAPH_EXPAND_MAX_CHUNK_IDS
+        or not all(
+            isinstance(c, str) and 1 <= len(c) <= GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH and _GRAPH_EXPAND_CHUNK_ID.match(c)
+            for c in chunk_ids
+        )
+    ):
+        raise ValueError(
+            f"Invalid chunkIds. Must be a list of 1 to {GRAPH_EXPAND_MAX_CHUNK_IDS} Knowledge Base chunk ids "
+            f"of 1 to {GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH} characters from [A-Za-z0-9._-]."
+        )
+    scope = options.get("scope")
+    if scope is None:
+        scope = SCOPE_SEED_DOCUMENTS
+    elif not isinstance(scope, str) or scope not in SCOPES:
+        raise ValueError(f"Invalid scope. Must be one of: {', '.join(sorted(SCOPES))}.")
+    max_facts = options.get("maxFacts")
+    max_facts = (
+        GRAPH_EXPAND_DEFAULT_FACTS
+        if max_facts is None
+        else _require_int(max_facts, "maxFacts", GRAPH_EXPAND_MIN_FACTS, GRAPH_EXPAND_MAX_FACTS)
+    )
+    return list(chunk_ids), scope, max_facts
+
+
+async def _handle_graph_expand(payload: dict, request_id: str) -> dict:
+    """Fork (ADR 0012): expand the lexical graph from Knowledge Base chunks the caller retrieved.
+
+    Runs after the namespace admission gate, so the caller is published
+    (``set_request_user``) and the namespace's Knowledge Base source is bound;
+    the expander checks every seed chunk's document against that source under
+    the caller's identity before walking anything.
+    """
+    namespace = payload.get("namespace", "")
+    if not namespace:
+        return _error(400, "namespace required", request_id)
+    try:
+        chunk_ids, scope, max_facts = _parse_graph_expand_options(payload.get("options"))
+    except ValueError as exc:
+        return _error(400, str(exc), request_id)
+
+    if _chunk_expander is None:
+        raise DataSourceUnavailableError("Chunk expansion not configured")
+
+    trace = TraceCollector()
+    try:
+        t0 = time.perf_counter()
+        result = await asyncio.wait_for(
+            _chunk_expander.expand(namespace, chunk_ids, scope=scope, max_facts=max_facts),
+            timeout=RESOLVE_TIMEOUT_S,
+        )
+        expand_ms = int((time.perf_counter() - t0) * 1000)
+        trace.record(
+            StepId.T3_GRAPH_EXPAND,
+            "success",
+            expand_ms,
+            detail=f"{len(result.facts)} facts, {len(result.related_chunks)} related chunks",
+            tool_used="neptune",
+        )
+    except TimeoutError as e:
+        raise DataSourceUnavailableError("Graph expansion timed out") from e
+    except DataSourceUnavailableError:
+        raise
+    except Exception as e:
+        logger.error("graph_expand_error", error=str(e), request_id=request_id)
+        raise DataSourceUnavailableError("Graph expansion failed") from e
+
+    return {
+        **result.to_dict(),
+        "trace": trace.steps_serializable,
+        "requestId": request_id,
+        "statusCode": 200,
+    }
+
+
 async def _setup_streaming_session(
     payload: dict,
     session_user_id: str,
@@ -1668,6 +1778,9 @@ async def _invoke(payload: dict, context=None):
             return
         if action == "graphTraverse":
             yield await _handle_graph_traverse(payload, request_id)
+            return
+        if action == "graphExpand":
+            yield await _handle_graph_expand(payload, request_id)
             return
     except ServeError as e:
         yield e.to_dict(request_id)

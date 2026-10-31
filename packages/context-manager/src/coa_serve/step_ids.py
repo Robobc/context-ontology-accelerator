@@ -51,6 +51,7 @@ class StepId(StrEnum):
     T3_RETRIEVE = "t3.retrieve"
     T3_VECTOR_SEARCH = "t3.vector_search"
     T3_GRAPH_TRAVERSE = "t3.graph_traverse"
+    T3_GRAPH_EXPAND = "t3.graph_expand"  # fork (ADR 0012): expansion from Knowledge Base chunk ids
     T3_CATALOG_CONTEXT = "t3.catalog_context"
     T3_SYNTHESIZE = "t3.synthesize"
     T3_GUARDRAIL = "t3.guardrail"
