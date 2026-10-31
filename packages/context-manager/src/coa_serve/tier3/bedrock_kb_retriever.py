@@ -92,6 +92,7 @@ class BedrockKnowledgeBaseRetriever:
         client: Any | None = None,
         search_mode: str = "vector",
         enforce_user_context: bool = False,
+        data_source_ids: Iterable[str] | None = None,
     ) -> None:
         """Configure one existing Knowledge Base and an optional test client.
 
@@ -100,7 +101,11 @@ class BedrockKnowledgeBaseRetriever:
         Bases, ``managedSearchConfiguration``). With ``enforce_user_context`` every
         ``Retrieve`` carries ``userContext.userId`` for the request's caller so the
         KB applies its document-level ACL; a request with no caller then returns
-        no chunks rather than everyone's.
+        no chunks rather than everyone's. ``data_source_ids`` scopes every
+        ``Retrieve`` (search and entitlement probe) to those data sources of the
+        KB: the registered source names what the namespace reads, and the graph
+        was built from those alone, so a hit from any other data source would
+        be text the namespace never registered. Empty means the whole KB.
         """
         if not knowledge_base_id:
             raise ValueError("knowledge_base_id is required")
@@ -112,6 +117,29 @@ class BedrockKnowledgeBaseRetriever:
         self._client_lock = threading.Lock()
         self._search_mode = search_mode
         self._enforce_user_context = enforce_user_context
+        self._data_source_ids = tuple(sorted({str(s) for s in (data_source_ids or ()) if s}))
+
+    @property
+    def data_source_ids(self) -> tuple[str, ...]:
+        """The data sources every ``Retrieve`` is scoped to (empty = whole KB)."""
+        return self._data_source_ids
+
+    def _scope_filter(self) -> dict[str, Any] | None:
+        ids = self._data_source_ids
+        if not ids:
+            return None
+        if len(ids) == 1:
+            return {"equals": {"key": "_data_source_id", "value": ids[0]}}
+        return {"in": {"key": "_data_source_id", "value": list(ids)}}
+
+    def _scoped(self, retrieval_filter: dict[str, Any] | None) -> dict[str, Any] | None:
+        """``retrieval_filter`` AND the data-source scope, whichever of the two exist."""
+        scope = self._scope_filter()
+        if scope is None:
+            return retrieval_filter
+        if retrieval_filter is None:
+            return scope
+        return {"andAll": [scope, retrieval_filter]}
 
     @property
     def enforces_user_context(self) -> bool:
@@ -173,10 +201,12 @@ class BedrockKnowledgeBaseRetriever:
         search_configuration: dict[str, Any] = {
             "numberOfResults": max(1, min(int(top_k), _MAX_TOP_K)),
         }
-        if retrieval_filter:
-            # This filter must be resolved server-side from trusted namespace and
-            # entitlement policy. It must never be copied directly from a caller.
-            search_configuration["filter"] = retrieval_filter
+        # This filter must be resolved server-side from trusted namespace and
+        # entitlement policy. It must never be copied directly from a caller.
+        # The registered data-source scope is applied on top, always.
+        effective_filter = self._scoped(retrieval_filter or None)
+        if effective_filter:
+            search_configuration["filter"] = effective_filter
 
         user_context = self._user_context(user_id)
         if self._enforce_user_context and user_context is None:
@@ -265,7 +295,7 @@ class BedrockKnowledgeBaseRetriever:
                     retrievalConfiguration={
                         config_key: {
                             "numberOfResults": 1,
-                            "filter": {"equals": {"key": "_source_uri", "value": uri}},
+                            "filter": self._scoped({"equals": {"key": "_source_uri", "value": uri}}),
                         }
                     },
                     userContext=user_context,
@@ -320,7 +350,9 @@ class KbRetrieverCache:
         self._default_region = default_region
         self._max_entries = max(1, max_entries)
         self._session_factory = session_factory
-        self._entries: OrderedDict[tuple[str, str, str, str], BedrockKnowledgeBaseRetriever] = OrderedDict()
+        self._entries: OrderedDict[tuple[str, str, str, str, tuple[str, ...]], BedrockKnowledgeBaseRetriever] = (
+            OrderedDict()
+        )
         self._lock = threading.Lock()
 
     def get(self, source: Any) -> BedrockKnowledgeBaseRetriever:
@@ -333,7 +365,13 @@ class KbRetrieverCache:
         """
         region = source.region or self._default_region
         role_arn = source.cross_account_role_arn or ""
-        key = (source.namespace_id, source.knowledge_base_id, region, role_arn)
+        key = (
+            source.namespace_id,
+            source.knowledge_base_id,
+            region,
+            role_arn,
+            tuple(sorted(source.data_source_ids or ())),
+        )
         with self._lock:
             hit = self._entries.get(key)
             if hit is not None:
@@ -379,7 +417,13 @@ class KbRetrieverCache:
             namespace=source.namespace_id,
             cross_account=bool(role_arn),
         )
-        # A Managed KB carries document-level ACL, so it is always queried per user.
+        # A Managed KB carries document-level ACL, so it is always queried per user,
+        # and only within the data sources the namespace registered.
         return BedrockKnowledgeBaseRetriever(
-            source.knowledge_base_id, region=region, client=client, search_mode="managed", enforce_user_context=True
+            source.knowledge_base_id,
+            region=region,
+            client=client,
+            search_mode="managed",
+            enforce_user_context=True,
+            data_source_ids=source.data_source_ids,
         )

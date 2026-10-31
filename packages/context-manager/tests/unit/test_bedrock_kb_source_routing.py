@@ -123,6 +123,84 @@ class TestFindBedrockKbSource:
 
 
 @pytest.mark.unit
+class TestDataSourceScope:
+    """Deployed finding: the registered dataSourceIds bound what the namespace reads.
+
+    The graph is built from those data sources alone; a Retrieve over the whole
+    KB returned documents from data sources the namespace never registered (same
+    fixture file copied into non-ACL data sources), so every Retrieve, search and
+    entitlement probe alike, carries the scope.
+    """
+
+    def _retriever(self, ids, client):
+        from coa_serve.tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
+
+        return BedrockKnowledgeBaseRetriever(
+            KB, client=client, search_mode="managed", enforce_user_context=True, data_source_ids=ids
+        )
+
+    @pytest.mark.asyncio
+    async def test_search_is_scoped_to_the_registered_data_sources(self, monkeypatch):
+        from coa_serve.request_identity import set_request_user
+
+        client = MagicMock()
+        client.retrieve.return_value = {"retrievalResults": []}
+        set_request_user("alice@example.com")
+        await self._retriever(["22THWQRHON"], client).retrieve("q", NS)
+        cfg = client.retrieve.call_args.kwargs["retrievalConfiguration"]["managedSearchConfiguration"]
+        assert cfg["filter"] == {"equals": {"key": "_data_source_id", "value": "22THWQRHON"}}
+
+    @pytest.mark.asyncio
+    async def test_several_data_sources_use_in_and_combine_with_a_server_filter(self):
+        from coa_serve.request_identity import set_request_user
+
+        client = MagicMock()
+        client.retrieve.return_value = {"retrievalResults": []}
+        set_request_user("alice@example.com")
+        r = self._retriever(["B", "A", "A"], client)
+        await r.retrieve("q", NS, retrieval_filter={"equals": {"key": "lang", "value": "en"}})
+        cfg = client.retrieve.call_args.kwargs["retrievalConfiguration"]["managedSearchConfiguration"]
+        assert cfg["filter"] == {
+            "andAll": [
+                {"in": {"key": "_data_source_id", "value": ["A", "B"]}},
+                {"equals": {"key": "lang", "value": "en"}},
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_entitlement_probe_carries_the_scope(self):
+        client = MagicMock()
+        client.retrieve.return_value = {"retrievalResults": [{"content": {"text": "x"}}]}
+        r = self._retriever(["22THWQRHON"], client)
+        assert await r.entitled_source_uris(["https://b/doc.txt"], user_id="alice@example.com") == {"https://b/doc.txt"}
+        flt = client.retrieve.call_args.kwargs["retrievalConfiguration"]["managedSearchConfiguration"]["filter"]
+        assert flt == {
+            "andAll": [
+                {"equals": {"key": "_data_source_id", "value": "22THWQRHON"}},
+                {"equals": {"key": "_source_uri", "value": "https://b/doc.txt"}},
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_data_source_ids_means_the_whole_kb(self):
+        from coa_serve.request_identity import set_request_user
+
+        client = MagicMock()
+        client.retrieve.return_value = {"retrievalResults": []}
+        set_request_user("alice@example.com")
+        await self._retriever(None, client).retrieve("q", NS)
+        assert "filter" not in client.retrieve.call_args.kwargs["retrievalConfiguration"]["managedSearchConfiguration"]
+
+    def test_cache_builds_the_retriever_with_the_source_scope_and_keys_on_it(self, monkeypatch):
+        monkeypatch.setenv("RESOURCE_PREFIX", "coa-dev-")
+        cache = KbRetrieverCache(default_region="us-east-1", session_factory=MagicMock(return_value=MagicMock()))
+        a = cache.get(_source(data_source_ids=("X",)))
+        b = cache.get(_source(data_source_ids=("X", "Y")))
+        assert a.data_source_ids == ("X",) and b.data_source_ids == ("X", "Y") and a is not b
+        assert cache.get(_source(data_source_ids=("Y", "X"))) is b
+
+
+@pytest.mark.unit
 class TestKbRetrieverCache:
     def test_same_account_source_uses_the_runtime_role(self):
         factory = MagicMock()
