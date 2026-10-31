@@ -4,9 +4,11 @@
 
 Proposed. Implemented on `feature/bedrock-kb-chunk-source`: kg-build loader,
 serve retriever and entitlement gate, the `BEDROCK_MANAGED_KB` source sub-type
-with its IAM, registry-based routing in serve, and the Connect Source wizard
-tab. The deployed run against a real Knowledge Base (the observation step
-below) is pending. Supersedes the last consequence of ADR 0003
+with its IAM, registry-based routing in serve, the extraction identity, and
+the Connect Source wizard tab. Deployed to syngenta-eba-dev and run against a
+real Managed Knowledge Base with an ACL data source on 2026-10-31 (results
+under Verification); the per-user entitlement held end to end for one real
+user in two ACL states. Supersedes the last consequence of ADR 0003
 ("per-document ACL-to-retrieval-filter translation is not yet wired") and
 ADR 0003's deployment-level namespace-to-Knowledge-Base routing.
 
@@ -404,10 +406,36 @@ second review phrased it:
    with an identity granted some documents produces a graph containing exactly
    those (`documents_not_visible` equals the rest).
 
-Deployed (pending): against a Knowledge Base with a document-level ACL data
-source, build the graph, then query as two users with different entitlements
-and confirm the traversal output contains no statement text from documents
-the user cannot `Retrieve`. This is the observation step for the gate.
+**Deployed run, 2026-10-31, syngenta-eba-dev (us-east-1) against KB
+`71RZ44THV5` (eu-central-1, same account), data source `acl-s3-test`
+(finance=alice, hr+shared=bob, extraction identity granted all three).**
+Namespace `fmkb-acl-test`, source registered through the API with
+`extractionUserId`, no role (same account). Results against the items above:
+
+| Item | Result |
+|---|---|
+| Pipeline | execution took `SourcesInputMode?` -> `SourcesBedrockKbSkipPreprocess` -> `SourcesKGBuild`. |
+| 3 registration | `COMPLETED`, `documentsProcessed` 3, `chunksGraph` 3 = distinct `Retrieve` results as the extraction identity; `documents_not_visible` 0. |
+| 6 id contract | query output carries `aws:<tenant>:kb:<_chunk_id>` ids; the budget hit's id equals `stored_chunk_id(to_graphrag_tenant_id(ns), _chunk_id)`, so the pivot is a node lookup. |
+| 1, 2 probe | `Retrieve` filtered on the graph's `source_uri` (the KB's `https://` form, read off the results) with the probe query returns the entitled document; the stored value is the KB's own, so equality holds by construction. |
+| 4 routing | `bedrock_kb_retriever_built` logged per namespace from the registry, no KB setting in the serve environment; the same caller got different results as the fixture ACL changed, so `userContext` was the caller. |
+| 5 drift | after two data-source re-syncs (ACL-only changes) the KB's `_chunk_id`s are unchanged and a re-scan rebuilt 3 chunks; the hit from the re-synced KB resolved to the node built before the syncs. |
+| Entitlement | one real user, two ACL states. Not in the ACL: three questions, 0 chunks, no document content. Granted `finance/` only: the budget question returns the finance chunk and the right answer; the HR and handbook questions return no HR or shared content. |
+| 7 identity error | not run live (unit-tested); the scan with a wrong identity fails with the field named. |
+
+Four defects found and fixed during the run, none visible to unit tests: the
+in-account KB grant was scoped to the deployment's Region while the KB lived in
+another (`arn:aws:bedrock:*:<account>:knowledge-base/*` now); the loader took a
+listing `AccessDenied` for the SharePoint "sample instead" case (only
+`ValidationException` falls back now); the extraction LLM's `max_tokens` 16384
+exceeds the Amazon Nova ceiling of 10000 so every document failed at extraction
+(new context knob `kg_build_extraction_max_tokens`, 8192 on dev; a pre-existing
+dev issue, this was the stack's first document ingestion); and serve queried
+the whole Knowledge Base rather than the registered data sources, so a
+namespace received text from data sources it never registered (the KB's ACL
+held, the registration's scope did not; every `Retrieve`, search and probe, is
+now scoped to `dataSourceIds`). Operational: the kg-build image build under
+Finch needs disk; a full local image cache failed the first deploy.
 
 Registration, routing and pipeline unit coverage:
 `packages/sources/tests/unit/api/test_document_routes.py::TestCreateBedrockManagedKbSource`
