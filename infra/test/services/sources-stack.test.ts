@@ -2230,6 +2230,35 @@ describe("SourcesStack", () => {
       expect(definition).toContain('"TimeoutSeconds":1920');
     });
 
+    // Fork: the extraction LLM's max_tokens cap. graph_build ships 16384, which
+    // the Amazon Nova family rejects (10000 ceiling), so a Nova deployment needs
+    // the knob; a deployment that never sets it must be byte-identical.
+    const kgBuildEnv = (t: Template): Record<string, string> => {
+      const defs = Object.values(t.findResources("AWS::ECS::TaskDefinition"));
+      // BUILD_BATCH_WRITE_SIZE is set on the KG-build container only.
+      const kg = defs.find((d) =>
+        JSON.stringify(d.Properties.ContainerDefinitions[0]).includes(
+          "BUILD_BATCH_WRITE_SIZE",
+        ),
+      )!;
+      return Object.fromEntries(
+        kg.Properties.ContainerDefinitions[0].Environment.map(
+          (v: { Name: string; Value: unknown }) => [v.Name, v.Value],
+        ),
+      );
+    };
+
+    it("passes kg_build_extraction_max_tokens to the KG-build task when set", () => {
+      const env = kgBuildEnv(
+        synthWithContext({ kg_build_extraction_max_tokens: 8192 }),
+      );
+      expect(env.EXTRACTION_MAX_TOKENS).toBe("8192");
+    });
+
+    it("emits no EXTRACTION_MAX_TOKENS when the knob is unset", () => {
+      expect(kgBuildEnv(template)).not.toHaveProperty("EXTRACTION_MAX_TOKENS");
+    });
+
     it("rejects a non-positive / non-numeric dbScanEnrichmentTimeoutMinutes at synth", () => {
       expect(() =>
         synthWithContext({ dbScanEnrichmentTimeoutMinutes: 0 }),

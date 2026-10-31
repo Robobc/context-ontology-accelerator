@@ -2193,6 +2193,18 @@ export class SourcesStack extends SCLStack {
         BEDROCK_EMBED_MODEL_ID: embedModelId,
         BEDROCK_EMBED_DIMENSIONS: embedDimensions,
         BEDROCK_CHAT_MODEL_ID: chatModelId,
+        // Fork: cap on the extraction LLM's max_tokens (graph_build
+        // EXTRACTION_MAX_TOKENS, shipped default 16384). The extraction model is
+        // the chat model, and the Amazon Nova family rejects any request above
+        // 10000 output tokens with a ValidationException, which fails every
+        // document of every scan (first seen on the first document ingestion of
+        // a Nova deployment). Presence-checked so an unset knob changes nothing.
+        ...(this.node.tryGetContext("kg_build_extraction_max_tokens") !==
+          undefined && {
+          EXTRACTION_MAX_TOKENS: String(
+            this.node.tryGetContext("kg_build_extraction_max_tokens"),
+          ),
+        }),
         // Content screening: retrieval guardrail for ingestion-time ApplyGuardrail
         // (SDO-188). Empty string disables screening gracefully.
         RETRIEVAL_GUARDRAIL_ID: ssm.StringParameter.valueForStringParameter(
