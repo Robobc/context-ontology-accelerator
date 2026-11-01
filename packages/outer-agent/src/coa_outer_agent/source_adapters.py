@@ -40,6 +40,9 @@ class SourceTargetConfig:
     max_agent_iterations: int = 5
     region: str | None = None
     data_source_ids: tuple[str, ...] = ()
+    # Bedrock rejects MANAGED reranking for Knowledge Bases on a custom
+    # embedding model (managed-search KBs, FMKB); NONE lets those targets run.
+    reranking: str = "MANAGED"
 
 
 class SourceAdapter(Protocol):
@@ -174,7 +177,7 @@ class ManagedKnowledgeBaseAdapter:
             response = self._get_client(target.region or self._region).agentic_retrieve_stream(
                 agenticRetrieveConfiguration={
                     "foundationModelType": "MANAGED",
-                    "rerankingModelType": "MANAGED",
+                    "rerankingModelType": target.reranking,
                     "maxAgentIteration": target.max_agent_iterations,
                 },
                 generateResponse=False,

@@ -112,6 +112,12 @@ export interface OuterAgentSourceTargetConfig {
    * `BEDROCK_MANAGED_KB` source carries. @default the whole knowledge base
    */
   readonly dataSourceIds?: string[];
+  /**
+   * AgenticRetrieveStream reranking (MANAGED_KB only). Bedrock rejects
+   * `MANAGED` for knowledge bases on a custom embedding model (managed-search
+   * KBs); set `NONE` for those. @default "MANAGED"
+   */
+  readonly reranking?: "MANAGED" | "NONE";
 }
 
 export interface OuterAgentConfig {

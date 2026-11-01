@@ -128,3 +128,21 @@ def test_non_kb_target_rejects_region_and_data_source_scope(monkeypatch):
     monkeypatch.setenv("SOURCE_TARGETS_JSON", '{"graph":{"kind":"COA_GRAPH","region":"eu-central-1"}}')
     with pytest.raises(ValueError, match="unsupported fields"):
         OuterAgentConfig.from_env()
+
+
+def test_managed_kb_reranking_defaults_to_managed_and_accepts_none(monkeypatch):
+    _set_required(monkeypatch)
+    assert OuterAgentConfig.from_env().source_targets["domain-kb"].reranking == "MANAGED"
+    monkeypatch.setenv(
+        "SOURCE_TARGETS_JSON", '{"hub":{"kind":"MANAGED_KB","knowledgeBaseIds":["ABCDEFGHIJ"],"reranking":"NONE"}}'
+    )
+    assert OuterAgentConfig.from_env().source_targets["hub"].reranking == "NONE"
+
+
+def test_managed_kb_reranking_outside_the_contract_is_rejected(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv(
+        "SOURCE_TARGETS_JSON", '{"hub":{"kind":"MANAGED_KB","knowledgeBaseIds":["ABCDEFGHIJ"],"reranking":"CUSTOM"}}'
+    )
+    with pytest.raises(ValueError, match="reranking must be one of"):
+        OuterAgentConfig.from_env()

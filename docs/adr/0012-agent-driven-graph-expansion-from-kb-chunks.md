@@ -128,8 +128,12 @@ deployment's `outerAgent.sourceTargets` may therefore name its `region`
 (default: the runtime's Region; one Bedrock client per Region, and the IAM
 grant names that Region's KB ARNs) and `dataSourceIds` (0-10, a
 `_data_source_id` retrieval filter), mirroring the `region` and
-`dataSourceIds` of the registered `BEDROCK_MANAGED_KB` source. Both default to
-the previous behaviour (runtime Region, whole Knowledge Base).
+`dataSourceIds` of the registered `BEDROCK_MANAGED_KB` source, and `reranking`
+(`MANAGED` or `NONE`: Bedrock rejects managed reranking on a Knowledge Base
+with a custom embedding model, which every managed-search KB has, with
+`ValidationException: Managed reranking is not supported for knowledge bases
+with custom embedding models`). All three default to the previous behaviour
+(runtime Region, whole Knowledge Base, managed reranking).
 
 This is enrichment, not a plan directive. ADR 0008's rule that a failed
 directive must never yield an answer from a partial set is about *sources* the

@@ -36,7 +36,10 @@ _DATA_SOURCE_ID_RE = _KB_ID_RE
 # AWS Region names: us-east-1, eu-central-1, us-gov-west-1, eusc-de-east-1.
 _REGION_RE = re.compile(r"^[a-z]{2,4}(-[a-z]+){1,2}-\d$")
 _TARGET_KINDS = {"MANAGED_KB", "GOVERNED_QUERY", "EXTERNAL_GRAPH", "COA_GRAPH"}
-_MANAGED_KB_FIELDS = {"kind", "knowledgeBaseIds", "maxAgentIterations", "region", "dataSourceIds"}
+_MANAGED_KB_FIELDS = {"kind", "knowledgeBaseIds", "maxAgentIterations", "region", "dataSourceIds", "reranking"}
+# AgenticRetrieveStream rerankingModelType without CUSTOM (which needs a model
+# ARN this configuration has no slot for).
+_RERANKING = {"MANAGED", "NONE"}
 
 
 def _source_targets() -> dict[str, SourceTargetConfig]:
@@ -71,6 +74,9 @@ def _source_targets() -> dict[str, SourceTargetConfig]:
             or any(not isinstance(ds_id, str) or not _DATA_SOURCE_ID_RE.fullmatch(ds_id) for ds_id in data_source_ids)
         ):
             raise ValueError(f"Source target {target_id} dataSourceIds must be 0-10 valid data source ids")
+        reranking = item.get("reranking", "MANAGED")
+        if reranking not in _RERANKING:
+            raise ValueError(f"Source target {target_id} reranking must be one of {sorted(_RERANKING)}")
 
         knowledge_base_ids = item.get("knowledgeBaseIds", [])
         if kind == "MANAGED_KB":
@@ -93,6 +99,7 @@ def _source_targets() -> dict[str, SourceTargetConfig]:
             max_agent_iterations=max_iterations,
             region=region,
             data_source_ids=tuple(data_source_ids),
+            reranking=reranking,
         )
     return targets
 

@@ -263,3 +263,18 @@ async def test_rejected_managed_kb_call_is_a_source_failure_naming_the_service_e
     )
     with pytest.raises(SourceExecutionError, match="target hub: ValidationException: retrievalOverrides"):
         await registry.execute(_directive(target_id="hub"), _identity())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reranking", ["MANAGED", "NONE"])
+async def test_managed_kb_reranking_is_taken_from_the_target(reranking):
+    client = _empty_stream_client()
+    registry = SourceAdapterRegistry(
+        region="us-east-1",
+        targets={"hub": SourceTargetConfig("hub", "MANAGED_KB", ("ABCDEFGHIJ",), reranking=reranking)},
+        managed_kb_client=client,
+    )
+    await registry.execute(_directive(target_id="hub"), _identity())
+    config = client.agentic_retrieve_stream.call_args.kwargs["agenticRetrieveConfiguration"]
+    assert config["rerankingModelType"] == reranking
+    assert config["foundationModelType"] == "MANAGED"

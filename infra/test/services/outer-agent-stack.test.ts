@@ -208,6 +208,15 @@ describe("OuterAgentStack", () => {
     ).toThrow("dataSourceIds must be 0-10 valid data source ids");
     expect(
       build("GraphWithRegion", { kind: "COA_GRAPH", region: "eu-central-1" }),
-    ).toThrow("does not accept knowledgeBaseIds, region or dataSourceIds");
+    ).toThrow(
+      "does not accept knowledgeBaseIds, region, dataSourceIds or reranking",
+    );
+    expect(
+      build("BadReranking", {
+        kind: "MANAGED_KB",
+        knowledgeBaseIds: ["ABCDEFGHIJ"],
+        reranking: "CUSTOM",
+      }),
+    ).toThrow("reranking must be MANAGED or NONE");
   });
 });

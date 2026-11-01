@@ -47,7 +47,7 @@ Deployments register source-owned implementations by target kind through the pub
 }
 ```
 
-A `MANAGED_KB` target may name the `region` its Knowledge Bases live in (default: the runtime's Region; the agent builds one Bedrock client per Region and the CDK stack grants `bedrock:Retrieve` on that Region's KB ARNs) and `dataSourceIds` (0-10) that limit retrieval to those data sources through a `_data_source_id` filter, the same scope a COA-registered `BEDROCK_MANAGED_KB` source carries. Both fields are refused on any other kind.
+A `MANAGED_KB` target may name the `region` its Knowledge Bases live in (default: the runtime's Region; the agent builds one Bedrock client per Region and the CDK stack grants `bedrock:Retrieve` on that Region's KB ARNs), `dataSourceIds` (0-10) that limit retrieval to those data sources through a `_data_source_id` filter, the same scope a COA-registered `BEDROCK_MANAGED_KB` source carries, and `reranking` (`MANAGED`, the default, or `NONE`; Bedrock rejects managed reranking for Knowledge Bases on a custom embedding model, such as managed-search KBs, so those need `NONE`). All three are refused on any other kind.
 
 The namespace profile names only these logical IDs. Unknown fields, endpoints, credentials, malformed IDs, kind mismatches, and unavailable adapter kinds fail closed.
 

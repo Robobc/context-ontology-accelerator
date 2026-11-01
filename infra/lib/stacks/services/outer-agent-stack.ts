@@ -27,6 +27,8 @@ const TARGET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const KNOWLEDGE_BASE_ID_PATTERN = /^[A-Za-z0-9]{10}$/;
 /** AWS Region names: us-east-1, eu-central-1, us-gov-west-1, eusc-de-east-1. */
 const REGION_PATTERN = /^[a-z]{2,4}(-[a-z]+){1,2}-\d$/;
+/** AgenticRetrieveStream rerankingModelType values the config may name. */
+const RERANKING_VALUES = new Set(["MANAGED", "NONE"]);
 
 /**
  * Trusted composition boundary: semantic plan -> native source execution ->
@@ -247,10 +249,19 @@ export class OuterAgentStack extends SCLStack {
       } else if (
         knowledgeBaseIds.length ||
         target.region !== undefined ||
-        target.dataSourceIds !== undefined
+        target.dataSourceIds !== undefined ||
+        target.reranking !== undefined
       ) {
         throw new Error(
-          `Source target ${targetId} does not accept knowledgeBaseIds, region or dataSourceIds`,
+          `Source target ${targetId} does not accept knowledgeBaseIds, region, dataSourceIds or reranking`,
+        );
+      }
+      if (
+        target.reranking !== undefined &&
+        !RERANKING_VALUES.has(target.reranking)
+      ) {
+        throw new Error(
+          `Source target ${targetId} reranking must be MANAGED or NONE`,
         );
       }
       if (target.region !== undefined && !REGION_PATTERN.test(target.region)) {
