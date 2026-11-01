@@ -645,6 +645,19 @@ export class ServeStack extends SCLStack {
             (this.node.tryGetContext(
               "deep_reasoning_synthesis_reserve_s",
             ) as string) ?? "25",
+          // Aggregate reasoning-step cap, shared by every sub-question and branch
+          // of one request (budget.py). Unset => the code default (5), so no
+          // deployment moves. A question that decomposes into two or more
+          // sub-questions exhausts 5 before a second tool gets a turn (ADR 0013).
+          DEEP_REASONING_MAX_STEPS:
+            (this.node.tryGetContext("deep_reasoning_max_steps") as string) ??
+            "5",
+          // Planner profile (ADR 0013): "legacy" (default) or "structured_first".
+          // A request may override it with options.plannerProfile.
+          DEEP_REASONING_PLANNER_PROFILE:
+            (this.node.tryGetContext(
+              "deep_reasoning_planner_profile",
+            ) as string) ?? "legacy",
           // Hard per-request cap inside serve (main.py RESOLVE_TIMEOUT_S, clamped
           // 10..300). Must exceed DEEP_REASONING_TIME_BUDGET_S + SYNTHESIS_RESERVE_S
           // or serve aborts a session the deep-reasoning budget still considers live.

@@ -911,6 +911,30 @@ describe("ServeStack - deep-reasoning budget variables", () => {
       }),
     });
   });
+
+  // ADR 0013: the aggregate step cap and the planner profile are exposed as CDK
+  // context knobs. Their defaults reproduce the code defaults (5 steps, legacy
+  // graph-first planner) so a deployment that sets neither does not move.
+  it("defaults the step cap and planner profile to the code defaults", () => {
+    createStack().hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DEEP_REASONING_MAX_STEPS: "5",
+        DEEP_REASONING_PLANNER_PROFILE: "legacy",
+      }),
+    });
+  });
+
+  it("honours the step cap and planner profile CDK context overrides", () => {
+    createStack({
+      deep_reasoning_max_steps: "8",
+      deep_reasoning_planner_profile: "structured_first",
+    }).hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DEEP_REASONING_MAX_STEPS: "8",
+        DEEP_REASONING_PLANNER_PROFILE: "structured_first",
+      }),
+    });
+  });
 });
 
 describe("ServeStack - Tier-1 metric timeout", () => {
