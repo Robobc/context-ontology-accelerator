@@ -8,8 +8,11 @@ opt-in planner profile (`options.plannerProfile`, deployment default
 or request changes behaviour until a caller or an operator asks for it. Unit
 and regression coverage is in
 `packages/context-manager/tests/unit/test_tier3_agentic_planner_profile.py`.
-The deployed A/B on the mixed question that motivated the change is recorded
-under Verification as it is run.
+The deployed A/B on the mixed question that motivated the change was run on
+2026-11-01 (three rounds, results under Verification): the pre-resolve held in
+every run; the modality rule needed one rewrite before the planner followed it,
+after which the figure came back through `nl_to_sql`. Deployed on
+syngenta-eba-dev at `264be8d` with the profile at its `legacy` default.
 
 Touches the deep-reasoning path only (ADR 0005's reasoning loop, as shipped in
 `tier3/agentic/`). Changes nothing in the Standard cascade, and nothing in how
@@ -239,12 +242,64 @@ and define a policy for "mixed" sub-questions (two seeds, or a split).
   variables (`infra/test/services/serve-stack.test.ts`) each have their own
   cases. `make lint` is green.
 
-### Deployed A/B (syngenta-eba-dev, `ppm360-kb-test`)
+### Deployed A/B, 2026-11-01 (syngenta-eba-dev, `ppm360-kb-test`)
 
-Pending. Procedure: deploy serve and MCP from this branch with the profile left
-at `legacy`; run the mixed question above in deep-reasoning mode twice, with and
-without `options.plannerProfile=structured_first`; compare the traces on
-`nl_to_sql` invocations and rows (`13322629.26` expected), the stop reason,
-`ontology_preresolved`, step count and wall clock, and whether the answer
-contains both the figure and the memo decision. Repeat with two paraphrases.
-Results to be recorded here.
+Serve and MCP deployed from this branch three times in one evening, profile at
+`legacy` on the stack, each request opting in through the MCP `query` tool's
+`plannerProfile`. `DEEP_REASONING_MAX_STEPS=5`, time budget 110 s, dev chat
+model as planner. Namespace: Databricks data vault + ignite tables, Managed KB of
+28 stage-gate memos, 49 induced classes (45 node types / 47 edge types reach the
+planner). The question: *"For project PI0013123: what is its full cost from the
+data vault, and what did the latest stage-gate memo decide about it?"*; the same
+sub-question text in Standard mode answers through Tier 2 with one row,
+`full_cost = 13322629.26`. Small n; every run is one request.
+
+| Round | Image | Profile | First step of the tabular sub-question | `nl_to_sql` | Figure in answer | Stop |
+|---|---|---|---|---|---|---|
+| 1 | `7e3f273` | `legacy` | `ontology_lookup` (both forks), then `strategy:entity_based`, `graph_traversal` ×2 | never | no | `max_steps_reached` |
+| 1 | `7e3f273` | `structured_first` (rule v1) | `graph_traversal` — "likely stored as a fact in the data vault … locate the project entity in the graph", then edge-typed `HAS COST` (0 nodes), then an edge probe | never | no | `max_steps_reached` |
+| 1, paraphrase without "data vault" | `7e3f273` | `structured_first` (rule v1) | `nl_to_sparql` — "a specific figure … a tabular data point" → Ontop: no rows → rule (c) sent it to the graph | never | no | `max_steps_reached` |
+| 2 | `a8a6610` | `structured_first` (rule v2) | `nl_to_sql` — "a specific figure (full cost) from a relational data source (data vault)" | 1 call, **51 rows**, conf 0.90, 42.7 s | no: "full costs for various projects, none … PI0013123" | `max_steps_reached` |
+| 3 | `264be8d` | `structured_first` (rule v2) | `nl_to_sql`, same reasoning; trace now shows `q:` = the sub-question verbatim | 1 call, **1 row**, conf 0.90, 27.3 s | **yes: "The full cost of project PI0013123 is 13322629.26"** | `max_steps_reached` |
+
+What the rounds established:
+
+- **B held in every run.** `ontology_preresolved success` in 36–183 ms, zero
+  reasoning steps, no `ontology_lookup` step in any `structured_first` trace;
+  under `legacy` the two forks each paid a step for it (round 1).
+- **A, as first written, lost twice**, for two different reasons the brief had
+  predicted. "From the data vault" was read as a fact held in the graph, and the
+  pre-resolved ontology, now visible from step 1, offered a `HAS COST` edge to
+  follow (the over-linking risk: B made the graph look more capable for the
+  tabular half). On the paraphrase the rule did fire but chose `nl_to_sparql`,
+  Ontop returned nothing, and clause (c) gave the sub-question to the graph after
+  one miss. Rule v2 (`a8a6610`) names warehouse wording as tabular, prefers
+  `nl_to_sql`, tells the planner to ignore a related-sounding ontology edge for a
+  tabular sub-question, and falls back to the graph only after both structured
+  tools return no rows. With v2 the planner chose `nl_to_sql` on its first step
+  in 2 of 2 runs.
+- **The planner's rewrite of the sub-question is a second source of variance.**
+  Round 2 produced 51 rows from the same engine and the same 13-table context
+  that give 1 row in Standard mode; the only input that differs is the `query`
+  the planner hands the tool, which the trace did not record. `264be8d` appends
+  it to the structured tools' trace detail; in round 3 it was the sub-question
+  verbatim and the figure came back. Phase 2 (D) removes this variance outright
+  by having the controller seed the structured tool with the decomposer's
+  sub-question text rather than a planner paraphrase.
+- **Every run still ends `max_steps_reached`** because the document half
+  spends three or four steps (anchor, two traversals, a semantic search) and
+  finds nothing it may show: the traversals report statements and entities
+  "withheld by document entitlement", and the final semantic search returns 0
+  chunks. For this signed-in user the memo for PI0013123 is not entitled, so
+  "the context does not contain the decision" is the correct answer and the
+  budget exhaustion is the planner looking for something it is not allowed to
+  see. That is ADR 0011's gate working, not a routing defect; a budget-aware
+  stop on repeated entitlement withholding would be a separate improvement.
+- Latency: the structured leg costs 27–43 s inside the loop (translation plus
+  Databricks), which is most of the 110 s budget's headroom; the whole request
+  took 32–47 s.
+
+Verdict: B is verified; A is a prompt rule whose compliance moved from 0/2 to
+2/2 after one rewrite on one model, which is evidence the prompt-prior
+hypothesis is right and also that a prompt rule is the fragile way to act on it.
+The profile stays opt-in. The next step is D.
