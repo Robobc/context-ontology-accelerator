@@ -57,6 +57,7 @@ from ..knowledge_retriever import Tier3Result
 from .budget import BudgetClock
 from .context import AccumulatedContext
 from .models import StopReason, SubQuestion
+from .planner import PLANNER_PROFILE_LEGACY, PLANNER_PROFILE_STRUCTURED_FIRST, PLANNER_PROFILES
 from .tools.structured_tool import NL_TO_SPARQL_TOOL, NL_TO_SQL_TOOL
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime/graphrag import
@@ -188,6 +189,7 @@ class AgenticRetriever:
         final_semantic_search: bool = True,
         synthesize_working_answer_only: bool = False,
         synthesize_without_working_answer: bool = False,
+        planner_profile: str = PLANNER_PROFILE_LEGACY,
     ) -> None:
         """Wire the registry, controller, decomposer, synthesizer, budget, and flags."""
         self._registry = registry
@@ -198,6 +200,10 @@ class AgenticRetriever:
         self._embed_client = embed_client
         self._clock_source = clock_source
         self._final_semantic_search = final_semantic_search
+        # Deployment default for the planner profile (ADR 0013); a request may
+        # override it with ``options.plannerProfile``. Unknown values fall back to
+        # legacy so a misconfiguration can never change behaviour silently.
+        self._planner_profile = planner_profile if planner_profile in PLANNER_PROFILES else PLANNER_PROFILE_LEGACY
         # Experiment flag (idea-2 ablation): when True, the final synthesis is
         # given ONLY the agent's grounded running best-guess (working_answer) and
         # NONE of the gathered chunks/entities — to measure how good the interim
@@ -323,6 +329,12 @@ class AgenticRetriever:
         # fail CLOSED on an empty profile, so without it every nl_to_sql / nl_to_sparql
         # call is an AccessDeniedError silently rendered as "0 rows".
         tool_context = {"profile": profile or {}, "options": options or {}, "model_id": model_id}
+        # Planner profile for this request (ADR 0013): request override, else the
+        # deployment default. Carried on the context so every forked sub-question's
+        # planner call sees the same profile.
+        ctx.planner_profile = self._resolve_planner_profile(options)
+        if ctx.planner_profile != PLANNER_PROFILE_LEGACY:
+            trace.record("planner_profile", "success", clock.elapsed_ms(), detail=ctx.planner_profile)
         if excluded_tools:
             trace.record(
                 "tools_gated",
@@ -363,6 +375,14 @@ class AgenticRetriever:
             clock.elapsed_ms(),
             detail=ctx.answer_language or "unresolved; prompts match the question's language",
         )
+
+        # 1b. (structured_first) Resolve the namespace ontology ONCE here, before the
+        # fan-out, so every forked sub-question starts with it (``fork`` already
+        # shares ``ctx.ontology`` by reference; without this step each fork spent its
+        # first reasoning step on its own ontology_lookup). Costs wall-clock, never a
+        # reasoning step; a failure is recorded and the loop proceeds as before.
+        if ctx.planner_profile == PLANNER_PROFILE_STRUCTURED_FIRST:
+            await self._preresolve_ontology(namespace, ctx, clock, trace, excluded_tools, tool_context)
 
         # 2. Run the initial (independent) Sub_Questions concurrently: each gets a
         # private forked sub-context (own seen_keys, own local branch queue) while the
@@ -408,6 +428,68 @@ class AgenticRetriever:
         )
 
     # ── parallel sub-question execution (P2) ───────────────────────────
+
+    # ── planner profile (ADR 0013) ──────────────────────────────────────
+
+    _ONTOLOGY_TOOL = "ontology_lookup"
+
+    def _resolve_planner_profile(self, options: dict | None) -> str:
+        """``options.plannerProfile`` when it names a known profile, else the deployment default.
+
+        The request model already rejects unknown values; this keeps the retriever
+        safe when called directly.
+        """
+        requested = (options or {}).get("plannerProfile")
+        if isinstance(requested, str) and requested in PLANNER_PROFILES:
+            return requested
+        return self._planner_profile
+
+    async def _preresolve_ontology(
+        self,
+        namespace: str,
+        ctx: AccumulatedContext,
+        clock: BudgetClock,
+        trace: TraceCollector,
+        excluded_tools: frozenset[str],
+        tool_context: dict[str, Any],
+    ) -> None:
+        """Resolve the ontology once and cache it on ``ctx`` before the sub-questions fork.
+
+        Uses the registered ``ontology_lookup`` tool (the same one the planner would
+        select) under the per-tool timeout. Skipped when the tool is absent or
+        withheld for this request. Records ``ontology_preresolved`` on success and a
+        degraded source on failure; never raises and never consumes a reasoning step.
+        """
+        if ctx.ontology is not None or self._ONTOLOGY_TOOL in excluded_tools:
+            return
+        tool = self._registry.get(self._ONTOLOGY_TOOL)
+        if tool is None:
+            return
+        from .tools.ontology_tool import ontology_from_result
+
+        started = clock.elapsed_ms()
+        try:
+            result = await asyncio.wait_for(
+                tool.invoke(namespace=namespace, **tool_context),
+                timeout=self._budget.per_tool_timeout_s,
+            )
+            ontology = ontology_from_result(result)
+        except Exception as exc:  # noqa: BLE001 - preparatory step must never fail the session
+            ctx.degraded_sources.append({"source": self._ONTOLOGY_TOOL, "reason": f"preresolve: {type(exc).__name__}"})
+            trace.record("ontology_preresolved", "failed", clock.elapsed_ms() - started, detail=type(exc).__name__)
+            return
+        if ontology is None:
+            trace.record(
+                "ontology_preresolved", "skipped", clock.elapsed_ms() - started, detail="no ontology in result"
+            )
+            return
+        ctx.ontology = ontology
+        trace.record(
+            "ontology_preresolved",
+            "success",
+            clock.elapsed_ms() - started,
+            detail=f"{len(ontology.node_types)} node types, {len(ontology.edge_types)} edge types",
+        )
 
     async def _run_subquestions_parallel(
         self,

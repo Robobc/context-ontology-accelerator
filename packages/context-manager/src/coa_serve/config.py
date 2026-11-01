@@ -110,6 +110,8 @@ class ServiceConfig:
     # round-trips for marginal gain — a longer streak rarely recovered accuracy in
     # the coa100 runs but did inflate latency.
     deep_reasoning_max_no_progress_steps: int = 2
+    # ADR 0013: ``legacy`` | ``structured_first`` (see tier3/agentic/planner.py).
+    deep_reasoning_planner_profile: str = "legacy"
     # Where the deep-reasoning Ontology_Lookup_Tool reads the per-namespace ontology.
     # "graph" (default) queries the live published RDF graph in Neptune via the
     # serve graph client — correct for document-induced namespaces, which have no
@@ -273,6 +275,18 @@ def load_config() -> ServiceConfig:
     deep_reasoning_max_fanout = _parse_int_in_range("DEEP_REASONING_MAX_FANOUT", 5, 1, 20)
     deep_reasoning_synthesis_reserve_s = _parse_int_in_range("DEEP_REASONING_SYNTHESIS_RESERVE_S", 8, 0, 120)
     deep_reasoning_max_no_progress_steps = _parse_int_in_range("DEEP_REASONING_MAX_NO_PROGRESS_STEPS", 2, 1, 20)
+    # ADR 0013: planner profile. ``legacy`` (default) is the graph-first standing
+    # strategy; ``structured_first`` decides a sub-question's modality first and
+    # pre-resolves the ontology before fan-out. Unknown values fall back to legacy
+    # with a warning so a typo never changes behaviour silently.
+    deep_reasoning_planner_profile = os.environ.get("DEEP_REASONING_PLANNER_PROFILE", "legacy").strip() or "legacy"
+    if deep_reasoning_planner_profile not in ("legacy", "structured_first"):
+        logger.warning(
+            "invalid_deep_reasoning_planner_profile",
+            value=deep_reasoning_planner_profile,
+            fallback="legacy",
+        )
+        deep_reasoning_planner_profile = "legacy"
     deep_reasoning_ontology_source = env_with_legacy_name("DEEP_REASONING_ONTOLOGY_SOURCE", "graph")
     if deep_reasoning_ontology_source not in ("graph", "file"):
         logger.warning(
@@ -360,6 +374,7 @@ def load_config() -> ServiceConfig:
         deep_reasoning_max_fanout=deep_reasoning_max_fanout,
         deep_reasoning_synthesis_reserve_s=deep_reasoning_synthesis_reserve_s,
         deep_reasoning_max_no_progress_steps=deep_reasoning_max_no_progress_steps,
+        deep_reasoning_planner_profile=deep_reasoning_planner_profile,
         deep_reasoning_ontology_source=deep_reasoning_ontology_source,
         deep_reasoning_ontology_file=deep_reasoning_ontology_file,
         deep_reasoning_ontology_edge_mode=deep_reasoning_ontology_edge_mode,

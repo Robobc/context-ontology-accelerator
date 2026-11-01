@@ -171,6 +171,26 @@ class InvokeRequest(BaseModel):
 
     @field_validator("options", mode="after")
     @classmethod
+    def _validate_planner_profile(cls, options: dict) -> dict:
+        """Validate ``options.plannerProfile`` — the deep-reasoning planner profile (ADR 0013).
+
+        * ``"legacy"`` — the graph-first standing strategy for every sub-question.
+        * ``"structured_first"`` — decide each sub-question's modality first (tabular
+          questions go to the structured tools), and resolve the ontology once before
+          the sub-questions fan out.
+
+        Absence follows the deployment default (``DEEP_REASONING_PLANNER_PROFILE``,
+        ``legacy``). Only read when the request runs in deep-reasoning mode; the
+        standard cascade ignores it.
+        """
+        if "plannerProfile" in options:
+            value = options["plannerProfile"]
+            if value not in ("legacy", "structured_first"):
+                raise ValueError(f"Invalid plannerProfile {value!r}; must be 'legacy' or 'structured_first'")
+        return options
+
+    @field_validator("options", mode="after")
+    @classmethod
     def _normalize_dimensions(cls, options: dict) -> dict:
         """Normalize ``options.dimensions`` from the WIRE shape to the internal one.
 

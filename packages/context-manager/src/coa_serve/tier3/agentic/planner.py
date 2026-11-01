@@ -158,6 +158,61 @@ _PROPOSE_SYSTEM = (
     "list ONLY when no tool can make further progress."
 )
 
+# Planner profiles (ADR 0013). ``legacy`` is the prompt above, unchanged. In
+# ``structured_first`` the first decision of every step is the SUB-QUESTION'S
+# MODALITY, and the graph strategy is SCOPED to document/relationship questions
+# rather than being the standing strategy for "most questions". Observed failure
+# that motivates it: a mixed question decomposed into a tabular sub-question and a
+# document sub-question; both spent their first steps on ontology_lookup + graph
+# anchoring under one shared 5-step budget, and nl_to_sql, offered and able to
+# answer, was never selected. The rule REPLACES the graph-first mandate for tabular
+# sub-questions instead of stacking a second rule on top of it, so rule order and
+# wording cannot make the two compete.
+PLANNER_PROFILE_LEGACY = "legacy"
+PLANNER_PROFILE_STRUCTURED_FIRST = "structured_first"
+PLANNER_PROFILES: frozenset[str] = frozenset({PLANNER_PROFILE_LEGACY, PLANNER_PROFILE_STRUCTURED_FIRST})
+
+_STRUCTURED_FIRST_MODALITY_RULE = (
+    "FIRST, DECIDE THE MODALITY OF THIS SUB-QUESTION, before anything else:\n"
+    "(a) TABULAR: it asks for a figure, amount, count, total, average, ranking, "
+    "date or status that lives in the namespace's relational tables (budgets, costs, "
+    "KPIs, counts of records, values of a column). If a structured tool is in the "
+    "catalog, select it NOW as your single candidate: 'nl_to_sparql' when the "
+    "question is phrased in the ontology's concept and property names, otherwise "
+    "'nl_to_sql'. Do NOT resolve the ontology or anchor entities in the graph first "
+    "for a tabular sub-question; the structured tool resolves the schema itself.\n"
+    "(b) DOCUMENTS / RELATIONSHIPS: it asks what a document says, decided, "
+    "recommends or describes, or how entities relate across documents. Follow the "
+    "graph strategy below.\n"
+    "(c) If the structured tool was already tried for this sub-question and returned "
+    "no rows, treat the sub-question as (b) from now on.\n\n"
+)
+
+_PROPOSE_SYSTEM_STRUCTURED_FIRST = _PROPOSE_SYSTEM.replace(
+    "RECOMMENDED APPROACH — your standing strategy for questions about entities "
+    "and their relationships (most questions). Apply it even when the question "
+    "does NOT explicitly ask for it; it is your standing strategy, not something "
+    "the user must request. Skip a step only when the gathered-context summary "
+    "shows it is already done or clearly does not apply:\n",
+    _STRUCTURED_FIRST_MODALITY_RULE + "GRAPH STRATEGY — for DOCUMENT / RELATIONSHIP sub-questions (modality (b)) "
+    "only. Skip a step when the gathered-context summary shows it is already done "
+    "or clearly does not apply:\n",
+)
+assert _PROPOSE_SYSTEM_STRUCTURED_FIRST != _PROPOSE_SYSTEM, (
+    "structured_first profile must rewrite the standing strategy"
+)
+
+_PROPOSE_SYSTEM_BY_PROFILE: dict[str, str] = {
+    PLANNER_PROFILE_LEGACY: _PROPOSE_SYSTEM,
+    PLANNER_PROFILE_STRUCTURED_FIRST: _PROPOSE_SYSTEM_STRUCTURED_FIRST,
+}
+
+
+def propose_system_for(profile: str | None) -> str:
+    """The propose system prompt for ``profile``; unknown or empty falls back to legacy."""
+    return _PROPOSE_SYSTEM_BY_PROFILE.get(profile or PLANNER_PROFILE_LEGACY, _PROPOSE_SYSTEM)
+
+
 # Optional chunk-window guidance, appended to the propose prompt ONLY when the
 # chunk_window tool is actually registered (it is gated off by default via
 # AGENTIC_ENABLE_CHUNK_WINDOW). Advertising it unconditionally caused the planner
@@ -301,7 +356,9 @@ class BedrockStepPlanner:
         prompt = self._build_propose_prompt(question, context, tool_specs)
         # Only advertise the chunk-window tool when it is actually registered
         # (gated off by default), so the planner never selects an unregistered tool.
-        system = _PROPOSE_SYSTEM
+        # The system prompt follows the request's planner profile (ADR 0013); the
+        # default profile reproduces the legacy prompt byte for byte.
+        system = propose_system_for(getattr(context, "planner_profile", None))
         if any((spec.get("name") if isinstance(spec, dict) else "") == "chunk_window" for spec in tool_specs):
             system += _CHUNK_WINDOW_INSTRUCTION
         try:

@@ -376,6 +376,7 @@ def build_agentic_retriever(
         synthesizer,
         budget,
         embed_client=embed_client if embed_client is not None else clients.llm,
+        planner_profile=config.deep_reasoning_planner_profile,
     )
 
 
