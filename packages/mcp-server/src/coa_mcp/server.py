@@ -330,6 +330,11 @@ QueryStrategyLiteral = Literal[
     "deep-reasoning",
 ]
 
+# ADR 0013: deep-reasoning planner profiles; mirrors
+# ``coa_serve.models._validate_planner_profile`` and
+# ``coa_serve.tier3.agentic.planner.PLANNER_PROFILES``.
+PlannerProfileLiteral = Literal["legacy", "structured_first"]
+
 
 @mcp.tool()
 async def query(
@@ -344,6 +349,7 @@ async def query(
     includeSupporting: bool = True,
     maxResults: int = 1000,
     timeoutMs: int | None = None,
+    plannerProfile: PlannerProfileLiteral | None = None,
 ) -> str:
     """End-to-end natural language query with tiered resolution.
 
@@ -386,6 +392,13 @@ async def query(
             the MCP transport timeout in milliseconds (120000 by default, set
             by ``CM_INVOKE_TIMEOUT_S``); any other value is rejected with a
             tool error.
+        plannerProfile: Deep-reasoning planner profile, read only when the
+            request runs in ``deep-reasoning`` mode. ``legacy`` keeps the
+            graph-first standing strategy for every sub-question;
+            ``structured_first`` decides each sub-question's modality first, so
+            a tabular question (figure, count, amount) goes straight to the
+            structured tools, and resolves the ontology once before the
+            sub-questions fan out. Absent = the serve deployment default.
 
     Returns:
         JSON envelope ``{result, requestId, sessionId}`` matching the Smithy
@@ -412,6 +425,7 @@ async def query(
             include_supporting=includeSupporting,
             max_results=maxResults,
             timeout_ms=timeoutMs,
+            planner_profile=plannerProfile,
         )
         duration_ms = int((time.perf_counter() - start) * 1000)
         if caller:

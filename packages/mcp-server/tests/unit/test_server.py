@@ -478,6 +478,23 @@ class TestQueryTool:
         assert captured["timeout_ms"] == 5000
 
     @pytest.mark.asyncio
+    async def test_forwards_planner_profile(self, monkeypatch, _local_dev):
+        """ADR 0013: ``plannerProfile`` reaches the helper as ``planner_profile``;
+        absent, it is forwarded as None so the deployment default applies."""
+        captured: dict = {}
+
+        async def fake_delegate(cm, query_text, ns, profile, token, **kwargs):
+            captured.update(kwargs)
+            return {"result": {}}
+
+        monkeypatch.setattr(server.execution, "execute_query", fake_delegate)
+        await server.query(None, "hi", "sales", mode="deep-reasoning", plannerProfile="structured_first")
+        assert captured["planner_profile"] == "structured_first"
+        captured.clear()
+        await server.query(None, "hi", "sales")
+        assert captured.get("planner_profile") is None
+
+    @pytest.mark.asyncio
     async def test_backend_error_reraised(self, monkeypatch, _local_dev):
         async def boom(*args, **kwargs):
             raise RuntimeError("cm down")
