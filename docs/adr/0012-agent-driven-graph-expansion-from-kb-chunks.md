@@ -246,13 +246,75 @@ What the run did not cover, and why:
   script), a Knowledge Base sync and a COA rescan. The second reader is the
   same person with a changed ACL, as in the ADR 0011 run, since one Entra
   identity is available.
-- **The outer-agent leg.** Deployed (v6, `COA_GRAPH_EXPANSION_SCOPE` set) but
-  not exercised against this fixture: the runtime's Bedrock client and IAM
-  grant are bound to the stack Region (us-east-1) while the test Knowledge
-  Base is in eu-central-1, its `SOURCE_TARGETS_JSON` names only the
-  deployment's existing us-east-1 target, and the namespace's integration profile names only a
-  `COA_GRAPH` target the agent has no adapter for. Running it needs a
-  per-target `region` in the outer agent's target config (code), the fixture
-  Knowledge Base added to the deployment's targets (SSM), and the namespace
-  profile pointed at that target (control plane). None of these is a defect of
-  the operation; they are the cost of a fixture in another Region.
+- **The outer-agent leg** was not exercised on 2026-10-31 (Region, allowlist
+  and profile gaps). It was on 2026-11-01; see the next section.
+
+### Deployed run, 2026-11-01: the outer-agent leg end to end (`ffa65e9`)
+
+Three things stood between the deployed agent (v6) and this fixture, none a
+defect of `expand_chunks`: the namespace had no accepted ontology, so every
+plan came back `AMBIGUOUS` with `ONTOLOGY_VERSION_UNVERIFIED` and zero
+directives; the namespace profile named a `COA_GRAPH` target the agent has no
+adapter for; and the agent's Bedrock client, IAM grant and target allowlist
+were bound to the stack Region (us-east-1) while the fixture Knowledge Base is
+in eu-central-1. Closing them:
+
+1. **Ontology.** The ontology stack was redeployed on the T-Box-only induction
+   (ADR 0011). `POST /induce` with `strategy: unstructured_lexical_graph` on
+   the Knowledge Base source completed in 2 s: 1 class (`Process`), 2 datatype
+   properties (`has capital allocation`, `duration`), 0 individuals, 0
+   concepts, and the ADR 0011 warning on the proposal. Accepted; the live
+   ontology is `induced-20261101T173723Z`.
+2. **Profile.** `PUT /namespaces/{id}`: `ACCELERATE`, `profileVersion 2`,
+   `ontologyVersion` set to that version, one target `knowledge-hub`
+   (`MANAGED_KB`, `READ_ONLY`), `generationTarget portkey`.
+3. **Target.** The deployment's `outerAgent.sourceTargets` gained
+   `knowledge-hub` with `region eu-central-1`, `dataSourceIds` the fixture's
+   data source, `reranking NONE` (the fixture is a managed-search Knowledge
+   Base on a custom embedding model). The outer agent and its stack grew the
+   matching knobs; the IAM grant now names the eu-central-1 KB ARN.
+
+Four agent defects surfaced only once the leg ran, each fixed and covered by a
+unit test on the recorded shape:
+
+| Symptom (agent response) | Cause | Fix |
+|---|---|---|
+| `SemanticPlanUnresolved 409` against a plan COA returned as `RESOLVED` | FastMCP wraps a tool's text return in `structuredContent: {"result": "<json string>"}`; the client returned the envelope and the orchestrator found no `plan` in it | the single-key string envelope is parsed (`f825550`) |
+| `InternalError 500`, no detail | botocore `ClientError` from `AgenticRetrieveStream` escaped the adapter | mapped to `SourceUnavailable 502` with the service's code and message (`73bf2f0`) |
+| `ValidationException: Managed reranking is not supported for knowledge bases with custom embedding models` | `rerankingModelType MANAGED` hard-coded | per-target `reranking` (`MANAGED` \| `NONE`), default unchanged (`c901fd1`) |
+| `ValidationError 400: Portkey response failed the grounded-answer contract` on a question the user's evidence cannot answer | the contract required at least one claim; the model honestly returned `{"claims": []}` | empty claims is the deterministic refusal, and the prompt asks for it (`ffa65e9`) |
+
+The chain, as a signed-in Entra user granted finance only
+(`sim/ppm/onboarding/coa_outer_agent_probe.sh`, outer-agent v10):
+
+| Question | `coa.semantic_plan` | `sources.execute` | `coa.expand_chunks` | Answer |
+|---|---|---|---|---|
+| capital allocation for fiscal 2026 and its split | `RESOLVED`, ontology `induced-20261101T173723Z`, 1 directive `knowledge-hub`/`MANAGED_KB`, 14 s | 1 item: the finance chunk, 4 s | 1 seed, 14 facts, related 0, withheld 0/0/0, 15 s | two cited claims: 14.2 M EUR; 58 % crop protection R&D, 27 % seed treatment trials, 15 % digital agronomy. `[E1, E10, E11]`, `[E1, E4, E6, E8]`. 35 s total |
+| duration of the onboarding process | same | same finance chunk (the only document this reader may see) | same 14 finance facts | "The authorized evidence does not support an answer to this question." |
+| which process has a capital allocation for onboarding and leave policies in HR | same | same | same | same refusal |
+
+Nothing from `hr/` or `shared/` reached the evidence or the answer on any of
+the three questions; the refusal is the agent's, from the model's empty claim
+list, with the finance evidence still listed in the response for audit.
+
+Two boundaries this run made visible, both upstream of `expand_chunks`:
+
+- **Planning is gated on NL-to-SPARQL.** `semantic_execution_plan` returns
+  `400 Could not generate a semantic source directive` when the translator
+  yields no SPARQL, which happens when the question names nothing in the
+  namespace ontology ("Who is the HR contact and what are the leave and
+  onboarding policies?" against a vocabulary of `Process`, `has capital
+  allocation`, `duration`). A question on a document domain whose vocabulary
+  is not in the ontology never reaches the Knowledge Base. The agent reports
+  this as `SemanticPlanUnresolved`; the richer the T-Box, the fewer the
+  refusals. Not changed here.
+- **The second reader.** Still the same person with a changed ACL; the fixture
+  grant is an S3 upload the agent's host policy blocks, so the HR-side
+  observation is run by a human (`coa_kb_fixture_add_user.sh <email> hr`,
+  then the probe again). The cross-document cut still needs an entity shared
+  by two documents, as noted above.
+
+Scripts: `sim/ppm/onboarding/deploy_agent_leg.sh` (outer-agent + ontology
+stacks, asserts the SSM target reaches the runtime), `ssm_add_kb_target.py`
+(idempotent allowlist edit), `coa_outer_agent_probe.sh` (the chain as the
+signed-in user, prints trace, plan, evidence and answer).
