@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 import boto3
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .evidence import Evidence, extract_evidence
 from .identity import TrustedIdentity
@@ -169,20 +170,34 @@ class ManagedKnowledgeBaseAdapter:
             retriever_kb["retrievalOverrides"] = {
                 "filter": {"in": {"key": "_data_source_id", "value": list(target.data_source_ids)}}
             }
-        response = self._get_client(target.region or self._region).agentic_retrieve_stream(
-            agenticRetrieveConfiguration={
-                "foundationModelType": "MANAGED",
-                "rerankingModelType": "MANAGED",
-                "maxAgentIteration": target.max_agent_iterations,
-            },
-            generateResponse=False,
-            messages=[{"role": "user", "content": {"text": directive.query}}],
-            retrievers=[
-                {"configuration": {"knowledgeBase": {"knowledgeBaseId": knowledge_base_id, **retriever_kb}}}
-                for knowledge_base_id in target.knowledge_base_ids
-            ],
-            userContext=identity.knowledge_user_context,
-        )
+        try:
+            response = self._get_client(target.region or self._region).agentic_retrieve_stream(
+                agenticRetrieveConfiguration={
+                    "foundationModelType": "MANAGED",
+                    "rerankingModelType": "MANAGED",
+                    "maxAgentIteration": target.max_agent_iterations,
+                },
+                generateResponse=False,
+                messages=[{"role": "user", "content": {"text": directive.query}}],
+                retrievers=[
+                    {"configuration": {"knowledgeBase": {"knowledgeBaseId": knowledge_base_id, **retriever_kb}}}
+                    for knowledge_base_id in target.knowledge_base_ids
+                ],
+                userContext=identity.knowledge_user_context,
+            )
+        except ClientError as exc:
+            # A rejected call (ValidationException, AccessDenied, ...) is a
+            # source failure the operator can act on, not an internal error.
+            # The service message names the parameter; it carries no content.
+            error = exc.response.get("Error", {})
+            raise SourceExecutionError(
+                f"Managed KB call rejected for target {target.target_id}: "
+                f"{error.get('Code', 'ClientError')}: {error.get('Message', '')}"[:500]
+            ) from exc
+        except BotoCoreError as exc:
+            raise SourceExecutionError(
+                f"Managed KB call failed for target {target.target_id}: {type(exc).__name__}"
+            ) from exc
 
         stream = response.get("stream")
         if stream is None:

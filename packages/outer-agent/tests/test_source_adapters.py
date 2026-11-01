@@ -243,3 +243,23 @@ async def test_managed_kb_without_data_source_scope_sends_no_filter():
 
     kb = client.agentic_retrieve_stream.call_args.kwargs["retrievers"][0]["configuration"]["knowledgeBase"]
     assert "retrievalOverrides" not in kb
+
+
+@pytest.mark.asyncio
+async def test_rejected_managed_kb_call_is_a_source_failure_naming_the_service_error():
+    """A ClientError at call time must surface as SourceExecutionError (502 with the service's message),
+    not escape as an anonymous internal error."""
+    from botocore.exceptions import ClientError
+
+    client = MagicMock()
+    client.agentic_retrieve_stream.side_effect = ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "retrievalOverrides.filter is not supported"}},
+        "AgenticRetrieveStream",
+    )
+    registry = SourceAdapterRegistry(
+        region="us-east-1",
+        targets={"hub": SourceTargetConfig("hub", "MANAGED_KB", ("ABCDEFGHIJ",))},
+        managed_kb_client=client,
+    )
+    with pytest.raises(SourceExecutionError, match="target hub: ValidationException: retrievalOverrides"):
+        await registry.execute(_directive(target_id="hub"), _identity())
