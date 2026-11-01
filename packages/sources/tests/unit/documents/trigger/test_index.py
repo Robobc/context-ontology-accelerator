@@ -372,7 +372,7 @@ class TestBedrockKbFlattening:
             **_VALID_BODY,
             "s3_prefixes": [],
             "bedrock_kb": {
-                "knowledgeBaseId": "71RZ44THV5",
+                "knowledgeBaseId": "KBTEST0001",
                 "dataSourceIds": ["EFLHLJMXMZ", "IBFPVKIBZU"],
                 "region": "eu-central-1",
                 "crossAccountRoleArn": "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb",
@@ -383,7 +383,7 @@ class TestBedrockKbFlattening:
         call_input = json.loads(mock_sfn.start_execution.call_args.kwargs["input"])
         assert call_input["input_mode"] == "BEDROCK_KB"
         assert call_input["vector_store_mode"] == "DUMMY"
-        assert call_input["bedrock_kb_id"] == "71RZ44THV5"
+        assert call_input["bedrock_kb_id"] == "KBTEST0001"
         assert call_input["bedrock_kb_data_source_ids"] == "EFLHLJMXMZ,IBFPVKIBZU"
         assert call_input["bedrock_kb_region"] == "eu-central-1"
         assert call_input["bedrock_kb_cross_account_role_arn"].endswith("coa-dev-datasource-access-kb")
@@ -394,7 +394,7 @@ class TestBedrockKbFlattening:
 
     @patch.object(index, "sfn_client")
     def test_kb_message_without_optional_fields(self, mock_sfn):
-        body = {**_VALID_BODY, "bedrock_kb": {"knowledgeBaseId": "71RZ44THV5", "crossAccountRoleArn": "arn:x"}}
+        body = {**_VALID_BODY, "bedrock_kb": {"knowledgeBaseId": "KBTEST0001", "crossAccountRoleArn": "arn:x"}}
         index.handler(_make_event(_make_record(body)), None)
         call_input = json.loads(mock_sfn.start_execution.call_args.kwargs["input"])
         assert call_input["input_mode"] == "BEDROCK_KB"

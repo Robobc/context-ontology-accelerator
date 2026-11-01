@@ -4,7 +4,7 @@
 """Unit tests for the Bedrock Managed KB chunk loader (fork, INPUT_MODE=BEDROCK_KB).
 
 The Bedrock clients are fakes replaying recorded response shapes, verified
-against a live Managed KB (``71RZ44THV5``, 2026-10-25 and 2026-10-30):
+against a live test Managed KB (eu-central-1, 2026-10-25 and 2026-10-30):
 ``metadata._chunk_id``; ``documentId`` is the ``s3://`` URI for an S3 data source
 while ``_source_uri`` (the key the KB filters on) is the ``https://`` form;
 ``nextToken`` paging; ``ListKnowledgeBaseDocuments`` refusing SharePoint data
@@ -30,7 +30,7 @@ from llama_index.core.schema import NodeRelationship, TextNode
 # Mirror graph_build's test module: it stubs graphrag_toolkit before importing.
 from . import test_graph_build as _gb  # noqa: F401  (import for its sys.modules stubs)
 
-KB = "71RZ44THV5"
+KB = "KBTEST0001"
 DS_S3 = "IBFPVKIBZU"
 DS_SP = "EFLHLJMXMZ"
 

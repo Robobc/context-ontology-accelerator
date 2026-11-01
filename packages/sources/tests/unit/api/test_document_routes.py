@@ -423,7 +423,7 @@ class TestCreateDocumentSource:
 _KB_ROLE = "arn:aws:iam::222233334444:role/coa-dev-datasource-access-kb"
 
 
-def _make_kb_cfg(role_arn=_KB_ROLE, kb_id="71RZ44THV5", data_source_ids=None, region=None, extraction_user_id=None):
+def _make_kb_cfg(role_arn=_KB_ROLE, kb_id="KBTEST0001", data_source_ids=None, region=None, extraction_user_id=None):
     cfg = MagicMock()
     cfg.knowledge_base_id = kb_id
     cfg.data_source_ids = data_source_ids
@@ -475,7 +475,7 @@ class TestCreateBedrockManagedKbSource:
         assert item["s3Prefixes"] == []
         assert "sourceBucketArn" not in item and "roleArn" not in item
         assert item["bedrockKnowledgeBaseConfiguration"] == {
-            "knowledgeBaseId": "71RZ44THV5",
+            "knowledgeBaseId": "KBTEST0001",
             "crossAccountRoleArn": _KB_ROLE,
             "dataSourceIds": ["EFLHLJMXMZ", "IBFPVKIBZU"],
             "region": "eu-central-1",
@@ -490,7 +490,7 @@ class TestCreateBedrockManagedKbSource:
         status, _, dao, _ = self._create(req)
         assert status == 201
         assert dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"] == {
-            "knowledgeBaseId": "71RZ44THV5",
+            "knowledgeBaseId": "KBTEST0001",
             "crossAccountRoleArn": _KB_ROLE,
         }
 
@@ -569,7 +569,7 @@ class TestCreateBedrockManagedKbSource:
         status, _, dao, sqs = self._create(req)
         assert status == 201
         stored = dao.put.call_args[0][0]["bedrockKnowledgeBaseConfiguration"]
-        assert stored == {"knowledgeBaseId": "71RZ44THV5"}
+        assert stored == {"knowledgeBaseId": "KBTEST0001"}
         job = json.loads(sqs.send_message.call_args.kwargs["MessageBody"])
         assert "crossAccountRoleArn" not in job["bedrock_kb"]
 

@@ -146,9 +146,9 @@ class TestDataSourceScope:
         client = MagicMock()
         client.retrieve.return_value = {"retrievalResults": []}
         set_request_user("alice@example.com")
-        await self._retriever(["22THWQRHON"], client).retrieve("q", NS)
+        await self._retriever(["DSTEST0001"], client).retrieve("q", NS)
         cfg = client.retrieve.call_args.kwargs["retrievalConfiguration"]["managedSearchConfiguration"]
-        assert cfg["filter"] == {"equals": {"key": "_data_source_id", "value": "22THWQRHON"}}
+        assert cfg["filter"] == {"equals": {"key": "_data_source_id", "value": "DSTEST0001"}}
 
     @pytest.mark.asyncio
     async def test_several_data_sources_use_in_and_combine_with_a_server_filter(self):
@@ -171,12 +171,12 @@ class TestDataSourceScope:
     async def test_entitlement_probe_carries_the_scope(self):
         client = MagicMock()
         client.retrieve.return_value = {"retrievalResults": [{"content": {"text": "x"}}]}
-        r = self._retriever(["22THWQRHON"], client)
+        r = self._retriever(["DSTEST0001"], client)
         assert await r.entitled_source_uris(["https://b/doc.txt"], user_id="alice@example.com") == {"https://b/doc.txt"}
         flt = client.retrieve.call_args.kwargs["retrievalConfiguration"]["managedSearchConfiguration"]["filter"]
         assert flt == {
             "andAll": [
-                {"equals": {"key": "_data_source_id", "value": "22THWQRHON"}},
+                {"equals": {"key": "_data_source_id", "value": "DSTEST0001"}},
                 {"equals": {"key": "_source_uri", "value": "https://b/doc.txt"}},
             ]
         }

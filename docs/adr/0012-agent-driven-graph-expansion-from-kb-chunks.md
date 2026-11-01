@@ -202,14 +202,14 @@ Stacks `api` (route + authorizer), `data-layer`, `serve`, `mcp`, `outer-agent`
 redeployed; serve v16 and mcp v7 share one image, outer-agent v6, all `READY`;
 `POST /namespaces/{id}/graph/expand` present on the REST API; a fresh MCP
 session lists nine tools including `expand_chunks`. Fixture: namespace
-`fmkb-acl-test`, Knowledge Base `71RZ44THV5` (eu-central-1), data source
-`22THWQRHON` holding three documents (finance: alice + the caller below; HR and
+`fmkb-acl-test`, a test Knowledge Base in eu-central-1 with one S3 data
+source holding three documents (finance: alice + the caller below; HR and
 shared: bob only; extractor: all three). The probe
 (`sim/ppm/onboarding/coa_expand_probe.sh`) plays the agent: `Retrieve` on the
 Knowledge Base as the signed-in user, then `expand_chunks` over MCP (and
 `/graph/expand` over REST) with that user's Entra token.
 
-| Step | Caller `catalanoroberto@outlook.com` (finance only) | Result |
+| Step | Caller: a signed-in Entra user granted finance only | Result |
 |---|---|---|
 | `Retrieve` as the user, scoped to the data source | 1 chunk: `budget-2026.txt` (`Ukhx_oqNv…`) | the KB's own ACL; the unscoped KB also returns copies from other, un-ACL'd data sources, which is why serve scopes every call (ADR 0011) |
 | `expand_chunks`, `SEED_DOCUMENTS` | 5 entities (Zafrilon, Crop Protection R&D, Seed Treatment Trials, Digital Agronomy, Reserve Buffer), 14 facts, all from `budget-2026.txt`; related 0; withheld 0/0/0; 1.1 s | hop 1 as designed |
@@ -237,7 +237,7 @@ What the run did not cover, and why:
   not exercised against this fixture: the runtime's Bedrock client and IAM
   grant are bound to the stack Region (us-east-1) while the test Knowledge
   Base is in eu-central-1, its `SOURCE_TARGETS_JSON` names only the
-  `KSNNIPAVKJ` target, and the namespace's integration profile names only a
+  deployment's existing us-east-1 target, and the namespace's integration profile names only a
   `COA_GRAPH` target the agent has no adapter for. Running it needs a
   per-target `region` in the outer agent's target config (code), the fixture
   Knowledge Base added to the deployment's targets (SSM), and the namespace

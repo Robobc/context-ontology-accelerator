@@ -41,7 +41,7 @@ Knowledge Base's own authorization.
 
 Facts the design depends on, verified against the pinned toolkit
 (`graphrag-lexical-graph` 3.18.7) and a live Managed Knowledge Base
-(`71RZ44THV5`, eu-central-1, 2026-10-25 and 2026-10-30):
+(a test Managed KB in eu-central-1, 2026-10-25 and 2026-10-30):
 
 - `Retrieve` returns `metadata._chunk_id` per result, stable across syncs and
   content-derived (observed; the service team has been asked whether it is
@@ -436,7 +436,7 @@ second review phrased it:
    those (`documents_not_visible` equals the rest).
 
 **Deployed run, 2026-10-31, syngenta-eba-dev (us-east-1) against KB
-`71RZ44THV5` (eu-central-1, same account), data source `acl-s3-test`
+a test Managed KB (eu-central-1, same account), data source `acl-s3-test`
 (finance=alice, hr+shared=bob, extraction identity granted all three).**
 Namespace `fmkb-acl-test`, source registered through the API with
 `extractionUserId`, no role (same account). Results against the items above:
