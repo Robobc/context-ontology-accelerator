@@ -42,7 +42,14 @@ class _Claim(BaseModel):
 class _GroundedAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    claims: list[_Claim] = Field(min_length=1, max_length=50)
+    # An empty list is the model's honest answer when the authorized evidence
+    # does not support the question (the Knowledge Base returned the user's
+    # chunks, none of them on topic). It becomes NO_SUPPORTED_ANSWER below,
+    # not a contract failure.
+    claims: list[_Claim] = Field(max_length=50)
+
+
+NO_SUPPORTED_ANSWER = "The authorized evidence does not support an answer to this question."
 
 
 class PortkeyGenerationClient:
@@ -109,7 +116,8 @@ class PortkeyGenerationClient:
             '{"claims":[{"text":"one independently supportable claim",'
             '"evidenceIds":["E1"]}]}. Every claim must cite one or more evidence '
             "IDs present in the authorized evidence. Do not use the semantic plan "
-            "as evidence and do not add an overall uncited summary."
+            "as evidence and do not add an overall uncited summary. If the "
+            'authorized evidence does not answer the question, return {"claims":[]}.'
         )
         raw_prompt = strip_hidden_model_characters(
             f"Question:\n{question}\n\n"
@@ -159,6 +167,8 @@ class PortkeyGenerationClient:
         for claim in grounded.claims:
             if not set(claim.evidenceIds).issubset(available_ids):
                 raise ValueError("Portkey response cited unknown evidence")
+        if not grounded.claims:
+            return NO_SUPPORTED_ANSWER
         answer = "\n".join(f"{claim.text} [{', '.join(claim.evidenceIds)}]" for claim in grounded.claims)
         await self.screen(answer, "OUTPUT")
         return answer
