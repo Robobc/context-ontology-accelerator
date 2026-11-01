@@ -53,6 +53,9 @@ Options:
 - `timeoutMs` — cap the server-side resolution budget for this request, an
   integer from 1 to 29000 (the REST ceiling). It can only *lower* the budget;
   a value outside that range is rejected with `400`.
+- `plannerProfile` — `legacy` or `structured_first`; how the Deep Reasoning
+  planner picks a sub-question's first tool. Read only when `mode` is
+  `deep-reasoning` (see below); absent means the deployment default.
 
 > **⚠️ REST has a hard 29-second timeout.** The REST endpoint runs behind API
 > Gateway, whose integration timeout is a fixed **29 s** (`timeoutInMillis: 29000`)
@@ -183,6 +186,45 @@ Behaviour notes:
 - Deterministic *always-run-both* joint retrieval (structured + document in one
   guaranteed pass, rather than at the planner's discretion) is roadmap work,
   tracked as issue #417.
+
+##### Planner profile — `plannerProfile`
+
+The Deep Reasoning planner's default strategy is graph-first: for every
+sub-question it looks the ontology up, anchors entities and traverses, and the
+structured tools are only "also available". All sub-questions of one request
+share a single step budget (`DEEP_REASONING_MAX_STEPS`, default 5), so a mixed
+question that decomposes into a tabular and a document sub-question can spend
+the whole budget on two ontology lookups and graph anchoring and never call
+`nl_to_sql`, ending with `max_steps_reached` and an answer that misses the
+figure it was asked for. `plannerProfile` selects how the planner routes:
+
+| Value | Behaviour |
+|---|---|
+| `legacy` | The graph-first standing strategy for every sub-question. **The default when the deployment sets nothing.** Byte for byte the planner prompt that shipped before this option existed. |
+| `structured_first` | The planner decides each sub-question's **modality** first: a tabular sub-question (a figure, amount, count, total, status held in the namespace's tables) goes straight to `nl_to_sql` or `nl_to_sparql`; a document or relationship sub-question follows the graph strategy. The namespace ontology is resolved **once, before the sub-questions fan out**, at zero step cost, instead of once per sub-question inside the budget. |
+
+```json
+{ "query": "What is the full cost of project X, and what did its latest stage-gate memo decide?",
+  "options": { "mode": "deep-reasoning", "plannerProfile": "structured_first" } }
+```
+
+Notes:
+
+- **Optional and additive.** Omitting it follows the deployment default
+  (`DEEP_REASONING_PLANNER_PROFILE`, `legacy` unless set), so an existing
+  deployment moves nothing.
+- **Ignored in `standard` mode.** It is a Deep Reasoning planner setting; the
+  cascade never reads it.
+- **Validation.** Any value other than `legacy` or `structured_first` is
+  rejected with **400**.
+- **Observable in the trace.** A non-default profile records a `planner_profile`
+  step, and the pre-resolve records `ontology_preresolved` with `success`,
+  `skipped` (tool withheld or no ontology) or `failed` (the loop proceeds as
+  before; the answer is flagged partial).
+- Source-composition gating still applies: on a document-only namespace the
+  structured tools are withheld and the modality rule has nothing to route to.
+- Same surfaces as `mode`: REST / streaming `options.plannerProfile`, and the
+  MCP `query` tool's `plannerProfile` argument.
 
 #### Which Tier-3 path consults the published ontology?
 
