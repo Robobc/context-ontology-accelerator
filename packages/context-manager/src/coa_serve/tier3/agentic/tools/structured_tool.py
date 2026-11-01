@@ -59,6 +59,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = structlog.get_logger(__name__)
 
 NL_TO_SQL_TOOL = "nl_to_sql"
+# How much of the planner's ``query`` input the trace detail keeps (ADR 0013).
+_QUERY_SNIPPET_WIDTH = 160
 
 NL_TO_SPARQL_TOOL = "nl_to_sparql"
 
@@ -185,15 +187,20 @@ class StructuredQueryTool:
             )
             return ToolResult(detail=f"{self.name} error: {type(exc).__name__}")
 
+        # The planner's ``query`` is its own rewrite of the sub-question and is the
+        # one input that decides what SQL is generated (the table context is the
+        # same as the standard Tier-2 path's); record it so a trace can tell a
+        # translation miss from a planner paraphrase that dropped the filter.
+        asked = f" | q: {query[:_QUERY_SNIPPET_WIDTH]}" if query else ""
         if result is None or not result.rows:
             detail = f"{self.name}: no rows" if result is None else f"{self.name}: 0 rows"
-            return ToolResult(detail=detail)
+            return ToolResult(detail=detail + asked)
 
         rows = tuple(result.rows)
         # Mirror rows into items so accumulation/observability see them under the
         # generic item view too (chunks/entities stay empty for a structured tool).
         items = tuple({"type": "row", **row} for row in result.rows)
-        detail = f"{self.name}: {len(rows)} rows via {result.strategy_name} (conf {result.confidence:.2f})"
+        detail = f"{self.name}: {len(rows)} rows via {result.strategy_name} (conf {result.confidence:.2f}){asked}"
         return ToolResult(rows=rows, items=items, detail=detail)
 
 
