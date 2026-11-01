@@ -62,7 +62,7 @@ class McpJsonClient:
         if result.isError:
             raise McpToolError(self._text_error(result.content))
         if result.structuredContent is not None:
-            return result.structuredContent
+            return self._unwrap_structured(result.structuredContent)
 
         values: list[Any] = []
         for item in result.content:
@@ -76,6 +76,22 @@ class McpJsonClient:
         if not values:
             return {}
         return values[0] if len(values) == 1 else values
+
+    @staticmethod
+    def _unwrap_structured(value: Any) -> Any:
+        """Undo the ``{"result": <text>}`` envelope FastMCP puts around a tool's string return.
+
+        COA's tools return their JSON as text, so the envelope hides the payload
+        one level down as a string; callers then search a dict that has no
+        ``plan`` or ``facts`` in it. A JSON text is parsed, any other text is
+        returned as is, and a structured object is left untouched.
+        """
+        if isinstance(value, dict) and set(value) == {"result"} and isinstance(value["result"], str):
+            try:
+                return json.loads(value["result"])
+            except json.JSONDecodeError:
+                return value["result"]
+        return value
 
     @staticmethod
     def _text_error(content: list[Any]) -> str:
