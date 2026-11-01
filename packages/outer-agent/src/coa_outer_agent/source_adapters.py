@@ -24,12 +24,21 @@ class SourceExecutionError(RuntimeError):
 
 @dataclass(frozen=True)
 class SourceTargetConfig:
-    """Deployment-owned configuration for one logical plan target."""
+    """Deployment-owned configuration for one logical plan target.
+
+    ``region`` is the Region the Knowledge Bases live in; ``None`` means the
+    runtime's own Region. ``data_source_ids`` restricts every retriever of the
+    target to those Knowledge Base data sources (the same ``_data_source_id``
+    scope a COA-registered ``BEDROCK_MANAGED_KB`` source carries); empty means
+    the whole Knowledge Base.
+    """
 
     target_id: str
     kind: str
     knowledge_base_ids: tuple[str, ...] = ()
     max_agent_iterations: int = 5
+    region: str | None = None
+    data_source_ids: tuple[str, ...] = ()
 
 
 class SourceAdapter(Protocol):
@@ -101,25 +110,34 @@ class ManagedKnowledgeBaseAdapter:
     """Execute evidence-only AgenticRetrieveStream under trusted user context."""
 
     def __init__(self, *, region: str, client: Any | None = None) -> None:
-        """Configure a lazy Bedrock Agent Runtime client."""
+        """Configure lazy, per-Region Bedrock Agent Runtime clients.
+
+        ``region`` is the default for targets that name none. An injected
+        ``client`` serves every Region (tests).
+        """
         self._region = region
-        self._client = client
+        self._clients: dict[str, Any] = {}
+        self._injected = client
         self._lock = threading.Lock()
 
-    def _get_client(self):
-        if self._client is None:
+    def _get_client(self, region: str):
+        if self._injected is not None:
+            return self._injected
+        client = self._clients.get(region)
+        if client is None:
             with self._lock:
-                if self._client is None:
-                    self._client = boto3.client(
+                client = self._clients.get(region)
+                if client is None:
+                    client = self._clients[region] = boto3.client(
                         "bedrock-agent-runtime",
-                        region_name=self._region,
+                        region_name=region,
                         config=BotoConfig(
                             read_timeout=120,
                             connect_timeout=10,
                             retries={"mode": "adaptive", "max_attempts": 3},
                         ),
                     )
-        return self._client
+        return client
 
     async def execute(
         self,
@@ -146,7 +164,12 @@ class ManagedKnowledgeBaseAdapter:
         # @amsec-loaf: mcp_authentication
         # The validated human identity is preserved as Managed-KB userContext;
         # service credentials authorize the API call but never replace the user.
-        response = self._get_client().agentic_retrieve_stream(
+        retriever_kb: dict[str, Any] = {}
+        if target.data_source_ids:
+            retriever_kb["retrievalOverrides"] = {
+                "filter": {"in": {"key": "_data_source_id", "value": list(target.data_source_ids)}}
+            }
+        response = self._get_client(target.region or self._region).agentic_retrieve_stream(
             agenticRetrieveConfiguration={
                 "foundationModelType": "MANAGED",
                 "rerankingModelType": "MANAGED",
@@ -155,7 +178,7 @@ class ManagedKnowledgeBaseAdapter:
             generateResponse=False,
             messages=[{"role": "user", "content": {"text": directive.query}}],
             retrievers=[
-                {"configuration": {"knowledgeBase": {"knowledgeBaseId": knowledge_base_id}}}
+                {"configuration": {"knowledgeBase": {"knowledgeBaseId": knowledge_base_id, **retriever_kb}}}
                 for knowledge_base_id in target.knowledge_base_ids
             ],
             userContext=identity.knowledge_user_context,

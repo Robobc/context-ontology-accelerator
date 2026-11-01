@@ -31,7 +31,12 @@ def _positive_int(name: str, default: int) -> int:
 
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _KB_ID_RE = re.compile(r"^[A-Za-z0-9]{10}$")
+# Knowledge Base data source ids share the KB id grammar.
+_DATA_SOURCE_ID_RE = _KB_ID_RE
+# AWS Region names: us-east-1, eu-central-1, us-gov-west-1, eusc-de-east-1.
+_REGION_RE = re.compile(r"^[a-z]{2,4}(-[a-z]+){1,2}-\d$")
 _TARGET_KINDS = {"MANAGED_KB", "GOVERNED_QUERY", "EXTERNAL_GRAPH", "COA_GRAPH"}
+_MANAGED_KB_FIELDS = {"kind", "knowledgeBaseIds", "maxAgentIterations", "region", "dataSourceIds"}
 
 
 def _source_targets() -> dict[str, SourceTargetConfig]:
@@ -52,9 +57,20 @@ def _source_targets() -> dict[str, SourceTargetConfig]:
         kind = item.get("kind")
         if kind not in _TARGET_KINDS:
             raise ValueError(f"Source target {target_id} has an invalid kind")
-        allowed_fields = {"kind", "knowledgeBaseIds", "maxAgentIterations"} if kind == "MANAGED_KB" else {"kind"}
+        allowed_fields = _MANAGED_KB_FIELDS if kind == "MANAGED_KB" else {"kind"}
         if extra := set(item) - allowed_fields:
             raise ValueError(f"Source target {target_id} has unsupported fields: {sorted(extra)}")
+
+        region = item.get("region")
+        if region is not None and (not isinstance(region, str) or not _REGION_RE.fullmatch(region)):
+            raise ValueError(f"Source target {target_id} region must be an AWS Region name")
+        data_source_ids = item.get("dataSourceIds", [])
+        if (
+            not isinstance(data_source_ids, list)
+            or len(data_source_ids) > 10
+            or any(not isinstance(ds_id, str) or not _DATA_SOURCE_ID_RE.fullmatch(ds_id) for ds_id in data_source_ids)
+        ):
+            raise ValueError(f"Source target {target_id} dataSourceIds must be 0-10 valid data source ids")
 
         knowledge_base_ids = item.get("knowledgeBaseIds", [])
         if kind == "MANAGED_KB":
@@ -75,6 +91,8 @@ def _source_targets() -> dict[str, SourceTargetConfig]:
             kind=kind,
             knowledge_base_ids=tuple(knowledge_base_ids),
             max_agent_iterations=max_iterations,
+            region=region,
+            data_source_ids=tuple(data_source_ids),
         )
     return targets
 

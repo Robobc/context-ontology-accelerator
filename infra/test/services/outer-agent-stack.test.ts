@@ -83,9 +83,7 @@ describe("OuterAgentStack", () => {
     const kb = statements.find((statement: any) =>
       JSON.stringify(statement.Action).includes("bedrock:Retrieve"),
     );
-    expect(JSON.stringify(kb.Resource)).toContain(
-      "knowledge-base/ABCDEFGHIJ",
-    );
+    expect(JSON.stringify(kb.Resource)).toContain("knowledge-base/ABCDEFGHIJ");
     expect(kb.Resource).not.toBe("*");
     const agentic = statements.find((statement: any) =>
       JSON.stringify(statement.Action).includes(
@@ -129,5 +127,87 @@ describe("OuterAgentStack", () => {
           }) as any,
         ),
     ).toThrow("requires 1-10 valid knowledgeBaseIds");
+  });
+
+  it("grants Retrieve on the KB ARNs of the target's own Region", () => {
+    const template = Template.fromStack(
+      new OuterAgentStack(
+        app(),
+        "CrossRegion",
+        props({
+          config: {
+            sourceTargets: {
+              "hub-eu": {
+                kind: "MANAGED_KB",
+                knowledgeBaseIds: ["KBTEST0001"],
+                region: "eu-central-1",
+                dataSourceIds: ["DSTEST0001"],
+              },
+              "hub-local": {
+                kind: "MANAGED_KB",
+                knowledgeBaseIds: ["ABCDEFGHIJ"],
+              },
+            },
+          },
+        }) as any,
+      ),
+    );
+    const statements = Object.values(
+      template.findResources("AWS::IAM::Policy"),
+    ).flatMap((policy: any) => policy.Properties.PolicyDocument.Statement);
+    const kb = statements.find((statement: any) =>
+      JSON.stringify(statement.Action).includes("bedrock:Retrieve"),
+    );
+    const resources = JSON.stringify(kb.Resource);
+    expect(resources).toContain(
+      ":bedrock:eu-central-1:123456789012:knowledge-base/KBTEST0001",
+    );
+    expect(resources).toContain(
+      ":bedrock:us-east-1:123456789012:knowledge-base/ABCDEFGHIJ",
+    );
+    expect(resources).not.toContain(
+      "eu-central-1:123456789012:knowledge-base/ABCDEFGHIJ",
+    );
+    // The scope reaches the runtime verbatim; the grant stays on the KB.
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        SOURCE_TARGETS_JSON: Match.stringLikeRegexp(
+          '"dataSourceIds":\\["DSTEST0001"\\]',
+        ),
+      }),
+    });
+  });
+
+  it("rejects region and data source scope outside the grammar or on a non-KB target", () => {
+    const build = (id: string, target: Record<string, unknown>) => () =>
+      new OuterAgentStack(
+        app(),
+        id,
+        props({ config: { sourceTargets: { t: target } } }) as any,
+      );
+    expect(
+      build("BadRegion", {
+        kind: "MANAGED_KB",
+        knowledgeBaseIds: ["ABCDEFGHIJ"],
+        region: "eu-central-1; DROP",
+      }),
+    ).toThrow("region must be an AWS Region name");
+    expect(
+      build("BadDs", {
+        kind: "MANAGED_KB",
+        knowledgeBaseIds: ["ABCDEFGHIJ"],
+        dataSourceIds: ["not valid"],
+      }),
+    ).toThrow("dataSourceIds must be 0-10 valid data source ids");
+    expect(
+      build("TooManyDs", {
+        kind: "MANAGED_KB",
+        knowledgeBaseIds: ["ABCDEFGHIJ"],
+        dataSourceIds: Array(11).fill("DSTEST0001"),
+      }),
+    ).toThrow("dataSourceIds must be 0-10 valid data source ids");
+    expect(
+      build("GraphWithRegion", { kind: "COA_GRAPH", region: "eu-central-1" }),
+    ).toThrow("does not accept knowledgeBaseIds, region or dataSourceIds");
   });
 });

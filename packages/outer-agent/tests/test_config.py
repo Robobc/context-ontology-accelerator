@@ -1,3 +1,4 @@
+import json
 from urllib.parse import quote
 
 import pytest
@@ -82,4 +83,48 @@ def test_graph_expansion_knobs_outside_the_contract_are_rejected(monkeypatch, na
     _set_required(monkeypatch)
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=name):
+        OuterAgentConfig.from_env()
+
+
+def test_managed_kb_target_accepts_region_and_data_source_scope(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv(
+        "SOURCE_TARGETS_JSON",
+        '{"hub":{"kind":"MANAGED_KB","knowledgeBaseIds":["ABCDEFGHIJ"],'
+        '"region":"eu-central-1","dataSourceIds":["DSTEST0001"]}}',
+    )
+    target = OuterAgentConfig.from_env().source_targets["hub"]
+    assert target.region == "eu-central-1"
+    assert target.data_source_ids == ("DSTEST0001",)
+
+
+def test_managed_kb_target_defaults_to_runtime_region_and_whole_kb(monkeypatch):
+    _set_required(monkeypatch)
+    target = OuterAgentConfig.from_env().source_targets["domain-kb"]
+    assert target.region is None
+    assert target.data_source_ids == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("region", "eu-central-1; DROP", "region must be an AWS Region name"),
+        ("region", "https://kb.example", "region must be an AWS Region name"),
+        ("dataSourceIds", ["not valid"], "dataSourceIds must be 0-10"),
+        ("dataSourceIds", ["DSTEST0001"] * 11, "dataSourceIds must be 0-10"),
+        ("dataSourceIds", "DSTEST0001", "dataSourceIds must be 0-10"),
+    ],
+)
+def test_managed_kb_scope_fields_outside_the_grammar_are_rejected(monkeypatch, field, value, message):
+    _set_required(monkeypatch)
+    item = {"kind": "MANAGED_KB", "knowledgeBaseIds": ["ABCDEFGHIJ"], field: value}
+    monkeypatch.setenv("SOURCE_TARGETS_JSON", json.dumps({"hub": item}))
+    with pytest.raises(ValueError, match=message):
+        OuterAgentConfig.from_env()
+
+
+def test_non_kb_target_rejects_region_and_data_source_scope(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SOURCE_TARGETS_JSON", '{"graph":{"kind":"COA_GRAPH","region":"eu-central-1"}}')
+    with pytest.raises(ValueError, match="unsupported fields"):
         OuterAgentConfig.from_env()

@@ -122,6 +122,15 @@ source and numbered in one sequence with the Knowledge Base hits. Scope and
 fact budget come from `COA_GRAPH_EXPANSION_SCOPE` (default `SEED_DOCUMENTS`;
 `OFF` disables) and `COA_GRAPH_EXPANSION_MAX_FACTS`.
 
+For the two sides to meet on the same chunks, the agent's `MANAGED_KB` target
+has to read the same Knowledge Base scope COA scanned. A target in the
+deployment's `outerAgent.sourceTargets` may therefore name its `region`
+(default: the runtime's Region; one Bedrock client per Region, and the IAM
+grant names that Region's KB ARNs) and `dataSourceIds` (0-10, a
+`_data_source_id` retrieval filter), mirroring the `region` and
+`dataSourceIds` of the registered `BEDROCK_MANAGED_KB` source. Both default to
+the previous behaviour (runtime Region, whole Knowledge Base).
+
 This is enrichment, not a plan directive. ADR 0008's rule that a failed
 directive must never yield an answer from a partial set is about *sources* the
 plan named; the graph is COA's derived view of the same documents. When COA

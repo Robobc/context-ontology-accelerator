@@ -100,6 +100,18 @@ export interface OuterAgentSourceTargetConfig {
   readonly knowledgeBaseIds?: string[];
   /** Maximum AgenticRetrieveStream planning/retrieval iterations. @default 5 */
   readonly maxAgentIterations?: number;
+  /**
+   * Region the knowledge bases live in (MANAGED_KB only). The runtime builds
+   * its Bedrock client there and the IAM grant names that Region's KB ARNs.
+   * @default the deployment Region
+   */
+  readonly region?: string;
+  /**
+   * Knowledge Base data source ids the retrieval is limited to (MANAGED_KB
+   * only, 0-10): the same `_data_source_id` scope a COA-registered
+   * `BEDROCK_MANAGED_KB` source carries. @default the whole knowledge base
+   */
+  readonly dataSourceIds?: string[];
 }
 
 export interface OuterAgentConfig {
@@ -113,7 +125,10 @@ export interface OuterAgentConfig {
    * documents of those chunks; `ENTITLED_DOCUMENTS` follows entities into
    * every document the Knowledge Base shows the caller; `OFF` skips the step.
    */
-  readonly graphExpansionScope?: "SEED_DOCUMENTS" | "ENTITLED_DOCUMENTS" | "OFF";
+  readonly graphExpansionScope?:
+    | "SEED_DOCUMENTS"
+    | "ENTITLED_DOCUMENTS"
+    | "OFF";
 }
 
 /**
