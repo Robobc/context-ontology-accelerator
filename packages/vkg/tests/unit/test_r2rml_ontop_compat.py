@@ -20,6 +20,9 @@ import pytest
 from rdflib import Graph, Literal, Namespace
 from rdflib.compare import isomorphic
 
+# Every test here is a unit test; `-m unit` (the CI selection) must not deselect the module.
+pytestmark = pytest.mark.unit
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "r2rml-ontop-compat.py"
 _spec = importlib.util.spec_from_file_location("r2rml_ontop_compat", _SCRIPT)
 assert _spec and _spec.loader

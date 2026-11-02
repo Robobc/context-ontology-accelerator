@@ -16,6 +16,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from coa_ontology.inducer.services.data_catalog import CatalogColumn, CatalogTable
 
+# Every test here is a unit test; `-m unit` (the CI selection) must not deselect the module.
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _isolate_jobs():

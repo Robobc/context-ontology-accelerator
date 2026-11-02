@@ -15,6 +15,9 @@ from coa_serve.tier2.nl_to_sql.sql_generator import sql_table_routing
 from coa_serve.tier2.sql_firewall import SQLFirewall
 from coa_serve.tier2.table_qualifier import AMBIGUOUS_SOURCE, prepare_execution_sql
 
+# Every test here is a unit test; `-m unit` (the CI selection) must not deselect the module.
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestSourcesRegistry:
