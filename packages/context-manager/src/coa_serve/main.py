@@ -481,6 +481,13 @@ async def _ensure_initialized():
 
                 gate_provider = build_decider_config_provider(config)
                 await asyncio.to_thread(gate_provider.prime)
+
+                async def _namespace_has_documents(namespace: str) -> bool:
+                    # Unknown composition reads as "has documents": the gate then asks
+                    # the Decider rather than silently disabling itself (fail-open).
+                    composition = await sources_registry.get_source_composition(namespace)
+                    return bool(composition.unknown or composition.has_unstructured_source)
+
                 tier2_skip_evaluator = DeciderTier2SkipEvaluator(
                     LLMDecider(
                         bedrock_client,
@@ -488,6 +495,7 @@ async def _ensure_initialized():
                         guardrail_id_provider=guardrail_provider.guardrail_id,
                     ),
                     fallback=aoss_evaluator if skip_mode == "decider+aoss" else None,
+                    has_documents=_namespace_has_documents if sources_registry is not None else None,
                 )
                 logger.info("tier2_skip_decider_enabled", mode=skip_mode)
             except Exception as exc:

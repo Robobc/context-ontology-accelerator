@@ -109,3 +109,17 @@ class TestDeciderTier2SkipEvaluator:
         assert len(call["questions"]) == 1
         assert Q in call["state"]
         assert call["guard"] == Q
+
+    @pytest.mark.asyncio
+    async def test_namespace_without_documents_abstains_without_calling_the_model(self):
+        decider = FakeDecider(Choice("document", 0.99))
+        fallback = FakeFallback(Tier2SkipDecision.RUN)
+
+        async def has_documents(namespace: str) -> bool:
+            return namespace == "mixed-ns"
+
+        ev = DeciderTier2SkipEvaluator(decider, fallback=fallback, has_documents=has_documents)
+        assert await ev.should_skip_tier2(Q, "tables-only-ns", None) is Tier2SkipDecision.RUN
+        assert decider.calls == [] and fallback.calls == 1
+        assert await ev.should_skip_tier2(Q, "mixed-ns", None) is Tier2SkipDecision.SKIP
+        assert len(decider.calls) == 1

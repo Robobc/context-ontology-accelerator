@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import structlog
@@ -62,11 +63,19 @@ class DeciderTier2SkipEvaluator:
         *,
         fallback: Tier2SkipEvaluator | None = None,
         structured_tools: tuple[str, ...] = ("nl_to_sql",),
+        has_documents: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
-        """Bind the Decider and an optional fallback consulted on abstention."""
+        """Bind the Decider, an optional fallback consulted on abstention, and a document check.
+
+        ``has_documents(namespace)`` says whether the namespace has any document
+        source. Without one there is nothing to route a document question TO, so
+        the gate abstains without calling the model (saving the call and never
+        pruning the only tier that could answer).
+        """
         self._decider = decider
         self._fallback = fallback
         self._structured_tools = structured_tools
+        self._has_documents = has_documents
 
     async def should_skip_tier2(
         self,
@@ -78,7 +87,7 @@ class DeciderTier2SkipEvaluator:
     ) -> Tier2SkipDecision:
         """Return SKIP on a confident ``document`` tag; otherwise RUN, fallback or ABSTAIN."""
         try:
-            decision, detail = await self._evaluate(query)
+            decision, detail = await self._evaluate(query, namespace)
         except Exception as exc:  # noqa: BLE001 - fail-open: never let the gate break the cascade
             logger.warning("tier2_skip_decider_error", error=type(exc).__name__)
             decision, detail = Tier2SkipDecision.ABSTAIN, {"evaluator": EVALUATOR_NAME, "error": type(exc).__name__}
@@ -88,10 +97,12 @@ class DeciderTier2SkipEvaluator:
             return await self._fallback.should_skip_tier2(query, namespace, embedding, trace=trace)
         return decision
 
-    async def _evaluate(self, query: str) -> tuple[Tier2SkipDecision, dict]:
+    async def _evaluate(self, query: str, namespace: str) -> tuple[Tier2SkipDecision, dict]:
         settings = self._decider.settings()
         if not settings.enabled:
             return Tier2SkipDecision.ABSTAIN, {"evaluator": EVALUATOR_NAME, "reason": "backend off"}
+        if self._has_documents is not None and not await self._has_documents(namespace):
+            return Tier2SkipDecision.ABSTAIN, {"evaluator": EVALUATOR_NAME, "reason": "no document source"}
         state = modality_state(question=query, sub_questions=[query], structured_tools=self._structured_tools)
         started = time.perf_counter()
         choices: list[Choice] = await asyncio.wait_for(
