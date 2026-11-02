@@ -491,6 +491,9 @@ class TestQueryTool:
         await server.query(None, "hi", "sales", mode="deep-reasoning", plannerProfile="structured_first")
         assert captured["planner_profile"] == "structured_first"
         captured.clear()
+        await server.query(None, "hi", "sales", mode="deep-reasoning", plannerProfile="seeded")  # ADR 0014
+        assert captured["planner_profile"] == "seeded"
+        captured.clear()
         await server.query(None, "hi", "sales")
         assert captured.get("planner_profile") is None
 

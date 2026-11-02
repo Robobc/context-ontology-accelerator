@@ -333,7 +333,7 @@ QueryStrategyLiteral = Literal[
 # ADR 0013: deep-reasoning planner profiles; mirrors
 # ``coa_serve.models._validate_planner_profile`` and
 # ``coa_serve.tier3.agentic.planner.PLANNER_PROFILES``.
-PlannerProfileLiteral = Literal["legacy", "structured_first"]
+PlannerProfileLiteral = Literal["legacy", "structured_first", "seeded"]
 
 
 @mcp.tool()
@@ -398,7 +398,10 @@ async def query(
             ``structured_first`` decides each sub-question's modality first, so
             a tabular question (figure, count, amount) goes straight to the
             structured tools, and resolves the ontology once before the
-            sub-questions fan out. Absent = the serve deployment default.
+            sub-questions fan out. ``seeded`` adds a typed Decider that tags
+            each sub-question's modality and makes the structured tool the
+            tabular ones' first step with the sub-question verbatim (no
+            planner call). Absent = the serve deployment default.
 
     Returns:
         JSON envelope ``{result, requestId, sessionId}`` matching the Smithy
