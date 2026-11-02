@@ -666,6 +666,16 @@ export class ServeStack extends SCLStack {
           // <ssmPrefix>/*.
           DECIDER_BACKEND:
             (this.node.tryGetContext("decider_backend") as string) ?? "off",
+          // Standard-mode Tier-2 gate (fork, ADR 0015): "aoss" (default,
+          // upstream behaviour), "decider", "decider+aoss" or "off". The decider
+          // modes consult the ADR 0014 Decider on the whole question and prune
+          // Tier 2 on a confident document tag; the Decider's SSM switch
+          // (backend=off) turns the gate off live.
+          ...((this.node.tryGetContext("tier2_skip_mode") as string) && {
+            SERVE_TIER2_SKIP_MODE: this.node.tryGetContext(
+              "tier2_skip_mode",
+            ) as string,
+          }),
           ...((this.node.tryGetContext("decider_model_id") as string) && {
             DECIDER_MODEL_ID: this.node.tryGetContext(
               "decider_model_id",

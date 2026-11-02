@@ -183,6 +183,20 @@ Behaviour notes:
 - **Source-composition gating still applies**: on a document-only namespace the
   loop's structured tools are withheld; on a database-only namespace its document
   retrieval self-skips.
+- **Standard-mode modality gate (fork, ADR 0015, opt-in).** On a mixed
+  namespace the cascade can answer a document question from a table whose
+  columns happen to share the question's words (`Decision`, `Condition`, …),
+  because Tier 2 runs first and the cascade stops at the first answer. With
+  `SERVE_TIER2_SKIP_MODE=decider` or `decider+aoss` the ADR 0014 Decider tags
+  the whole question before Tier 2; a confident `document` tag prunes Tier 2 and
+  Tier 3 retrieves from the documents (on a Knowledge-Base namespace, as the
+  signed-in user). `tabular`/`mixed`, an abstention or a disabled Decider leave
+  the cascade as it is. Tier-1 governed metrics still run first. The trace shows
+  the decision as `routing.select` with `evaluator: decider`.
+- **Knowledge-Base namespaces in Deep Reasoning (fork, ADR 0015).** The loop's
+  `vector_search` tool reads a namespace's managed Knowledge Base as the
+  signed-in user (COA's own chunk index is empty for such namespaces), and the
+  final semantic search uses it instead of the graphrag strategy tool there.
 - Deterministic *always-run-both* joint retrieval (structured + document in one
   guaranteed pass, rather than at the planner's discretion) is roadmap work,
   tracked as issue #417.

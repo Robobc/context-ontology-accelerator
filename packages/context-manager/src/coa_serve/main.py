@@ -449,20 +449,50 @@ async def _ensure_initialized():
                 guardrail_id_provider=guardrail_provider.guardrail_id,
                 entitlement_gate=entitlement_gate,  # fork: per-user KB document entitlement
                 decider_settings_provider=decider_provider.settings,
+                # fork (ADR 0015): the agentic vector_search tool reads a namespace's
+                # managed Knowledge Base as the signed-in user instead of COA's
+                # (empty, for such namespaces) OpenSearch chunk index.
+                document_retriever=knowledge_retriever.document_retriever,
             )
         except Exception as exc:
             logger.warning("agentic_retriever_unavailable", error=type(exc).__name__, error_msg=str(exc)[:200])
 
         # Per-query Tier-2 pruning for MIXED namespaces (which namespace-level
-        # source-composition gating cannot rule out). On by default; set
-        # SERVE_TIER2_SKIP_MODE=off to disable. Fail-open — see aoss_provenance.py.
-        tier2_skip_evaluator = None
-        if os.environ.get("SERVE_TIER2_SKIP_MODE", "aoss").lower() != "off" and oss_ontology_index:
-            tier2_skip_evaluator = AossProvenanceEvaluator(
+        # source-composition gating cannot rule out). Fail-open — see aoss_provenance.py.
+        #   SERVE_TIER2_SKIP_MODE=aoss          (default) mapped-class provenance
+        #   SERVE_TIER2_SKIP_MODE=decider       fork (ADR 0015): ADR 0014 Decider on the whole question
+        #   SERVE_TIER2_SKIP_MODE=decider+aoss  Decider first, AOSS when it abstains
+        #   SERVE_TIER2_SKIP_MODE=off           disabled
+        # The Decider's live SSM switch (backend=off) makes the decider modes defer
+        # to AOSS / abstain, so the gate can be turned off without a redeploy.
+        skip_mode = os.environ.get("SERVE_TIER2_SKIP_MODE", "aoss").lower().strip()
+        aoss_evaluator = None
+        if skip_mode != "off" and oss_ontology_index:
+            aoss_evaluator = AossProvenanceEvaluator(
                 vector_client=opensearch_client,
                 sources_registry=sources_registry,
                 oss_ontology_index=oss_ontology_index,
             )
+        tier2_skip_evaluator = aoss_evaluator
+        if skip_mode in ("decider", "decider+aoss"):
+            try:
+                from .tier2.skip.decider_skip import DeciderTier2SkipEvaluator
+                from .tier3.agentic.decider import LLMDecider
+
+                gate_provider = build_decider_config_provider(config)
+                await asyncio.to_thread(gate_provider.prime)
+                tier2_skip_evaluator = DeciderTier2SkipEvaluator(
+                    LLMDecider(
+                        bedrock_client,
+                        settings_provider=gate_provider.settings,
+                        guardrail_id_provider=guardrail_provider.guardrail_id,
+                    ),
+                    fallback=aoss_evaluator if skip_mode == "decider+aoss" else None,
+                )
+                logger.info("tier2_skip_decider_enabled", mode=skip_mode)
+            except Exception as exc:
+                logger.warning("tier2_skip_decider_unavailable", error=type(exc).__name__, error_msg=str(exc)[:200])
+                tier2_skip_evaluator = aoss_evaluator
 
         _orchestrator = Orchestrator(
             metric_resolver=metric_resolver,

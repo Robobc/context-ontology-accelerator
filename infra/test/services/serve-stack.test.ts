@@ -964,6 +964,27 @@ describe("ServeStack - deep-reasoning budget variables", () => {
       }),
     });
   });
+
+  // Fork (ADR 0015): the Standard-mode Tier-2 gate is opt-in; with no context the
+  // runtime env carries no SERVE_TIER2_SKIP_MODE and serve keeps its "aoss" default.
+  it("does not set SERVE_TIER2_SKIP_MODE by default", () => {
+    createStack().hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.not(
+        Match.objectLike({ SERVE_TIER2_SKIP_MODE: Match.anyValue() }),
+      ),
+    });
+  });
+
+  it("honours the tier2_skip_mode CDK context override", () => {
+    createStack({ tier2_skip_mode: "decider+aoss" }).hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      {
+        EnvironmentVariables: Match.objectLike({
+          SERVE_TIER2_SKIP_MODE: "decider+aoss",
+        }),
+      },
+    );
+  });
 });
 
 describe("ServeStack - Tier-1 metric timeout", () => {
