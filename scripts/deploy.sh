@@ -45,6 +45,10 @@ CONTEXT="--context env=$ENV"
 # ("legacy" | "structured_first"). Unset keeps the code defaults (5, legacy).
 [ -n "${SCL_DEEP_REASONING_MAX_STEPS:-}" ] && CONTEXT="$CONTEXT --context deep_reasoning_max_steps=$SCL_DEEP_REASONING_MAX_STEPS"
 [ -n "${SCL_DEEP_REASONING_PLANNER_PROFILE:-}" ] && CONTEXT="$CONTEXT --context deep_reasoning_planner_profile=$SCL_DEEP_REASONING_PLANNER_PROFILE"
+# ADR 0014: Decider environment defaults ("off" | "llm", model id). The live values
+# come from SSM <prefix>/deep-reasoning/decider and need no redeploy.
+[ -n "${SCL_DECIDER_BACKEND:-}" ] && CONTEXT="$CONTEXT --context decider_backend=$SCL_DECIDER_BACKEND"
+[ -n "${SCL_DECIDER_MODEL_ID:-}" ] && CONTEXT="$CONTEXT --context decider_model_id=$SCL_DECIDER_MODEL_ID"
 [ -n "${SCL_RESOLVE_TIMEOUT_SECONDS:-}" ] && CONTEXT="$CONTEXT --context resolve_timeout_s=$SCL_RESOLVE_TIMEOUT_SECONDS"
 [ -n "${SCL_NEPTUNE_INSTANCE_CLASS:-}" ] && CONTEXT="$CONTEXT --context neptune_instance_class=$SCL_NEPTUNE_INSTANCE_CLASS"
 [ -n "${SCL_LAMBDA_RESERVED_CONCURRENCY:-}" ] && CONTEXT="$CONTEXT --context lambda_reserved_concurrency=$SCL_LAMBDA_RESERVED_CONCURRENCY"

@@ -935,6 +935,35 @@ describe("ServeStack - deep-reasoning budget variables", () => {
       }),
     });
   });
+
+  // ADR 0014: the Decider's environment defaults. "off" by default, and the
+  // model id is set only when given (an empty env value is not written), since
+  // the live values come from the SSM parameter <prefix>/deep-reasoning/decider.
+  it("defaults the decider to off and sets no model id", () => {
+    const runtimes = createStack().findResources(
+      "AWS::BedrockAgentCore::Runtime",
+    );
+    for (const runtime of Object.values(runtimes)) {
+      expect(runtime.Properties.EnvironmentVariables.DECIDER_BACKEND).toBe(
+        "off",
+      );
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "DECIDER_MODEL_ID",
+      );
+    }
+  });
+
+  it("honours the decider CDK context overrides", () => {
+    createStack({
+      decider_backend: "llm",
+      decider_model_id: "amazon.nova-micro-v1:0",
+    }).hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DECIDER_BACKEND: "llm",
+        DECIDER_MODEL_ID: "amazon.nova-micro-v1:0",
+      }),
+    });
+  });
 });
 
 describe("ServeStack - Tier-1 metric timeout", () => {
