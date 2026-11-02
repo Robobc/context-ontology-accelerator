@@ -363,9 +363,70 @@ free; its job is to avoid the expensive call, not to be invisible.
   defaults (`DECIDER_BACKEND=off`, no empty `DECIDER_MODEL_ID`) and overrides.
 - `make lint` green; 3,662 context-manager unit tests pass.
 
-### Deployed A/B
+### Deployed, 2026-11-02 (syngenta-eba-dev, `ppm360-kb-test`)
 
-Pending (rollout step 1 deploy + step 2 labelled set).
+Serve v20/v21 and MCP v11/v12 deployed from `7b35895` then `d8184f4` with the
+stack defaults (`DECIDER_BACKEND=off`, profile `legacy`). The Decider was then
+switched on **without a redeploy** by writing
+`/syngenta-eba/deep-reasoning/decider` =
+`{"backend":"llm","modelId":"@syngenta-eba-bedrock/us.amazon.nova-micro-v1:0","minConfidence":0.7,"timeoutS":3}`
+(dev generation runs through Portkey, so the model id is the Portkey slug); the
+serve log showed `decider_config_loaded` with those values on every warm
+instance within the TTL, and the parameter stays on for further testing. Same
+mixed question and namespace as ADR 0013; `DEEP_REASONING_MAX_STEPS=5`.
+
+| Run | Profile | Decider | First step of the tabular sub-question | `nl_to_sql` rows | Figure in answer |
+|---|---|---|---|---|---|
+| 1 | `seeded` | `q1=tabular(0.95) seed, q2=document(0.95)`, 1.2 s | `nl_to_sql: seeded`, verbatim | 51 | no |
+| 2 | `seeded` | same tags, 1.1 s | seeded, verbatim; planner then re-ran `nl_to_sql` once (no new rows) | 51, 51 | no |
+| 3 | `seeded` | same tags, 1.0 s | seeded, verbatim | 51 | no |
+| 4 | `seeded` | same tags, 0.9 s | seeded, verbatim | **1** | **yes: 13322629.26** |
+| 5 | `structured_first` | n/a | planner chose `nl_to_sql` on step 1 | 1 | yes |
+| 6, 7 | `structured_first` | n/a | planner chose `nl_to_sql` on step 1 | 51 | no |
+
+What the runs established:
+
+- **D1 and D2 work as designed, every time.** Nova Micro through Portkey tagged
+  both sub-questions correctly with confidence 0.95 in 4 of 4 runs, in about
+  1 s for the batched call, and the controller made `nl_to_sql` the tabular
+  sub-question's first step with the sub-question text verbatim in 4 of 4,
+  with no planner call for that step. The planner-prompt route
+  (`structured_first`) also chose `nl_to_sql` first in 3 of 3 runs today, so
+  on this one question the two profiles now route identically; the seeded one
+  does it without depending on prompt compliance and about a second faster.
+- **The remaining variance is inside SQL generation, not in routing.** The
+  `structured_tool_resolved` log line added in `d8184f4` shows two statements
+  for the identical input text, 13-table context and model (Nova Pro via
+  Portkey, temperature 0):
+  `SELECT COALESCE(SUM(d.Full_Cost),0) … WHERE … = 'PI0013123'` (1 row, the
+  figure) and
+  `SELECT COALESCE(d.Full_Cost,0) … LEFT JOIN demand … WHERE … = 'PI0013123'`
+  (51 rows, one per demand line, no project column). The 51 rows **are** the
+  project's cost lines, but the row shape carries no project id, so the
+  synthesizer, which sees the rows and not the SQL, concludes "none of the rows
+  explicitly mention PI0013123". Across today's and yesterday's deep-reasoning
+  runs the aggregate form came back in about 1 run of 4. This is a Tier-2
+  property, not a planner one: it would affect Standard mode in the same
+  proportion, and it is what a governed Tier-1 metric definition for "full
+  cost" exists to remove.
+- **Every run still ends `max_steps_reached`** on the document half, for the
+  reason recorded in ADR 0013: the memo for PI0013123 is withheld by document
+  entitlement for this user, and the planner spends 3–4 steps looking for it.
+  D3 is the fix and is not yet implemented.
+- Cost of the structured leg inside the loop: 20–23 s per `nl_to_sql` call
+  (translation plus Databricks), so a planner re-run of the same SQL (run 2)
+  costs a step and 20 s for nothing; the no-progress handling already counts
+  it, and D3's "withheld" rule does not apply to it.
+
+Verdict: the Decider and the seeded first step remove the two planner-side
+failure modes by construction, and are switchable live. The figure now
+depends on SQL generation choosing an aggregate, which routing cannot fix.
+Next, in order: (a) hand the synthesizer the structured leg's SQL (or its
+WHERE filter) alongside the rows, so 51 cost lines filtered on PI0013123 are
+read as PI0013123's cost lines rather than as unrelated data; (b) a governed
+metric for full cost on the PPM namespaces, which makes the figure
+deterministic and Tier 1; (c) D3; (d) the labelled set (rollout step 2) to
+report decider accuracy on more than one question.
 
 ## Consequences
 
