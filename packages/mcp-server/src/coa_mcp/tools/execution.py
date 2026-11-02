@@ -95,6 +95,7 @@ async def execute_query(
     include_supporting: bool = True,
     max_results: int = 1000,
     timeout_ms: int | float | None = None,
+    planner_profile: str | None = None,
 ) -> dict[str, Any]:
     """End-to-end NL query with tiered resolution.
 
@@ -146,6 +147,9 @@ async def execute_query(
         payload["options"]["mode"] = mode
     if strategy is not None:
         payload["options"]["strategy"] = strategy
+    if planner_profile is not None:
+        # ADR 0013: deep-reasoning planner profile; CM validates the value.
+        payload["options"]["plannerProfile"] = planner_profile
     if dimensions:
         # Smithy DimensionFilterList arrives as ``[{name, value}, ...]``; CM's
         # Tier-1 ``substitute_dimensions`` calls ``.items()`` and expects a

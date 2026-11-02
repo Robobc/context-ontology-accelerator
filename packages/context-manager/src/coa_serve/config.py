@@ -110,6 +110,16 @@ class ServiceConfig:
     # round-trips for marginal gain — a longer streak rarely recovered accuracy in
     # the coa100 runs but did inflate latency.
     deep_reasoning_max_no_progress_steps: int = 2
+    # ADR 0013/0014: ``legacy`` | ``structured_first`` | ``seeded`` (tier3/agentic/planner.py).
+    deep_reasoning_planner_profile: str = "legacy"
+    # ADR 0014: environment DEFAULTS for the deep-reasoning Decider. The live
+    # values come from the SSM parameter <prefix>/deep-reasoning/decider when it
+    # exists (decider_config.py), so these only say what a deployment runs when
+    # nobody has set that parameter. ``off`` keeps every pre-ADR path.
+    decider_backend: str = "off"
+    decider_model_id: str = ""
+    decider_min_confidence: float = 0.7
+    decider_timeout_s: float = 3.0
     # Where the deep-reasoning Ontology_Lookup_Tool reads the per-namespace ontology.
     # "graph" (default) queries the live published RDF graph in Neptune via the
     # serve graph client — correct for document-induced namespaces, which have no
@@ -165,6 +175,22 @@ def env_with_legacy_name(name: str, default: str = "") -> str:
             logger.warning("deprecated_env_var", deprecated=legacy, use=name)
             return raw
     return default
+
+
+def _parse_float_in_range(name: str, default: float, low: float, high: float) -> float:
+    """Float sibling of :func:`_parse_int_in_range`: absent/invalid/out-of-range → ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("invalid_float_config", name=name, value=raw, fallback=default)
+        return default
+    if not (low <= value <= high):
+        logger.warning("float_config_out_of_range", name=name, value=value, low=low, high=high, fallback=default)
+        return default
+    return value
 
 
 def _parse_int_in_range(name: str, default: int, low: int, high: int) -> int:
@@ -273,6 +299,26 @@ def load_config() -> ServiceConfig:
     deep_reasoning_max_fanout = _parse_int_in_range("DEEP_REASONING_MAX_FANOUT", 5, 1, 20)
     deep_reasoning_synthesis_reserve_s = _parse_int_in_range("DEEP_REASONING_SYNTHESIS_RESERVE_S", 8, 0, 120)
     deep_reasoning_max_no_progress_steps = _parse_int_in_range("DEEP_REASONING_MAX_NO_PROGRESS_STEPS", 2, 1, 20)
+    # ADR 0013: planner profile. ``legacy`` (default) is the graph-first standing
+    # strategy; ``structured_first`` decides a sub-question's modality first and
+    # pre-resolves the ontology before fan-out. Unknown values fall back to legacy
+    # with a warning so a typo never changes behaviour silently.
+    deep_reasoning_planner_profile = os.environ.get("DEEP_REASONING_PLANNER_PROFILE", "legacy").strip() or "legacy"
+    if deep_reasoning_planner_profile not in ("legacy", "structured_first", "seeded"):
+        logger.warning(
+            "invalid_deep_reasoning_planner_profile",
+            value=deep_reasoning_planner_profile,
+            fallback="legacy",
+        )
+        deep_reasoning_planner_profile = "legacy"
+    # ADR 0014: Decider environment defaults (the SSM parameter overrides them live).
+    decider_backend = os.environ.get("DECIDER_BACKEND", "off").strip().lower() or "off"
+    if decider_backend not in ("off", "llm"):
+        logger.warning("invalid_decider_backend", value=decider_backend, fallback="off")
+        decider_backend = "off"
+    decider_model_id = os.environ.get("DECIDER_MODEL_ID", "").strip()
+    decider_min_confidence = _parse_float_in_range("DECIDER_MIN_CONFIDENCE", 0.7, 0.0, 1.0)
+    decider_timeout_s = _parse_float_in_range("DECIDER_TIMEOUT_S", 3.0, 0.5, 60.0)
     deep_reasoning_ontology_source = env_with_legacy_name("DEEP_REASONING_ONTOLOGY_SOURCE", "graph")
     if deep_reasoning_ontology_source not in ("graph", "file"):
         logger.warning(
@@ -360,6 +406,11 @@ def load_config() -> ServiceConfig:
         deep_reasoning_max_fanout=deep_reasoning_max_fanout,
         deep_reasoning_synthesis_reserve_s=deep_reasoning_synthesis_reserve_s,
         deep_reasoning_max_no_progress_steps=deep_reasoning_max_no_progress_steps,
+        deep_reasoning_planner_profile=deep_reasoning_planner_profile,
+        decider_backend=decider_backend,
+        decider_model_id=decider_model_id,
+        decider_min_confidence=decider_min_confidence,
+        decider_timeout_s=decider_timeout_s,
         deep_reasoning_ontology_source=deep_reasoning_ontology_source,
         deep_reasoning_ontology_file=deep_reasoning_ontology_file,
         deep_reasoning_ontology_edge_mode=deep_reasoning_ontology_edge_mode,

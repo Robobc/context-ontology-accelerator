@@ -31,6 +31,7 @@ from .clients.composite_executor import CompositeQueryExecutor
 from .clients.neptune import NeptuneGraphClient
 from .clients.opensearch import OpenSearchVectorClient
 from .config import ServiceConfig, load_config
+from .decider_config import build_decider_config_provider
 from .exceptions import (
     AccessDeniedError,
     DataSourceUnavailableError,
@@ -433,6 +434,13 @@ async def _ensure_initialized():
                 guardrail_id=config.guardrail_id or None,
                 guardrail_id_provider=guardrail_provider.guardrail_id,
             )
+            # ADR 0014: live Decider settings from <prefix>/deep-reasoning/decider
+            # (TTL-refreshed, env defaults when the parameter is absent), so the
+            # decider's backend and model change without a redeploy. Primed off
+            # the request thread like the guardrail provider; a failed first read
+            # falls back to the env defaults inside the provider, never raises.
+            decider_provider = build_decider_config_provider(config)
+            await asyncio.to_thread(decider_provider.prime)
             agentic_retriever = build_agentic_retriever(
                 config,
                 agentic_clients,
@@ -440,6 +448,7 @@ async def _ensure_initialized():
                 structured_query_tier=structured_query_tier,
                 guardrail_id_provider=guardrail_provider.guardrail_id,
                 entitlement_gate=entitlement_gate,  # fork: per-user KB document entitlement
+                decider_settings_provider=decider_provider.settings,
             )
         except Exception as exc:
             logger.warning("agentic_retriever_unavailable", error=type(exc).__name__, error_msg=str(exc)[:200])

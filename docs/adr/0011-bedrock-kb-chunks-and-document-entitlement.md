@@ -5,7 +5,7 @@
 Proposed. Implemented on `feature/bedrock-kb-chunk-source`: kg-build loader,
 serve retriever and entitlement gate, the `BEDROCK_MANAGED_KB` source sub-type
 with its IAM, registry-based routing in serve, the extraction identity, and
-the Connect Source wizard tab. Deployed to syngenta-eba-dev and run against a
+the Connect Source wizard tab. Deployed to the dev deployment and run against a
 real Managed Knowledge Base with an ACL data source on 2026-10-31 (results
 under Verification); the per-user entitlement held end to end for one real
 user in two ACL states. Supersedes the last consequence of ADR 0003
@@ -211,7 +211,7 @@ named after a restricted subject reveals that the subject exists. That is the
 same exposure as the serve-side ontology graph already accepts at namespace
 level, and it is the line this ADR draws: terms yes, instances no.
 
-Not built, kept as the next lever if Syngenta wants individuals or topics for
+Not built, kept as the next lever if the customer wants individuals or topics for
 deep-reasoning steering: an induction identity (`inductionUserId`, defaulting
 to `extractionUserId`) with a provenance filter in the lexical stores, so the
 full rule set runs over exactly the documents that identity may read.
@@ -435,7 +435,7 @@ second review phrased it:
    with an identity granted some documents produces a graph containing exactly
    those (`documents_not_visible` equals the rest).
 
-**Deployed run, 2026-10-31, syngenta-eba-dev (us-east-1) against KB
+**Deployed run, 2026-10-31, the dev deployment (us-east-1) against KB
 a test Managed KB (eu-central-1, same account), data source `acl-s3-test`
 (finance=alice, hr+shared=bob, extraction identity granted all three).**
 Namespace `fmkb-acl-test`, source registered through the API with

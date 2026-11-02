@@ -202,6 +202,23 @@ class TestExecuteQuery:
         payload = mock_cm.invoke.call_args[0][0]
         assert "timeoutMs" not in payload["options"]
 
+    # ── plannerProfile forwarding (ADR 0013: deep-reasoning planner profile) ──
+    @pytest.mark.asyncio
+    async def test_planner_profile_forwarded(self, mock_cm, profile):
+        """``planner_profile`` reaches ``options.plannerProfile`` verbatim; the CM
+        validates the value, so the MCP surface does not duplicate the allow-list."""
+        await execute_query(
+            mock_cm, "test", "ns", profile, "tok", mode="deep-reasoning", planner_profile="structured_first"
+        )
+        payload = mock_cm.invoke.call_args[0][0]
+        assert payload["options"]["plannerProfile"] == "structured_first"
+
+    @pytest.mark.asyncio
+    async def test_absent_planner_profile_not_forwarded(self, mock_cm, profile):
+        """Default (None) leaves the key off so the deployment default applies."""
+        await execute_query(mock_cm, "test", "ns", profile, "tok")
+        assert "plannerProfile" not in mock_cm.invoke.call_args[0][0]["options"]
+
     @pytest.mark.parametrize("bad", [0, -5, QUERY_TIMEOUT_MS_MAX + 1, "abc", "5000", 1.5, 2.0, True, False])
     @pytest.mark.asyncio
     async def test_invalid_timeout_ms_rejected(self, mock_cm, profile, bad):

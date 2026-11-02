@@ -911,6 +911,59 @@ describe("ServeStack - deep-reasoning budget variables", () => {
       }),
     });
   });
+
+  // ADR 0013: the aggregate step cap and the planner profile are exposed as CDK
+  // context knobs. Their defaults reproduce the code defaults (5 steps, legacy
+  // graph-first planner) so a deployment that sets neither does not move.
+  it("defaults the step cap and planner profile to the code defaults", () => {
+    createStack().hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DEEP_REASONING_MAX_STEPS: "5",
+        DEEP_REASONING_PLANNER_PROFILE: "legacy",
+      }),
+    });
+  });
+
+  it("honours the step cap and planner profile CDK context overrides", () => {
+    createStack({
+      deep_reasoning_max_steps: "8",
+      deep_reasoning_planner_profile: "structured_first",
+    }).hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DEEP_REASONING_MAX_STEPS: "8",
+        DEEP_REASONING_PLANNER_PROFILE: "structured_first",
+      }),
+    });
+  });
+
+  // ADR 0014: the Decider's environment defaults. "off" by default, and the
+  // model id is set only when given (an empty env value is not written), since
+  // the live values come from the SSM parameter <prefix>/deep-reasoning/decider.
+  it("defaults the decider to off and sets no model id", () => {
+    const runtimes = createStack().findResources(
+      "AWS::BedrockAgentCore::Runtime",
+    );
+    for (const runtime of Object.values(runtimes)) {
+      expect(runtime.Properties.EnvironmentVariables.DECIDER_BACKEND).toBe(
+        "off",
+      );
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "DECIDER_MODEL_ID",
+      );
+    }
+  });
+
+  it("honours the decider CDK context overrides", () => {
+    createStack({
+      decider_backend: "llm",
+      decider_model_id: "amazon.nova-micro-v1:0",
+    }).hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DECIDER_BACKEND: "llm",
+        DECIDER_MODEL_ID: "amazon.nova-micro-v1:0",
+      }),
+    });
+  });
 });
 
 describe("ServeStack - Tier-1 metric timeout", () => {

@@ -285,6 +285,15 @@ class ReasoningController:
         # signatures; the aggregate step/time budgets bound it regardless.
         no_progress = 0
         tried: set[str] = set()
+        # ADR 0014: a seeded first tool. The retriever set ``seed_tool`` from the
+        # Decider's modality tag; the FIRST step invokes it with the sub-question
+        # text verbatim and no planner call, then the loop continues as usual.
+        # Honoured only when the tool is registered and not withheld for the
+        # request; the planner takes over from step 2 (or step 1 when the seed
+        # cannot be honoured), so a wrong tag costs at most one step.
+        seed_tool = getattr(sub_question, "seed_tool", "") or ""
+        if seed_tool and (seed_tool in (excluded_tools or ()) or registry.get(seed_tool) is None):
+            seed_tool = ""
 
         while True:
             # Time_Budget bounds the loop in aggregate (Req 7.4): stop before a new
@@ -296,11 +305,23 @@ class ReasoningController:
             if not clock.try_consume_step():
                 return StopReason.max_steps_reached
 
-            # Next-step selection over the accumulated context (Req 4.3).
-            candidates = await self._planner.propose_steps(
-                sub_question=sub_question, context=ctx, tool_specs=registry.specs(exclude=excluded_tools)
-            )
-            decision = self._select_decision(candidates)
+            # Next-step selection over the accumulated context (Req 4.3), or the
+            # seeded first step (ADR 0014), which is consumed exactly once.
+            if seed_tool:
+                decision = PlannerDecision(
+                    tool_name=seed_tool,
+                    inputs={"query": sub_question.text},
+                    reasoning=(
+                        f"seeded (modality {getattr(sub_question, 'modality', '') or '?'} "
+                        f"{getattr(sub_question, 'modality_confidence', 0.0):.2f})"
+                    ),
+                )
+                seed_tool = ""
+            else:
+                candidates = await self._planner.propose_steps(
+                    sub_question=sub_question, context=ctx, tool_specs=registry.specs(exclude=excluded_tools)
+                )
+                decision = self._select_decision(candidates)
             if decision is None:
                 # No Tool can be selected — stop initiating steps (Req 4.7).
                 trace.record("next_step_select", "success", clock.elapsed_ms(), detail="no_tool_selectable")

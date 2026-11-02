@@ -12,6 +12,11 @@ from pydantic import BaseModel, Field, field_serializer, field_validator
 
 from .mode import LEGACY_MODE_ALIASES
 
+# Deep-reasoning planner profiles (ADR 0013/0014). Kept as a literal tuple here so
+# the request model stays free of agentic imports; a unit test pins it to
+# ``coa_serve.tier3.agentic.planner.PLANNER_PROFILES``.
+_PLANNER_PROFILES: tuple[str, ...] = ("legacy", "structured_first", "seeded")
+
 _MAX_DETAIL_LENGTH = 500  # Matches trace.py centralized truncation
 
 # Cap on how much of a rejected value is echoed back in a validation message.
@@ -167,6 +172,37 @@ class InvokeRequest(BaseModel):
             value = options["mode"]
             if value not in ("deep-reasoning", "standard", *LEGACY_MODE_ALIASES):
                 raise ValueError(f"Invalid mode {value!r}; must be 'deep-reasoning' or 'standard'")
+        return options
+
+    @field_validator("options", mode="after")
+    @classmethod
+    def _validate_planner_profile(cls, options: dict) -> dict:
+        """Validate ``options.plannerProfile`` — the deep-reasoning planner profile (ADR 0013).
+
+        * ``"legacy"`` — the graph-first standing strategy for every sub-question.
+        * ``"structured_first"`` — decide each sub-question's modality first (tabular
+          questions go to the structured tools), and resolve the ontology once before
+          the sub-questions fan out.
+        * ``"seeded"`` (ADR 0014) — ``structured_first`` plus a Decider-tagged
+          modality per sub-question; a tabular sub-question's first step is the
+          structured tool with the sub-question verbatim, no planner call.
+
+        ``options.deciderModelId`` (ADR 0014) names the model the Decider runs on
+        for this request only (a non-empty string, at most 200 characters); it
+        overrides the live deployment setting so two models can be compared on one
+        image. Absence follows the deployment default
+        (``DEEP_REASONING_PLANNER_PROFILE``, ``legacy``; the SSM decider parameter).
+        Only read when the request runs in deep-reasoning mode; the standard
+        cascade ignores both.
+        """
+        if "plannerProfile" in options:
+            value = options["plannerProfile"]
+            if value not in _PLANNER_PROFILES:
+                raise ValueError(f"Invalid plannerProfile {value!r}; must be one of {', '.join(_PLANNER_PROFILES)}")
+        if "deciderModelId" in options:
+            model = options["deciderModelId"]
+            if not isinstance(model, str) or not model.strip() or len(model) > 200:
+                raise ValueError("Invalid deciderModelId; must be a non-empty string of at most 200 characters")
         return options
 
     @field_validator("options", mode="after")

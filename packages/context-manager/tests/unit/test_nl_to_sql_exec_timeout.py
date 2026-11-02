@@ -14,6 +14,9 @@ import pytest
 from coa_serve.tier2.nl_to_sql import strategy as strategy_mod
 from coa_serve.tier2.nl_to_sql.strategy import NLtoSQLStrategy
 
+# Every test here is a unit test; `-m unit` (the CI selection) must not deselect the module.
+pytestmark = pytest.mark.unit
+
 
 def _strategy() -> NLtoSQLStrategy:
     return NLtoSQLStrategy(sql_generator=MagicMock(), firewall=MagicMock(), query_executor=AsyncMock())

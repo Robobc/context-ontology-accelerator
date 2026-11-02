@@ -153,6 +153,12 @@ class AccumulatedContext:
     # synthesis), so no step has to guess the language again. Empty means
     # unresolved: those steps fall back to "match the question's language".
     answer_language: str = ""
+    # Planner profile for this request (ADR 0013): ``legacy`` keeps the graph-first
+    # standing strategy for every sub-question; ``structured_first`` makes the planner
+    # decide the sub-question's modality first and send tabular questions to the
+    # structured tools. Set once per request from the deployment default or
+    # ``options.plannerProfile``; copied into every fork.
+    planner_profile: str = "legacy"
 
     def add(self, result: ToolResult) -> int:
         """Incorporate a ToolResult's chunks/entities/rows, returning the NEW count.
@@ -221,6 +227,7 @@ class AccumulatedContext:
             ontology=self.ontology,
             present_edge_types=list(self.present_edge_types),
             answer_language=self.answer_language,
+            planner_profile=self.planner_profile,
         )
 
     def merge(self, other: AccumulatedContext) -> int:
