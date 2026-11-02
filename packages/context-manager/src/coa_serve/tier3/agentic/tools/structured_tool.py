@@ -197,6 +197,18 @@ class StructuredQueryTool:
             return ToolResult(detail=detail + asked)
 
         rows = tuple(result.rows)
+        # Operator-side record of the generated statement (ADR 0014 A/B: the same
+        # question text produced 1 row in one run and 51 in the next). The SQL goes
+        # to the serve log, not the trace: the trace reaches every caller and the
+        # statement exposes schema, which ``includeDebugInfo`` gates to admins.
+        logger.info(
+            "structured_tool_resolved",
+            tool=self.name,
+            strategy=result.strategy_name,
+            row_count=len(rows),
+            confidence=round(result.confidence, 2),
+            sql=(result.sql or "")[:600],
+        )
         # Mirror rows into items so accumulation/observability see them under the
         # generic item view too (chunks/entities stay empty for a structured tool).
         items = tuple({"type": "row", **row} for row in result.rows)
