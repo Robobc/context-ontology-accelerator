@@ -12,7 +12,7 @@ The deployed A/B on the mixed question that motivated the change was run on
 2026-11-01 (three rounds, results under Verification): the pre-resolve held in
 every run; the modality rule needed one rewrite before the planner followed it,
 after which the figure came back through `nl_to_sql`. Deployed on
-syngenta-eba-dev at `264be8d` with the profile at its `legacy` default.
+the dev deployment at `264be8d` with the profile at its `legacy` default.
 
 Touches the deep-reasoning path only (ADR 0005's reasoning loop, as shipped in
 `tier3/agentic/`). Changes nothing in the Standard cascade, and nothing in how
@@ -24,13 +24,13 @@ Deep reasoning is the one COA path that can combine a figure from the tables
 with what a document says about it in a single answer. That is what the PPM
 work needs: *"For project PI0013123: what is its full cost from the data
 vault, and what did the latest stage-gate memo decide about it?"* On the
-`ppm360-kb-test` namespace (Databricks data vault + ignite tables, plus a
+PPM test namespace (Databricks data vault + ignite tables, plus a
 Managed Knowledge Base of 28 stage-gate memos, 49 induced classes), Tier 2
 alone answers the cost half correctly (`13,322,629.26`), and `rag_retrieval`
 alone finds the memo. Asked together in deep-reasoning mode, the answer never
 contained the figure.
 
-The request trace (`coa-query-20261101T213727Z.json`, syngenta-eba-dev) shows
+The request trace (`coa-query-20261101T213727Z.json`, dev deployment) shows
 why. The decomposer produced two sub-questions, one tabular and one about the
 memo, and ran them in parallel. The five reasoning steps the request had were
 spent as: `ontology_lookup` ×2 (one per sub-question), `graph_traversal` ×3,
@@ -242,7 +242,7 @@ and define a policy for "mixed" sub-questions (two seeds, or a split).
   variables (`infra/test/services/serve-stack.test.ts`) each have their own
   cases. `make lint` is green.
 
-### Deployed A/B, 2026-11-01 (syngenta-eba-dev, `ppm360-kb-test`)
+### Deployed A/B, 2026-11-01 (dev deployment, PPM test namespace)
 
 Serve and MCP deployed from this branch three times in one evening, profile at
 `legacy` on the stack, each request opting in through the MCP `query` tool's

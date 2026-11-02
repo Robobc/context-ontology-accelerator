@@ -6,7 +6,7 @@ Proposed. Implemented on `feature/bedrock-kb-chunk-source` in three layers,
 each committed on its own: serve (`GraphExpandChunks` on the data-layer
 surface, `tier3/chunk_expander.py`), the REST edge and the `expand_chunks` MCP
 tool, and the outer agent's chaining of `Retrieve` into `expand_chunks`.
-Deployed to syngenta-eba-dev and run against the ACL fixture of ADR 0011 on
+Deployed to the dev deployment and run against the ACL fixture of ADR 0011 on
 2026-10-31 (results under Verification): the pivot and the seed verification
 held through MCP and REST for one real user; the cross-document cut and the
 outer-agent leg are not yet exercised, for the reasons recorded there.
@@ -209,7 +209,7 @@ Unit coverage, all local, at the three commits:
   `OFF`, no chunk ids, and an unavailable graph each leave the plan as the
   only COA call and the trace says why.
 
-### Deployed run, 2026-10-31 (syngenta-eba-dev, `f4c4e5c`)
+### Deployed run, 2026-10-31 (dev deployment, `f4c4e5c`)
 
 Stacks `api` (route + authorizer), `data-layer`, `serve`, `mcp`, `outer-agent`
 redeployed; serve v16 and mcp v7 share one image, outer-agent v6, all `READY`;

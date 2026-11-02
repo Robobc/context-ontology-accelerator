@@ -11,7 +11,7 @@ request-level `plannerProfile=seeded` and `deciderModelId`, the CDK and
 Follows ADR 0013, whose deployed A/B is the evidence this design answers.
 
 One design change from the version first written: there is **no separate `jev`
-HTTP backend**. Syngenta routes all generation through Portkey (ADR 0002), and
+HTTP backend**. The customer deployment routes all generation through Portkey (ADR 0002), and
 a Jev-class model would be reached the same way: a model id the gateway
 routes. The `llm` backend therefore takes any model id the deployment's
 generation client can address (Bedrock model id, or a Portkey model slug), and
@@ -56,7 +56,7 @@ Constraints that shape the design:
   through OpenRouter, is not approved for Amazon-internal use, and is not on
   Bedrock) cannot be a dependency. Whatever ships must work with nothing but the
   generation client the deployment already has.
-- Syngenta runs generation through Portkey (ADR 0002). Any decision path that
+- The customer deployment runs generation through Portkey (ADR 0002). Any decision path that
   only works on Bedrock Converse is an optimisation, not the baseline.
 - The fork rule: additive, opt-in, defaults unchanged.
 - The literature brief behind ADR 0013 rated "decomposer tags modality,
@@ -97,7 +97,7 @@ Backends, selected by the live `backend` setting:
 | Value | What runs | When to use it |
 |---|---|---|
 | `off` (**default**) | Nothing is called; every question is an abstention and every caller takes its pre-ADR path. | Default; nothing moves. |
-| `llm` | `LLMDecider` over the deployment's generation client (`LLMClient.converse`, so Bedrock *or* Portkey), `temperature=0`, `max_tokens=512`, a system prompt that permits only `{"answers":[{"id":"q1","option":"…","confidence":0.0}]}`, options passed as a closed list and validated on the way back (an option outside the list is an abstention). `modelId` names the model: empty means the generation client's own default (no new model access needed); a Bedrock id such as Nova Micro / Lite or Claude Haiku is the intended cheap setting; through Portkey it can be any model slug the gateway routes, a Jev-class classifier included. The guardrail id is read through the same live provider the planner uses and the user-derived state is guard-tagged. | The baseline. What Syngenta runs. |
+| `llm` | `LLMDecider` over the deployment's generation client (`LLMClient.converse`, so Bedrock *or* Portkey), `temperature=0`, `max_tokens=512`, a system prompt that permits only `{"answers":[{"id":"q1","option":"…","confidence":0.0}]}`, options passed as a closed list and validated on the way back (an option outside the list is an abstention). `modelId` names the model: empty means the generation client's own default (no new model access needed); a Bedrock id such as Nova Micro / Lite or Claude Haiku is the intended cheap setting; through Portkey it can be any model slug the gateway routes, a Jev-class classifier included. The guardrail id is read through the same live provider the planner uses and the user-derived state is guard-tagged. | The baseline. What the customer deployment runs. |
 
 Forced tool use on Bedrock Converse (so the JSON shape is guaranteed rather
 than parsed) was considered and left out of step 1: Portkey is the baseline
@@ -286,7 +286,7 @@ free; its job is to avoid the expensive call, not to be invisible.
    1 and never consults the planner for it. Deploy to dev with the stack
    defaults (`off`, profile `legacy`), then switch the decider on through the
    SSM parameter and run the A/B with `plannerProfile=seeded` per request.
-2. Labelled set: 50–150 sub-questions over `ppm360-poc` and `ppm360-kb-test`
+2. Labelled set: 50–150 sub-questions over the two PPM test namespaces
    with gold modality and gold first tool (the harness the literature brief
    asked for), half of them paraphrases. Report decider accuracy and confusion
    matrix separately from end-to-end answer correctness, first-tool accuracy,
@@ -317,7 +317,7 @@ free; its job is to avoid the expensive call, not to be invisible.
   is not reachable from a customer deployment without data egress to a third
   party, is not approved internally, and is not on Bedrock. When a Jev-class
   model is reachable it will be through the gateway the deployment already
-  trusts (Portkey for Syngenta), as a model id, so the swap is one
+  trusts (Portkey for the customer deployment), as a model id, so the swap is one
   configuration value and no adapter is needed; one would be written only for
   a classifier whose API is not chat-shaped.
 - **Seed every step from a plan (full ReWOO).** Brittle when observations
@@ -363,13 +363,13 @@ free; its job is to avoid the expensive call, not to be invisible.
   defaults (`DECIDER_BACKEND=off`, no empty `DECIDER_MODEL_ID`) and overrides.
 - `make lint` green; 3,662 context-manager unit tests pass.
 
-### Deployed, 2026-11-02 (syngenta-eba-dev, `ppm360-kb-test`)
+### Deployed, 2026-11-02 (dev deployment, PPM test namespace)
 
 Serve v20/v21 and MCP v11/v12 deployed from `7b35895` then `d8184f4` with the
 stack defaults (`DECIDER_BACKEND=off`, profile `legacy`). The Decider was then
 switched on **without a redeploy** by writing
-`/syngenta-eba/deep-reasoning/decider` =
-`{"backend":"llm","modelId":"@syngenta-eba-bedrock/us.amazon.nova-micro-v1:0","minConfidence":0.7,"timeoutS":3}`
+`<SSM_PREFIX>/deep-reasoning/decider` =
+`{"backend":"llm","modelId":"<portkey-slug-for>/us.amazon.nova-micro-v1:0","minConfidence":0.7,"timeoutS":3}`
 (dev generation runs through Portkey, so the model id is the Portkey slug); the
 serve log showed `decider_config_loaded` with those values on every warm
 instance within the TTL, and the parameter stays on for further testing. Same

@@ -56,7 +56,7 @@ from coa_serve.tier3.agentic.tools.base import ToolResult
 from coa_serve.tier3.synthesizer import SynthesisResult
 from coa_serve.trace import TraceCollector
 
-NS = "ppm360-kb-test"
+NS = "ppm-test-namespace"
 
 ONTOLOGY_ITEM = {
     "type": "ontology",

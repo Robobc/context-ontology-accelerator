@@ -18,3 +18,10 @@
 3065fd37-ad3a-411d-92b5-5c5ac6d1115a
 af1f11b9-f0b6-4d6a-ab69-027b04e54155
 8714d782-821e-4c63-ab80-9fb9b9eea94e
+# Repeated-digit placeholder account id used in the web-app Connect Source wizard
+# placeholder text and its tests (same family as 111122223333)
+222222222222
+# Fixture GUIDs in the fork's KB entitlement / chunk-expander unit tests: sequential
+# hex, not any tenant (replaced live ids in 8d9f8a7)
+0f1e2d3c-4b5a-4697-8899-aabbccddeeff
+1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
