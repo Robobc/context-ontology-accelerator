@@ -421,6 +421,99 @@ What the runs established:
 Verdict: the Decider and the seeded first step remove the two planner-side
 failure modes by construction, and are switchable live. The figure now
 depends on SQL generation choosing an aggregate, which routing cannot fix.
+
+### Labelled set and harness, 2026-11-02 (rollout step 2)
+
+`sim/ppm/eval/routing-dataset.yaml` (54 questions, 65 gold sub-questions: 26
+tabular incl. 4 paraphrases, 17 document incl. 2 not entitled to the reader and
+2 "figure named in a document" traps, 11 mixed with a gold decomposition) and
+`sim/ppm/eval/routing_harness.py` (`decider` offline on Bedrock with the real
+`LLMDecider`, `e2e` against the dev MCP per arm, `report`). Operational files,
+not in the repository (customer-shaped data); the harness documents its
+contract in `ROUTING-HARNESS.md`.
+
+**Decider, offline, 3 repeats per sub-question (195 judgements per model):**
+
+| Model | Accuracy | Tabular | Document | Confidence correct / wrong | Unstable sub-q | p50 call |
+|---|---|---|---|---|---|---|
+| Nova Micro | **97.4%** | 100% | 94.0% | 0.95 / 0.95 | 1/65 | 464 ms |
+| Nova Lite | 90.3% | 100% | 77.4% | 0.93 / 0.92 | 1/65 | 534 ms |
+| Claude Haiku 4.5 | 84.6% | 97.3% | 67.9% | 0.93 / 0.83 | 0/65 | 630 ms |
+
+Every error is `document → tabular` (Haiku also `→ mixed`) on questions that
+ask for a status or a figure *as reported in a document* ("what combined full
+cost does the Seedcare summary report"); the `doc_vs_table_trap` tag scores
+58% / 50% / 25%. Data-vault, budget and finance wording, paraphrases and
+not-entitled items are 100% on Nova Micro. Two things follow: the smallest
+model is the best classifier here, so the cheap default is also the accurate
+one; and the confidence is not calibrated on Nova (0.95 on wrong answers), so
+`minConfidence` cannot catch these errors and the modality question needs an
+explicit rule that a named document source (report, memo, note, minutes,
+summary) makes the sub-question `document` even when it asks for a number.
+That rule is not applied yet, so that the next run measures it on held-out
+items rather than on the ones that produced it.
+
+**Deployed, 18 items × 3 arms (54 deep-reasoning runs, same reader):**
+
+| | `legacy` | `structured_first` | `seeded` |
+|---|---|---|---|
+| `nl_to_sql` called when gold needs it (n=14) | 0% | 92.9% | **100%** |
+| `nl_to_sql` in the first round | 0% | 92.9% | **100%** (all seeded) |
+| `nl_to_sql` called on a document question (n=4) | 0% | 25% | 25% |
+| SQL returned exactly one row (aggregate form) | n/a | 76.9% | 71.4% |
+| `max_steps_reached` | 72.2% | 44.4% | 44.4% |
+| mean tool steps | 4.6 | 3.2 | 3.2 |
+| **answer correct, all** | 5.6% | 11.1% | 16.7% |
+| answer correct, tabular (n=4) | 0% | 25% | 50% |
+| answer correct, document (n=4) | 25% | 0% | 0% |
+| answer correct, mixed (n=10) | 0% | 10% | 10% |
+| wall time p50 / max | 30 / 50 s | 37 / 77 s | 38 / 88 s |
+
+Reading it: the routing problem the two ADRs set out to fix is fixed. Under
+`legacy` the structured tool was never reached on 14 questions that needed it;
+under `seeded` it is reached first on all 14, the budget is exhausted in 44%
+of runs instead of 72%, and 1.4 fewer tool steps are spent per question. The
+deployed Decider agreed with the offline run (same tags, same single
+over-routing on the Seedcare-summary trap).
+
+End-to-end correctness is low in every arm, and the harness shows where it is
+lost, which is the reason it scores the layers separately:
+
+1. **SQL generation on the golden traps.** With routing right, the generated
+   statement was wrong or unaggregated on `t_voi_mean_excl_cap` (10.95 and
+   11.36 returned, two different statements, gold -388.2275: the 999 exclusion
+   was not applied), `t_budget_pi0013064` (52 rows, no `SUM`, three times),
+   `m_legacy_region_count` ("0 projects" for EAME/APAC, gold 8 and 17). These
+   are Tier-2 properties that Standard mode shares; the governed-metric path
+   (Tier 1) is what the product offers for them.
+2. **Over-routing is worse than a miss.** On `d_seedcare_combined_cost` both
+   non-legacy arms tagged the question tabular, ran SQL, and answered with a
+   confident, plausible, wrong figure (462,926,640.94, the sum over every
+   Seedcare project in the tables, where the document covers eight). A
+   document question answered from the tables fails silently; the modality
+   rule fix above is therefore the next Decider change.
+3. **Document retrieval.** 0% on document questions in both non-legacy arms
+   and 25% under `legacy` (the one correct answer is a refusal on a
+   not-entitled document). `d_gate_decision_pi0013123` is the sharpest case:
+   `stage-gate-memo-1` carries a per-document ACL that includes this reader,
+   yet no arm surfaced its decision ("Terminated / Proposed"); the answers came
+   from the status report's gate list, and several traces still report
+   statements "withheld by document entitlement". Either the graph's
+   entitlement gate keys on the library prefix and ignores the per-document
+   override, or the memo chunk is not reachable from the anchored project
+   entity. This is an ADR 0011/0012 question, not a routing one, and it is the
+   largest single cause of the mixed questions scoring 10%: their tabular half
+   is right (the figure is in the answer on 7 of 10) and their document half
+   is empty.
+
+The labelled set also exposed a cost of the fix: the structured leg is 20–40 s
+inside the loop, so the arms that reach it are 7–8 s slower at p50 than
+`legacy`, which failed faster.
+
+Next, in order: the Decider modality rule for named document sources (then
+re-run `decider` on items added after the rule, not on these); the
+per-document ACL check on the KB graph gate; the governed metric for full
+cost; D3.
 Next, in order: (a) hand the synthesizer the structured leg's SQL (or its
 WHERE filter) alongside the rows, so 51 cost lines filtered on PI0013123 are
 read as PI0013123's cost lines rather than as unrelated data; (b) a governed
