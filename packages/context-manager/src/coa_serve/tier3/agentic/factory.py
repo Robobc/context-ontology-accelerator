@@ -141,6 +141,7 @@ def build_tool_registry(
     ontology_source: OntologySource | None = None,
     structured_query_tier: Any | None = None,
     entitlement_gate: Any | None = None,
+    document_retriever: Any | None = None,
 ) -> ToolRegistry:
     """Build the internal :class:`ToolRegistry` with endpoint-gated tools (Req 12.4-12.6).
 
@@ -165,6 +166,8 @@ def build_tool_registry(
         entitlement_gate: Optional shared ``DocumentEntitlementGate`` (fork): applied
             by the strategy, graph and chunk tools for per-user Bedrock KB
             namespaces. Built once in ``main.py``; ``None`` = off.
+        document_retriever: Optional namespace-aware document retriever (fork,
+            ADR 0015) handed to the vector tool for managed-Knowledge-Base namespaces.
 
     Returns:
         The populated :class:`ToolRegistry`, never exposed outside the Serve_Layer
@@ -228,9 +231,14 @@ def build_tool_registry(
         )
 
     # ── Vector_Search_Tool — opensearch + embed client (Req 2.3) ───────
-    if has_opensearch and embed_client is not None:
+    # Fork (ADR 0015): also registered when a namespace-aware document retriever is
+    # supplied, so a managed-Knowledge-Base namespace (no OpenSearch chunks) still
+    # gets a semantic-search tool that reads the KB as the signed-in user.
+    if (has_opensearch and embed_client is not None) or document_retriever is not None:
         vr = vector_retriever if vector_retriever is not None else VectorRetriever(clients.vector)
-        build_vector_tool(registry, vr, embed_client, entitlement_gate=entitlement_gate)
+        build_vector_tool(
+            registry, vr, embed_client, entitlement_gate=entitlement_gate, document_retriever=document_retriever
+        )
     else:
         missing = [] if has_opensearch else ["opensearch_endpoint"]
         if embed_client is None:
@@ -286,6 +294,7 @@ def build_agentic_retriever(
     guardrail_id_provider: Callable[[], str] | None = None,
     entitlement_gate: Any | None = None,
     decider_settings_provider: Callable[[], Any] | None = None,
+    document_retriever: Any | None = None,
 ) -> AgenticRetriever:
     """Compose the :class:`AgenticRetriever` from the registry and its collaborators.
 
@@ -321,6 +330,8 @@ def build_agentic_retriever(
             :class:`DecompositionPlanner` so an operator's SSM guardrail change
             reaches the warm agentic path without a redeploy.
         entitlement_gate: Forwarded to :func:`build_tool_registry` (fork).
+        document_retriever: Optional namespace-aware document retriever (fork,
+            ADR 0015) handed to the vector tool for managed-Knowledge-Base namespaces.
         decider_settings_provider: ADR 0014 — callable returning the Decider's
             live :class:`DeciderSettings` (backend, model, threshold, timeout) on
             each call; ``None`` uses the environment defaults from ``config``.
@@ -343,6 +354,7 @@ def build_agentic_retriever(
             vector_retriever=vector_retriever,
             structured_query_tier=structured_query_tier,
             entitlement_gate=entitlement_gate,
+            document_retriever=document_retriever,
         )
     )
     # The agentic path synthesizes over EVERY chunk its multi-step session gathered

@@ -335,6 +335,43 @@ class TestFinalSemanticSearch:
         assert result.synthesized_answer == "ans"
         assert result.partial is True
 
+    async def test_kb_backed_namespace_prefers_the_vector_tool_over_the_strategy_tool(self):
+        """Fork (ADR 0015): a managed-KB namespace has no chunks in COA's index."""
+        strategy = _FinalTool("strategy:chunk_based_semantic", _final_result())
+        vector = _FinalTool("vector_search", _final_result())
+        vector.handles_namespace = lambda ns: ns == NS  # type: ignore[attr-defined]
+        retriever = AgenticRetriever(
+            registry=_registry(strategy, vector),
+            controller=FakeController(stops=[StopReason.queue_drained]),
+            decomposer=FakeDecomposer([SubQuestion(text="q")]),
+            synthesizer=FakeSynthesizer(result=SynthesisResult(answer="ans", confidence=0.8, duration_ms=5)),
+            budget=AgenticBudgetConfig(),
+            clock_source=FakeClockSource(),
+        )
+
+        await retriever.resolve("q", NS, trace=TraceCollector())
+
+        assert len(vector.calls) == 1
+        assert strategy.calls == []
+
+    async def test_opensearch_namespace_keeps_the_strategy_tool_for_the_final_search(self):
+        strategy = _FinalTool("strategy:chunk_based_semantic", _final_result())
+        vector = _FinalTool("vector_search", _final_result())
+        vector.handles_namespace = lambda ns: False  # type: ignore[attr-defined]
+        retriever = AgenticRetriever(
+            registry=_registry(strategy, vector),
+            controller=FakeController(stops=[StopReason.queue_drained]),
+            decomposer=FakeDecomposer([SubQuestion(text="q")]),
+            synthesizer=FakeSynthesizer(result=SynthesisResult(answer="ans", confidence=0.8, duration_ms=5)),
+            budget=AgenticBudgetConfig(),
+            clock_source=FakeClockSource(),
+        )
+
+        await retriever.resolve("q", NS, trace=TraceCollector())
+
+        assert len(strategy.calls) == 1
+        assert vector.calls == []
+
     async def test_disabled_flag_skips_the_final_search_entirely(self):
         sem = _FinalTool("strategy:chunk_based_semantic", _final_result())
         retriever = AgenticRetriever(

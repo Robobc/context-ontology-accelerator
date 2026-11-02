@@ -700,7 +700,14 @@ class AgenticRetriever:
         """
         if not self._final_semantic_search:
             return None
-        tool = self._registry.get(self._SEMANTIC_STRATEGY_TOOL) or self._registry.get(self._VECTOR_TOOL)
+        vector_tool = self._registry.get(self._VECTOR_TOOL)
+        # Fork (ADR 0015): a managed-Knowledge-Base namespace has no chunks in COA's
+        # own index, so the graphrag strategy tool would return nothing; the vector
+        # tool reads the KB as the signed-in user instead.
+        if vector_tool is not None and getattr(vector_tool, "handles_namespace", lambda _ns: False)(namespace):
+            tool = vector_tool
+        else:
+            tool = self._registry.get(self._SEMANTIC_STRATEGY_TOOL) or vector_tool
         if tool is None:
             return _FinalSearch(tool=None, task=None, start=0.0)
 

@@ -49,6 +49,8 @@ CONTEXT="--context env=$ENV"
 # come from SSM <prefix>/deep-reasoning/decider and need no redeploy.
 [ -n "${SCL_DECIDER_BACKEND:-}" ] && CONTEXT="$CONTEXT --context decider_backend=$SCL_DECIDER_BACKEND"
 [ -n "${SCL_DECIDER_MODEL_ID:-}" ] && CONTEXT="$CONTEXT --context decider_model_id=$SCL_DECIDER_MODEL_ID"
+# ADR 0015: Standard-mode Tier-2 gate ("aoss" default | "decider" | "decider+aoss" | "off").
+[ -n "${SCL_TIER2_SKIP_MODE:-}" ] && CONTEXT="$CONTEXT --context tier2_skip_mode=$SCL_TIER2_SKIP_MODE"
 [ -n "${SCL_RESOLVE_TIMEOUT_SECONDS:-}" ] && CONTEXT="$CONTEXT --context resolve_timeout_s=$SCL_RESOLVE_TIMEOUT_SECONDS"
 [ -n "${SCL_NEPTUNE_INSTANCE_CLASS:-}" ] && CONTEXT="$CONTEXT --context neptune_instance_class=$SCL_NEPTUNE_INSTANCE_CLASS"
 [ -n "${SCL_LAMBDA_RESERVED_CONCURRENCY:-}" ] && CONTEXT="$CONTEXT --context lambda_reserved_concurrency=$SCL_LAMBDA_RESERVED_CONCURRENCY"

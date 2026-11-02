@@ -104,7 +104,12 @@ class VectorSearchTool:
     """
 
     def __init__(
-        self, vector_retriever: VectorRetriever, embed_client: EmbedClient, *, entitlement_gate: Any | None = None
+        self,
+        vector_retriever: VectorRetriever,
+        embed_client: EmbedClient,
+        *,
+        entitlement_gate: Any | None = None,
+        document_retriever: Any | None = None,
     ) -> None:
         """Build the Tool over a ``VectorRetriever`` and an embed client.
 
@@ -117,6 +122,12 @@ class VectorSearchTool:
             entitlement_gate: Optional ``DocumentEntitlementGate`` (fork): the
                 chunk index may hold a per-user Knowledge Base's text when kg-build
                 ran with ``VECTOR_STORE_MODE=AOSS``; hits are gated by document.
+            document_retriever: Optional namespace-aware
+                :class:`~coa_serve.tier3.document_retriever.DocumentRetriever`
+                (fork, ADR 0015). When a namespace binds a managed Knowledge Base
+                (``requires_query_embedding`` is false) the search goes through it
+                as the signed-in user and Bedrock applies the document ACLs; the
+                OpenSearch chunk index is empty for such namespaces.
         """
         self.name = TOOL_NAME
         self.description = _DESCRIPTION
@@ -125,6 +136,21 @@ class VectorSearchTool:
         self._vector = vector_retriever
         self._embed = embed_client
         self._entitlement_gate = entitlement_gate
+        self._documents = document_retriever
+
+    def handles_namespace(self, namespace: str) -> bool:
+        """True when ``namespace`` is served by a managed Knowledge Base through this tool.
+
+        The agentic retriever uses it to prefer this tool over the graphrag
+        strategy tools for the final semantic search: those read COA's own chunk
+        index, which a Knowledge-Base namespace never populates.
+        """
+        if self._documents is None:
+            return False
+        try:
+            return not self._documents.requires_query_embedding(namespace)
+        except Exception:  # noqa: BLE001 - a registry fault must not break tool selection
+            return False
 
     async def invoke(
         self,
@@ -154,6 +180,8 @@ class VectorSearchTool:
             A :class:`ToolResult` carrying the native ``chunks`` (passed through to
             synthesis), their normalized dict ``items``, and a ``detail`` line.
         """
+        if self.handles_namespace(namespace):
+            return await self._invoke_managed_kb(namespace, query, top_k, _.get("profile") or {})
         try:
             search_embedding = await self._resolve_embedding(embedding, query)
         except Exception as exc:  # noqa: BLE001 - a Tool must never raise (Req 9.1)
@@ -194,6 +222,32 @@ class VectorSearchTool:
         items = tuple(_chunk_item(c) for c in chunks)
         return ToolResult(chunks=chunks, items=items, detail=f"{self.name}: {len(chunks)} chunks")
 
+    async def _invoke_managed_kb(self, namespace: str, query: str, top_k: int, profile: dict) -> ToolResult:
+        """Retrieve from the namespace's managed Knowledge Base as the signed-in user.
+
+        No local embedding (Bedrock embeds the query) and no entitlement gate: the
+        Retrieve call carries the caller's identity and the service returns only
+        the documents that user may read (ADR 0011).
+        """
+        if not query:
+            return ToolResult(detail=f"{self.name}: no query text supplied for the Knowledge Base search")
+        backend = self._documents.backend_name(namespace)
+        try:
+            chunks = tuple(
+                await self._documents.retrieve(
+                    query,
+                    namespace,
+                    query_embedding=None,
+                    top_k=top_k,
+                    user_id=profile.get("email") or profile.get("userId"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - a Tool must never raise (Req 9.1)
+            logger.warning("vector_tool_kb_error", tool=self.name, backend=backend, error=type(exc).__name__)
+            return ToolResult(detail=f"{self.name} error via {backend}: {type(exc).__name__}")
+        items = tuple(_chunk_item(c) for c in chunks)
+        return ToolResult(chunks=chunks, items=items, detail=f"{self.name}: {len(chunks)} chunks via {backend}")
+
     async def _resolve_embedding(self, embedding: list[float] | None, query: str) -> list[float]:
         """Return the embedding to search with: precomputed if supplied, else embed ``query``.
 
@@ -215,6 +269,7 @@ def build_vector_tool(
     embed_client: EmbedClient,
     *,
     entitlement_gate: Any | None = None,
+    document_retriever: Any | None = None,
 ) -> str:
     """Register the single :class:`VectorSearchTool` into ``registry``.
 
@@ -227,11 +282,15 @@ def build_vector_tool(
         vector_retriever: The shared :class:`VectorRetriever` the tool wraps.
         embed_client: The embed client used to embed sub-question text.
         entitlement_gate: Optional ``DocumentEntitlementGate`` (fork).
+        document_retriever: Optional namespace-aware document retriever (fork,
+            ADR 0015); managed-Knowledge-Base namespaces are searched through it.
 
     Returns:
         The registered Tool name (``"vector_search"``).
     """
-    tool = VectorSearchTool(vector_retriever, embed_client, entitlement_gate=entitlement_gate)
+    tool = VectorSearchTool(
+        vector_retriever, embed_client, entitlement_gate=entitlement_gate, document_retriever=document_retriever
+    )
     registry.register(tool)
     logger.info("vector_tool_registered", tool_name=tool.name)
     return tool.name
