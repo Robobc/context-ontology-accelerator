@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 import pytest
 from coa_mcp.tools.execution import (
     QUERY_TIMEOUT_MS_MAX,
+    ContextManagerError,
+    execute_expand_chunks,
     execute_graph_traversal,
     execute_query,
     execute_rag_retrieval,
@@ -527,6 +529,68 @@ class TestExecuteGraphTraversal:
         assert len(result["entities"]) == 1
         assert result["entities"][0]["label"] == "Acme Corp"
         assert len(result["relationships"]) == 1
+
+
+@pytest.mark.unit
+class TestExecuteExpandChunks:
+    """Fork (ADR 0012): the expand_chunks tool forwards the GraphExpandChunks contract."""
+
+    _CM_OK = {
+        "result": {
+            "entities": [{"id": "e1", "label": "Project Atlas", "class": "Project"}],
+            "facts": [{"id": "f1", "text": "Project Atlas HAS BUDGET 1.2M", "subjectId": "e1", "chunkId": "c1"}],
+            "relatedChunks": [{"chunkId": "c2", "sourceDocumentId": "s3://hub/hr.md", "entityIds": ["e1"]}],
+            "withheld": {"seedChunks": 0, "facts": 1, "relatedChunks": 0},
+            "trace": [{"step": "t3.graph_expand", "status": "success"}],
+        }
+    }
+
+    @pytest.mark.asyncio
+    async def test_invokes_graph_expand_action_with_defaults(self, mock_cm, profile):
+        mock_cm.invoke.return_value = self._CM_OK
+        await execute_expand_chunks(mock_cm, ["c1"], "sales", profile, "tok")
+        payload = mock_cm.invoke.call_args[0][0]
+        assert payload["action"] == "graphExpand"
+        assert payload["namespace"] == "sales"
+        assert payload["options"] == {"chunkIds": ["c1"], "scope": "SEED_DOCUMENTS", "maxFacts": 100}
+        assert mock_cm.invoke.call_args[0][1] == "tok"
+
+    @pytest.mark.asyncio
+    async def test_scope_and_max_facts_forwarded_and_capped(self, mock_cm, profile):
+        mock_cm.invoke.return_value = self._CM_OK
+        await execute_expand_chunks(
+            mock_cm, ["c1", "c2"], "ns", profile, "tok", scope="ENTITLED_DOCUMENTS", max_facts=9999
+        )
+        options = mock_cm.invoke.call_args[0][0]["options"]
+        assert options["scope"] == "ENTITLED_DOCUMENTS"
+        assert options["maxFacts"] == 500
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_ids", [[], ["c"] * 51, "c1"])
+    async def test_out_of_contract_chunk_ids_never_leave_the_process(self, mock_cm, profile, bad_ids):
+        with pytest.raises(ValueError, match="chunkIds"):
+            await execute_expand_chunks(mock_cm, bad_ids, "ns", profile, "tok")
+        mock_cm.invoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_scope_raises(self, mock_cm, profile):
+        with pytest.raises(ValueError, match="Invalid scope"):
+            await execute_expand_chunks(mock_cm, ["c1"], "ns", profile, "tok", scope="EVERYTHING")
+        mock_cm.invoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_the_contract_members(self, mock_cm, profile):
+        mock_cm.invoke.return_value = self._CM_OK
+        result = await execute_expand_chunks(mock_cm, ["c1"], "sales", profile, "tok")
+        assert set(result) == {"entities", "facts", "relatedChunks", "withheld", "trace"}
+        assert result["facts"][0]["chunkId"] == "c1"
+        assert result["withheld"]["facts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cm_error_is_raised(self, mock_cm, profile):
+        mock_cm.invoke.return_value = {"statusCode": 403, "error": "AccessDeniedError", "message": "denied"}
+        with pytest.raises(ContextManagerError):
+            await execute_expand_chunks(mock_cm, ["c1"], "sales", profile, "tok")
 
 
 @pytest.mark.unit

@@ -157,6 +157,58 @@ apply GraphTraverse @examples([
     }
 ])
 
+apply GraphExpandChunks @examples([
+    {
+        title: "Expand the graph from retrieved Knowledge Base chunks"
+        input: {
+            namespaceId: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+            chunkIds: ["Ukhx_oqNvL1daHhnb6mECpjhUOdYSeMwVnj6HnadKZw"]
+            scope: "SEED_DOCUMENTS"
+            maxFacts: 100
+        }
+        output: {
+            entities: [
+                {
+                    id: "aws:0f1e2d3c4b5a469788aa:7e1a9c20:0001"
+                    label: "Project Atlas"
+                    class: "Project"
+                }
+                {
+                    id: "aws:0f1e2d3c4b5a469788aa:7e1a9c20:0002"
+                    label: "R&D Basel"
+                    class: "Department"
+                }
+            ]
+            facts: [
+                {
+                    id: "aws:0f1e2d3c4b5a469788aa:7e1a9c20:f001"
+                    text: "Project Atlas HAS BUDGET 1.2M EUR (2026)"
+                    subjectId: "aws:0f1e2d3c4b5a469788aa:7e1a9c20:0001"
+                    chunkId: "Ukhx_oqNvL1daHhnb6mECpjhUOdYSeMwVnj6HnadKZw"
+                    sourceDocumentId: "s3://knowledge-hub/finance/budget-2026.md"
+                }
+                {
+                    id: "aws:0f1e2d3c4b5a469788aa:7e1a9c20:f002"
+                    text: "Project Atlas CHARGED TO R&D Basel"
+                    subjectId: "aws:0f1e2d3c4b5a469788aa:7e1a9c20:0001"
+                    objectId: "aws:0f1e2d3c4b5a469788aa:7e1a9c20:0002"
+                    chunkId: "Ukhx_oqNvL1daHhnb6mECpjhUOdYSeMwVnj6HnadKZw"
+                    sourceDocumentId: "s3://knowledge-hub/finance/budget-2026.md"
+                }
+            ]
+            relatedChunks: []
+            withheld: { seedChunks: 0, facts: 1, relatedChunks: 1 }
+            trace: [
+                {
+                    step: "t3.graph_expand"
+                    status: "success"
+                    durationMs: 84
+                }
+            ]
+        }
+    }
+])
+
 apply DescribeSchema @examples([
     {
         title: "Describe the queryable schema"

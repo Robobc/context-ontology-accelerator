@@ -42,6 +42,9 @@ TOOL_CEDAR_ACTION: dict[str, str] = {
     "translate_sql": "query",
     "rag_retrieval": "searchDocuments",
     "graph_traversal": "viewNamespace",
+    # Fork (ADR 0012): returns document-derived facts and entities, the same
+    # class of content as rag_retrieval, so the same action gates it.
+    "expand_chunks": "searchDocuments",
 }
 
 

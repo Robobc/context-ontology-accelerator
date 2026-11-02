@@ -794,7 +794,11 @@ class TestDatabaseDetailConfigurationDispatch:
         # DOCUMENTS sub-types: _build_database_detail is never reached for them
         # (_item_to_detail branches on sourceType first), so they carry no
         # DatabaseSourceDetail configuration member.
-        document_sub_types = {SourceSubType.S3.value, SourceSubType.LOCAL_UPLOAD.value}
+        document_sub_types = {
+            SourceSubType.S3.value,
+            SourceSubType.LOCAL_UPLOAD.value,
+            SourceSubType.BEDROCK_MANAGED_KB.value,
+        }
 
         unmapped = {s.value for s in SourceSubType} - set(_DETAIL_CONFIG_KEYS) - document_sub_types
         assert not unmapped, (

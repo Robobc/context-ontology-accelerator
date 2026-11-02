@@ -1027,6 +1027,221 @@ authorized to. Both are required; the role alone is not sufficient. The platform
 own role needs `s3:GetBucketTagging` on the bucket to read that tag, so include it
 alongside `s3:GetObject` and `s3:ListBucket`.
 
+### Bedrock Managed Knowledge Base Source
+
+If your documents are already indexed in an Amazon Bedrock Managed Knowledge
+Base (for example a SharePoint corpus with document-level access control), you
+can build the knowledge graph from the Knowledge Base's own chunks instead of
+re-ingesting the files. The Knowledge Base keeps parsing, chunking, chunk
+embedding and access control; Context Ontology Accelerator runs only the
+entity and relationship extraction into the graph, keyed on the Knowledge
+Base's chunk ids so a Knowledge Base search result pivots straight into graph
+traversal.
+
+A Knowledge Base is a source like any other: register it, scan it, re-scan it,
+delete it, exactly as a Databricks or Glue source. Nothing is configured on the
+deployment. What the Knowledge Base owner provides is one IAM role in their
+account when the Knowledge Base is not in the deployment's own account, the
+same way a Databricks owner provides the credential-access role.
+
+#### Register via Web UI
+
+**Connect Source → Documents → Bedrock Knowledge Base** tab. Enter a name, the
+Knowledge Base id, optionally its Region and the data source ids to read, the
+access role ARN when the Knowledge Base is in another account, and the
+extraction identity when the Knowledge Base enforces document permissions. The
+form states the role-name rule with this deployment's real prefix and shows the
+External ID the trust policy must require, with a copy button; the External ID
+is displayed, never typed.
+
+#### Register via API
+
+`POST /namespaces/{namespaceId}/sources` with `sourceType: "DOCUMENTS"` and a
+`documentSource.bedrockKnowledgeBaseConfiguration` (no `sourceBucketArn`,
+`uploadId`, `s3Prefixes` or `roleArn`; the configuration present selects the
+sub-type):
+
+```json
+{
+  "sourceType": "DOCUMENTS",
+  "documentSource": {
+    "name": "knowledge-hub",
+    "bedrockKnowledgeBaseConfiguration": {
+      "knowledgeBaseId": "ABCDEFGHIJ",
+      "dataSourceIds": ["KLMNOPQRST"],
+      "region": "eu-central-1",
+      "crossAccountRoleArn": "arn:aws:iam::<kb-account>:role/{prefix}-datasource-access-knowledge-hub",
+      "extractionUserId": "coa-extraction@example.com"
+    },
+    "extractionConfig": { "preferredEntityClassifications": ["Product", "Regulation"] }
+  }
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `knowledgeBaseId` | ✅ | The Knowledge Base id (10 upper-case letters or digits). |
+| `dataSourceIds` | | Restrict extraction to these data sources; all of them when omitted. |
+| `region` | | Region of the Knowledge Base; the deployment's Region when omitted. |
+| `crossAccountRoleArn` | | Role in the Knowledge Base's account, named `{prefix}-datasource-access-*`. Omit when the Knowledge Base is in the deployment's own account. Same member, type and meaning as on Glue, JDBC and Databricks sources. |
+| `extractionUserId` | when any data source enforces document permissions | The email of the account the knowledge graph is built as (see [The extraction identity](#the-extraction-identity-which-documents-the-graph-covers)). Omit only for data sources without access control. |
+
+#### The extraction identity: which documents the graph covers
+
+A Knowledge Base with document-level access control returns documents only to
+a request that names a user, and only the documents that user may read. There
+is no administrative identity that sees everything. Building the graph is such
+a request, so it runs as one identity: the **extraction identity**, the email
+of a user or service account in the source system (for SharePoint, an Entra
+account) that the Knowledge Base owner has granted **read access to every
+document the graph should cover**.
+
+- The graph contains exactly what that account may read, and nothing else. The
+  Knowledge Base owner therefore decides the graph's coverage with the same
+  tool they use for every other reader: permissions in the source system.
+- The identity decides coverage, never visibility. Every question is still
+  answered as the asking user, with their own permissions.
+- A scan over an access-controlled data source with no identity, or with one
+  that may read none of its documents, ends in `SCAN_FAILED` with a message
+  naming `extractionUserId`, rather than producing an empty graph. An identity
+  that may read some documents produces a graph of those; the count of
+  documents it could not read is logged.
+- Data sources without access control ignore the identity.
+
+What to provision: a dedicated service account (not a person's), granted read
+on the sites or folders in scope, kept in a group whose membership is
+reviewed. Bedrock applies the same real-time permission check to it as to any
+user, so revoking its access removes those documents from the next scan.
+
+`extractionConfig` (entity classes, topics, versioning) applies as for any
+document source; see [Configuring Document Extraction](#configuring-document-extraction).
+Chunking settings are ignored: chunk boundaries are the Knowledge Base's.
+
+#### The access role (Knowledge Base in another account)
+
+Create one IAM role in the Knowledge Base's account. It follows the same rules
+as the Databricks credential-access role, so the
+[Databricks guide's role section](databricks-sources.md#3-create-the-credential-access-role)
+applies, with these differences: the two principals are different, the
+permissions are Bedrock read actions, and the role is optional.
+
+- **Name**: starts with `{prefix}-datasource-access-` at the root IAM path, where
+  `{prefix}` is the deployment's `{project}-{env}`. Registration refuses any
+  other name, because the platform's `sts:AssumeRole` grant is scoped to that
+  prefix and a differently named role would fail at first scan instead.
+- **Two platform principals assume it**, and the trust policy must name both:
+
+  | Principal | When | What it does |
+  |---|---|---|
+  | **Document KG-build task role** | At every scan and re-scan | Reads every document's chunks to build the graph |
+  | **Serve runtime role** | On every question | Reads as the asking user (`Retrieve` with `userContext`), and asks per document whether that user may read it |
+
+  Both are published in SSM; read them rather than assembling them:
+
+  ```bash
+  aws ssm get-parameter --name "/{project}/{env}/sources/doc-kg-build-role-arn" \
+    --query Parameter.Value --output text
+  aws ssm get-parameter --name "/{project}/{env}/serve/runtime-role-arn" \
+    --query Parameter.Value --output text
+  ```
+
+- **External ID**: the namespace's `datasourceExternalId` (`GET
+  /namespaces/{namespaceId}`, also shown on the Connect Source form). The
+  condition is what turns the trust policy into an authorization list: one
+  role can serve several namespaces by listing their External IDs, and a role
+  without the condition is assumable on behalf of any namespace in the
+  deployment, so removing it is never the fix for an `AccessDenied`.
+
+Trust policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "<doc-kg-build-role-arn>",
+          "<serve-runtime-role-arn>"
+        ]
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": { "sts:ExternalId": ["<datasourceExternalId>"] }
+      }
+    }
+  ]
+}
+```
+
+Permission policy, naming the Knowledge Bases this role chooses to expose:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadKnowledgeBase",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Retrieve",
+        "bedrock:GetDocumentContent",
+        "bedrock:ListKnowledgeBaseDocuments"
+      ],
+      "Resource": "arn:aws:bedrock:<region>:<kb-account>:knowledge-base/ABCDEFGHIJ"
+    }
+  ]
+}
+```
+
+A Knowledge Base **in the deployment's own account** needs no role: omit
+`crossAccountRoleArn` and the platform's own task and serve roles read it
+directly.
+
+#### Who decides what
+
+- **Which Knowledge Bases a namespace may read**: the Knowledge Base owner, in
+  their account, through the role's trust policy (which namespaces, by External
+  ID) and permission policy (which Knowledge Bases). One role per owning
+  account is enough for any number of Knowledge Bases.
+- **Which documents the graph covers**: the same owner, in the source system,
+  through what the extraction identity may read.
+- **That a namespace reads one**: whoever holds `manageSource` on the
+  namespace, by registering the source.
+- **What each user sees**: the Knowledge Base's own document-level access
+  control, applied on every retrieval with the asking user's identity. Facts
+  reached through the knowledge graph are filtered to the same documents, so a
+  graph traversal never surfaces text from a document the user could not
+  retrieve directly.
+
+What differs from file sources:
+
+- Nothing is preprocessed or staged, and no chunk embeddings are written to the
+  platform's own vector store (the Knowledge Base holds them). Chunk boundaries
+  are the Knowledge Base's.
+- Questions on the namespace are answered through the Knowledge Base with the
+  caller's identity, always; there is no setting to configure and none to turn
+  it off. A request whose caller cannot be resolved returns no documents.
+- A namespace holds **one** Knowledge Base source. Registering a second makes
+  the namespace's queries fail (`DataSourceUnavailableError`) until one is
+  deleted, rather than silently serving one and hiding the other.
+- An agent that runs `Retrieve` against the Knowledge Base itself can pivot
+  into the namespace's graph with `expand_chunks` (MCP) or
+  `POST .../graph/expand` (REST), passing the `_chunk_id` values it got back.
+  COA verifies each seed chunk against the Knowledge Base under the caller's
+  identity before expanding and confines the result to that caller's
+  documents; withheld items are counted, never named.
+- Ontology induction over such a source yields **classes and properties
+  only**. Individuals and topics are never emitted, and class descriptions are
+  built from the schema, not from sampled entities, because the lexical graph
+  holds every document's entities while the Knowledge Base authorizes per
+  user. The proposal records this in its warnings. A request that asks for
+  individuals or an instance-fed description mode fails rather than being
+  silently downgraded.
+- **RescanSource** re-extracts from the Knowledge Base; run it after a
+  Knowledge Base sync that changed documents.
+
 ### Document Processing Pipeline
 
 After creation, documents go through:

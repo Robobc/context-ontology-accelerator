@@ -99,6 +99,17 @@ V0_WARNINGS: list[str] = [
     "class embedding index is rebuilt per run — see parent spec Task 10A",
 ]
 
+# Fork (ADR 0011): recorded on every T-Box-only run so the steward reviewing the
+# proposal knows which shapes were withheld and why.
+TBOX_ONLY_WARNING = (
+    "graph sources are access-controlled Knowledge Base documents: T-Box only "
+    "(no individuals, no topics, schema-mode descriptions); see ADR 0011"
+)
+
+
+class AccessControlledGraphError(RuntimeError):
+    """The lexical graph belongs to a per-user document store and the run asked for entity-level output (fork)."""
+
 
 class UnstructuredInductionPipeline:
     """Sequences the unstructured induction services into a runnable job.
@@ -152,6 +163,20 @@ class UnstructuredInductionPipeline:
         emit = on_status if on_status is not None else _noop_status
 
         try:
+            # Fork (ADR 0011): on an access-controlled graph only schema-level
+            # output may leave this process. Entity-level shapes are refused up
+            # front, before any store or LLM work, rather than silently downgraded.
+            if config.tbox_only:
+                if config.include_individuals or config.description_mode != "schema":
+                    msg = (
+                        "unstructured induction over an access-controlled Knowledge Base graph emits "
+                        "T-Box terms only: include_individuals must be false and description_mode "
+                        f"must be 'schema' (got include_individuals={config.include_individuals}, "
+                        f"description_mode={config.description_mode!r}); see ADR 0011"
+                    )
+                    raise AccessControlledGraphError(msg)
+                warnings.append(TBOX_ONLY_WARNING)
+
             # ── Stage 1 — querying_neptune ──────────────────────────
             emit(InductionJobStatus.QUERYING_NEPTUNE)
             schema = config.lexical_store.get_graph_schema()
@@ -188,7 +213,9 @@ class UnstructuredInductionPipeline:
                 entity.entity_id for records in class_to_entities.values() for entity in records
             ]
             facts = config.lexical_store.get_facts_for_entities(sampled_entity_ids)
-            topics = config.lexical_store.get_topics()
+            # Topics are LLM summaries of chunk text; on an access-controlled
+            # graph they are not even read (Rule 5 is skipped below).
+            topics = [] if config.tbox_only else config.lexical_store.get_topics()
             log.info(
                 "sampled %d entities across %d classes; loaded %d facts, %d topics",
                 len(sampled_entity_ids),
@@ -284,13 +311,15 @@ class UnstructuredInductionPipeline:
             )
 
             # Rule 5 — skos:Concept declarations from __Topic__ nodes.
-            graph += induce_concepts(
-                topics=topics,
-                iri_resolver=config.iri_resolver,
-                namespace_name=config.name,
-                namespace_language=config.namespace_language,
-                class_iris=class_iris,
-            )
+            # Skipped entirely (no ConceptScheme either) on a T-Box-only run.
+            if not config.tbox_only:
+                graph += induce_concepts(
+                    topics=topics,
+                    iri_resolver=config.iri_resolver,
+                    namespace_name=config.name,
+                    namespace_language=config.namespace_language,
+                    class_iris=class_iris,
+                )
 
             # ── Foundational grounding (optional, additive) ─────────
             #

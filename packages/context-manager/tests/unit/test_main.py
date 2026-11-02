@@ -1166,6 +1166,27 @@ class TestNamespaceAdmissionGate:
 
     @patch("coa_serve.main._ensure_initialized")
     @patch("coa_serve.main.resolve_profile")
+    async def test_graph_expand_denied_returns_403_without_walking_the_graph(self, mock_resolve, mock_init):
+        """Fork (ADR 0012): the new isolated action sits behind the same admission gate."""
+        import coa_serve.main as main_mod
+        from coa_serve.role_resolver import ResolvedProfile
+
+        mock_init.return_value = None
+        mock_resolve.return_value = ResolvedProfile(user_id="attacker")
+        main_mod._orchestrator = self._orchestrator(denied=True)
+        expander = MagicMock()
+        expander.expand = AsyncMock()
+        with patch("coa_serve.main._chunk_expander", expander):
+            result = await _invoke_collect(
+                {"action": "graphExpand", "namespace": "victim", "options": {"chunkIds": ["Ukhx_hr"]}}
+            )
+
+        assert result["statusCode"] == 403
+        assert result["error"] == "AccessDeniedError"
+        expander.expand.assert_not_called()
+
+    @patch("coa_serve.main._ensure_initialized")
+    @patch("coa_serve.main.resolve_profile")
     async def test_streaming_denial_is_a_typed_error_event(self, mock_resolve, mock_init):
         # A streaming caller (the web Playground) only renders envelopes whose
         # `type` is one of step/token/done/error/rows, so the admission denial
@@ -1566,6 +1587,126 @@ class TestHandleGraphTraverseOptions:
         ]
         for probe in probes:
             assert bool(re.fullmatch(smithy_pattern, probe)) == graph_traverser.is_traversable_uri(probe), probe
+
+
+@pytest.mark.unit
+class TestHandleGraphExpandOptions:
+    """Fork (ADR 0012): GraphExpandChunks members are validated against the contract
+    (the MCP server calls this action directly), and the handler only ever hands
+    the expander validated values."""
+
+    _ID = "Ukhx_oqNvL1daHhnb6mECpjhUOdYSeMwVnj6HnadKZw"
+
+    @staticmethod
+    def _result():
+        from coa_serve.tier3.chunk_expander import ExpansionResult, LexicalEntity, LexicalFact
+
+        return ExpansionResult(
+            entities=[LexicalEntity("e1", "Project Atlas", "Project")],
+            facts=[LexicalFact("f1", "Project Atlas HAS BUDGET 1.2M", "e1", None, "Ukhx_fin", "s3://hub/fin.md")],
+            withheld_related_chunks=1,
+        )
+
+    async def _run(self, options, expander=None):
+        from coa_serve.main import _handle_graph_expand
+
+        if expander is None:
+            expander = MagicMock()
+            expander.expand = AsyncMock(return_value=self._result())
+        with patch("coa_serve.main._chunk_expander", expander):
+            result = await _handle_graph_expand({"namespace": "ns", "options": options}, "req")
+        return result, expander.expand
+
+    @pytest.mark.asyncio
+    async def test_defaults_apply_and_the_response_matches_the_contract(self):
+        from coa_serve.step_ids import StepId
+
+        result, expand = await self._run({"chunkIds": [self._ID]})
+        assert result["statusCode"] == 200
+        assert expand.call_args.args == ("ns", [self._ID])
+        assert expand.call_args.kwargs == {"scope": "SEED_DOCUMENTS", "max_facts": 100}
+        assert result["facts"][0]["chunkId"] == "Ukhx_fin" and "objectId" not in result["facts"][0]
+        assert result["entities"] == [{"id": "e1", "label": "Project Atlas", "class": "Project"}]
+        assert result["relatedChunks"] == []
+        assert result["withheld"] == {"seedChunks": 0, "facts": 0, "relatedChunks": 1}
+        assert result["trace"][0]["step"] == StepId.T3_GRAPH_EXPAND.value
+
+    @pytest.mark.asyncio
+    async def test_explicit_members_reach_the_expander(self):
+        _, expand = await self._run({"chunkIds": [self._ID, "b"], "scope": "ENTITLED_DOCUMENTS", "maxFacts": 500})
+        assert expand.call_args.kwargs == {"scope": "ENTITLED_DOCUMENTS", "max_facts": 500}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "options",
+        [
+            None,
+            {},
+            {"chunkIds": []},
+            {"chunkIds": "abc"},
+            {"chunkIds": ["ok", 7]},
+            {"chunkIds": [""]},
+            {"chunkIds": ["a" * 257]},
+            {"chunkIds": ["has space"]},
+            {"chunkIds": ["semi;colon"]},
+            {"chunkIds": ["x"] * 51},
+            {"chunkIds": ["x"], "scope": "EVERYTHING"},
+            {"chunkIds": ["x"], "scope": ["SEED_DOCUMENTS"]},
+            {"chunkIds": ["x"], "maxFacts": 0},
+            {"chunkIds": ["x"], "maxFacts": 501},
+            {"chunkIds": ["x"], "maxFacts": "10"},
+            {"chunkIds": ["x"], "maxFacts": True},
+            "not-an-object",
+        ],
+    )
+    async def test_out_of_contract_options_are_rejected_before_expansion(self, options):
+        result, expand = await self._run(options)
+        assert result["statusCode"] == 400
+        expand.assert_not_called()
+        # The rejected value is never echoed.
+        if isinstance(options, dict) and options.get("chunkIds") not in (None, [], "abc"):
+            for value in options["chunkIds"]:
+                if isinstance(value, str) and len(value) > 3:
+                    assert value not in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_expander_is_a_data_source_error_not_a_silent_empty_answer(self):
+        from coa_serve.exceptions import DataSourceUnavailableError
+        from coa_serve.main import _handle_graph_expand
+
+        with patch("coa_serve.main._chunk_expander", None), pytest.raises(DataSourceUnavailableError):
+            await _handle_graph_expand({"namespace": "ns", "options": {"chunkIds": [self._ID]}}, "req")
+
+    @pytest.mark.asyncio
+    async def test_expander_failure_is_wrapped_without_leaking_the_cause(self):
+        from coa_serve.exceptions import DataSourceUnavailableError
+
+        expander = MagicMock()
+        expander.expand = AsyncMock(side_effect=RuntimeError("neptune said: tenant 0f1e secret"))
+        with pytest.raises(DataSourceUnavailableError) as exc:
+            await self._run({"chunkIds": [self._ID]}, expander=expander)
+        assert "secret" not in str(exc.value)
+
+    def test_bounds_match_smithy_model(self):
+        from coa_serve import main
+
+        assert _smithy_member_range("GraphExpandChunks", "maxFacts") == (
+            main.GRAPH_EXPAND_MIN_FACTS,
+            main.GRAPH_EXPAND_MAX_FACTS,
+        )
+        assert main.GRAPH_EXPAND_MIN_FACTS <= main.GRAPH_EXPAND_DEFAULT_FACTS <= main.GRAPH_EXPAND_MAX_FACTS
+        text = _SERVE_SMITHY.read_text()
+        list_max = re.search(r"@length\(min: 1, max: (\d+)\)\nlist KnowledgeBaseChunkIdList", text)
+        shape = re.search(r'@length\(min: 1, max: (\d+)\)\n@pattern\("(.*)"\)\nstring KnowledgeBaseChunkId\b', text)
+        assert list_max and shape, "KnowledgeBaseChunkIdList / KnowledgeBaseChunkId not found in serve.smithy"
+        assert int(list_max.group(1)) == main.GRAPH_EXPAND_MAX_CHUNK_IDS
+        assert int(shape.group(1)) == main.GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH
+        assert shape.group(2) == main._GRAPH_EXPAND_CHUNK_ID.pattern
+        enum = re.search(r"enum ExpansionScope \{(.*?)\n\}", text, re.S)
+        assert enum, "ExpansionScope enum not found in serve.smithy"
+        from coa_serve.tier3.chunk_expander import SCOPES
+
+        assert set(re.findall(r'=\s*"([^"]+)"', enum.group(1))) == SCOPES
 
 
 @pytest.mark.unit

@@ -370,6 +370,57 @@ async def execute_graph_traversal(
     }
 
 
+# GraphExpandChunks bounds, per ``serve.smithy``. The Context Manager validates
+# again; these keep an out-of-contract call from leaving this process.
+EXPAND_CHUNKS_MAX_IDS = 50
+EXPAND_CHUNKS_SCOPES = ("SEED_DOCUMENTS", "ENTITLED_DOCUMENTS")
+EXPAND_CHUNKS_MAX_FACTS = 500
+
+
+async def execute_expand_chunks(
+    cm_client: ContextManagerClient,
+    chunk_ids: list[str],
+    namespace_id: str,
+    profile: dict,
+    bearer_token: str,
+    *,
+    scope: str = "SEED_DOCUMENTS",
+    max_facts: int = 100,
+) -> dict[str, Any]:
+    """Fork (ADR 0012): expand the lexical graph from Knowledge Base chunks the caller retrieved.
+
+    Response shape matches the Smithy ``GraphExpandChunks`` output:
+    ``{entities, facts, relatedChunks, withheld, trace}``.
+    """
+    if scope not in EXPAND_CHUNKS_SCOPES:
+        raise ValueError(f"Invalid scope '{scope}': must be one of {EXPAND_CHUNKS_SCOPES}")
+    if not isinstance(chunk_ids, list) or not 1 <= len(chunk_ids) <= EXPAND_CHUNKS_MAX_IDS:
+        raise ValueError(f"chunkIds must hold 1 to {EXPAND_CHUNKS_MAX_IDS} Knowledge Base chunk ids")
+
+    payload: dict[str, Any] = {
+        "action": "graphExpand",
+        "namespace": namespace_id,
+        "profile": _build_cm_profile(profile),
+        "options": {
+            "chunkIds": list(chunk_ids),
+            "scope": scope,
+            "maxFacts": min(max_facts, EXPAND_CHUNKS_MAX_FACTS),
+        },
+    }
+
+    response = await cm_client.invoke(payload, bearer_token)
+    _raise_for_cm_error(response)
+    unwrapped = _strip_envelope(response)
+
+    return {
+        "entities": unwrapped.get("entities", []),
+        "facts": unwrapped.get("facts", []),
+        "relatedChunks": unwrapped.get("relatedChunks", []),
+        "withheld": unwrapped.get("withheld", {"seedChunks": 0, "facts": 0, "relatedChunks": 0}),
+        "trace": unwrapped.get("trace", []),
+    }
+
+
 def _strip_envelope(response: dict) -> dict[str, Any]:
     """Return the inner CM result body, whether or not it was wrapped.
 

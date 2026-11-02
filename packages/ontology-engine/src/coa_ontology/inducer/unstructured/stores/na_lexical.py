@@ -30,6 +30,7 @@ from typing import Any
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
+from coa_common.kb_ids import KB_SOURCE_ID_CYPHER_PREDICATE
 
 from coa_ontology.inducer.unstructured.stores.protocol import (
     ClassRecord,
@@ -770,6 +771,16 @@ class NeptuneAnalyticsLexicalStore:
             for row in results
             if row.get("topic_id") is not None and row.get("value") is not None
         ]
+
+    def has_access_controlled_sources(self) -> bool:
+        """True when any ``__Source__`` node is a Bedrock KB document; fork, ADR 0011.
+
+        Predicate from ``coa_common.kb_ids`` (``aws:<tenant>:doc:<...>``), shared with kg-build.
+        """
+        results = self._oc_query(
+            f"MATCH (s:`__Source__`) WHERE {KB_SOURCE_ID_CYPHER_PREDICATE} RETURN count(s) > 0 AS acl",
+        )
+        return bool(results and results[0].get("acl"))
 
     def health_check(self) -> dict:
         """Cheap probe returning backend health status.

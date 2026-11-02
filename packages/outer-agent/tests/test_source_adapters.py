@@ -174,3 +174,107 @@ async def test_plugin_output_must_preserve_target_provenance():
 
     with pytest.raises(SourceExecutionError, match="mismatched evidence provenance"):
         await registry.execute(_directive("GOVERNED_QUERY", "analytics-query"), _identity())
+
+
+def _empty_stream_client() -> MagicMock:
+    client = MagicMock()
+    # A fresh one-shot stream per call, so a reused client can serve several calls.
+    client.agentic_retrieve_stream.side_effect = lambda **_: {"stream": iter([{"result": {"results": []}}])}
+    return client
+
+
+@pytest.mark.asyncio
+async def test_managed_kb_client_is_built_in_the_target_region(monkeypatch):
+    """A target in another Region gets its own client; targets naming none use the runtime Region."""
+    built: list[str] = []
+
+    def fake_boto3_client(service, *, region_name, config):
+        assert service == "bedrock-agent-runtime"
+        built.append(region_name)
+        return _empty_stream_client()
+
+    monkeypatch.setattr("coa_outer_agent.source_adapters.boto3.client", fake_boto3_client)
+    registry = SourceAdapterRegistry(
+        region="us-east-1",
+        targets={
+            "hub-eu": SourceTargetConfig("hub-eu", "MANAGED_KB", ("ABCDEFGHIJ",), region="eu-central-1"),
+            "hub-default": SourceTargetConfig("hub-default", "MANAGED_KB", ("ABCDEFGHIJ",)),
+        },
+    )
+
+    await registry.execute(_directive(target_id="hub-eu"), _identity())
+    await registry.execute(_directive(target_id="hub-default"), _identity())
+    await registry.execute(_directive(target_id="hub-eu"), _identity())
+
+    assert built == ["eu-central-1", "us-east-1"], "one client per Region, reused on the second call"
+
+
+@pytest.mark.asyncio
+async def test_managed_kb_data_source_scope_becomes_a_retrieval_filter():
+    client = _empty_stream_client()
+    registry = SourceAdapterRegistry(
+        region="us-east-1",
+        targets={
+            "hub": SourceTargetConfig(
+                "hub", "MANAGED_KB", ("ABCDEFGHIJ",), data_source_ids=("DSTEST0001", "DSTEST0002")
+            )
+        },
+        managed_kb_client=client,
+    )
+
+    await registry.execute(_directive(target_id="hub"), _identity())
+
+    kb = client.agentic_retrieve_stream.call_args.kwargs["retrievers"][0]["configuration"]["knowledgeBase"]
+    assert kb["retrievalOverrides"]["filter"] == {
+        "in": {"key": "_data_source_id", "value": ["DSTEST0001", "DSTEST0002"]}
+    }
+
+
+@pytest.mark.asyncio
+async def test_managed_kb_without_data_source_scope_sends_no_filter():
+    client = _empty_stream_client()
+    registry = SourceAdapterRegistry(
+        region="us-east-1",
+        targets={"hub": SourceTargetConfig("hub", "MANAGED_KB", ("ABCDEFGHIJ",))},
+        managed_kb_client=client,
+    )
+
+    await registry.execute(_directive(target_id="hub"), _identity())
+
+    kb = client.agentic_retrieve_stream.call_args.kwargs["retrievers"][0]["configuration"]["knowledgeBase"]
+    assert "retrievalOverrides" not in kb
+
+
+@pytest.mark.asyncio
+async def test_rejected_managed_kb_call_is_a_source_failure_naming_the_service_error():
+    """A ClientError at call time must surface as SourceExecutionError (502 with the service's message),
+    not escape as an anonymous internal error."""
+    from botocore.exceptions import ClientError
+
+    client = MagicMock()
+    client.agentic_retrieve_stream.side_effect = ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "retrievalOverrides.filter is not supported"}},
+        "AgenticRetrieveStream",
+    )
+    registry = SourceAdapterRegistry(
+        region="us-east-1",
+        targets={"hub": SourceTargetConfig("hub", "MANAGED_KB", ("ABCDEFGHIJ",))},
+        managed_kb_client=client,
+    )
+    with pytest.raises(SourceExecutionError, match="target hub: ValidationException: retrievalOverrides"):
+        await registry.execute(_directive(target_id="hub"), _identity())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reranking", ["MANAGED", "NONE"])
+async def test_managed_kb_reranking_is_taken_from_the_target(reranking):
+    client = _empty_stream_client()
+    registry = SourceAdapterRegistry(
+        region="us-east-1",
+        targets={"hub": SourceTargetConfig("hub", "MANAGED_KB", ("ABCDEFGHIJ",), reranking=reranking)},
+        managed_kb_client=client,
+    )
+    await registry.execute(_directive(target_id="hub"), _identity())
+    config = client.agentic_retrieve_stream.call_args.kwargs["agenticRetrieveConfiguration"]
+    assert config["rerankingModelType"] == reranking
+    assert config["foundationModelType"] == "MANAGED"

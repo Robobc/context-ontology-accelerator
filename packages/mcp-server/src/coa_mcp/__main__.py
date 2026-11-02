@@ -32,6 +32,7 @@ if __name__ == "__main__":
             "translate_sql",
             "rag_retrieval",
             "graph_traversal",
+            "expand_chunks",
         ],
     )
 

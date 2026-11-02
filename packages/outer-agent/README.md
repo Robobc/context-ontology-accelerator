@@ -12,8 +12,9 @@ The public request accepts only `query` and `namespace`. AgentCore validates the
 2. Strictly validate plan version, status, ontology version, directives, and read-only invariant.
 3. Resolve directive target IDs against `SOURCE_TARGETS_JSON` supplied by the deployment.
 4. Execute all required source directives or stop.
-5. Bound and label evidence.
-6. Call Portkey once. The response is accepted only when every claim cites evidence IDs present in the authorized context.
+5. Pivot into COA's graph (ADR 0012): hand the `_chunk_id` of every `MANAGED_KB` hit to COA MCP `expand_chunks` with the same JWT; the facts COA returns (only from documents the user may read, verified again by COA) join the evidence as `COA_GRAPH` items. If COA cannot expand, the trace records `coa.expand_chunks: unavailable` and the answer is generated from the source evidence alone.
+6. Bound and label evidence.
+7. Call Portkey once. The response is accepted only when every claim cites evidence IDs present in the authorized context.
 
 ## Source adapters
 
@@ -35,12 +36,22 @@ Deployments register source-owned implementations by target kind through the pub
     "knowledgeBaseIds": ["ABCDEFGHIJ"],
     "maxAgentIterations": 5
   },
+  "knowledge-hub": {
+    "kind": "MANAGED_KB",
+    "knowledgeBaseIds": ["KBTEST0001"],
+    "region": "eu-central-1",
+    "dataSourceIds": ["DSTEST0001"]
+  },
   "domain-query": { "kind": "GOVERNED_QUERY" },
   "domain-graph": { "kind": "EXTERNAL_GRAPH" }
 }
 ```
 
+A `MANAGED_KB` target may name the `region` its Knowledge Bases live in (default: the runtime's Region; the agent builds one Bedrock client per Region and the CDK stack grants `bedrock:Retrieve` on that Region's KB ARNs), `dataSourceIds` (0-10) that limit retrieval to those data sources through a `_data_source_id` filter, the same scope a COA-registered `BEDROCK_MANAGED_KB` source carries, and `reranking` (`MANAGED`, the default, or `NONE`; Bedrock rejects managed reranking for Knowledge Bases on a custom embedding model, such as managed-search KBs, so those need `NONE`). All three are refused on any other kind.
+
 The namespace profile names only these logical IDs. Unknown fields, endpoints, credentials, malformed IDs, kind mismatches, and unavailable adapter kinds fail closed.
+
+`COA_GRAPH_EXPANSION_SCOPE` controls step 5: `SEED_DOCUMENTS` (default) keeps the graph context inside the documents the Knowledge Base returned; `ENTITLED_DOCUMENTS` lets COA follow shared entities into every document the Knowledge Base shows the caller (one entitlement probe per document reached); `OFF` disables the step. `COA_GRAPH_EXPANSION_MAX_FACTS` (default 100, max 500) bounds the facts asked for.
 
 ## Validation
 

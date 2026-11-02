@@ -27,3 +27,35 @@ def test_mcp_client_requires_bearer_authentication():
 def test_mcp_client_keeps_validated_bearer_token():
     client = McpJsonClient("https://example.com", "validated-token")
     assert client._token == "validated-token"
+
+
+# What the deployed COA MCP server (FastMCP) puts in ``structuredContent`` for a
+# tool that returns its JSON as text, recorded on 2026-11-01: the payload is one
+# level down, as a string. Searching this dict for ``plan`` finds nothing and
+# the agent reported ``SemanticPlanUnresolved`` against a RESOLVED plan.
+_FASTMCP_ENVELOPE = {"result": '{"plan": {"planVersion": "1.0", "status": "RESOLVED"}, "trace": []}'}
+
+
+def test_structured_content_result_envelope_is_unwrapped_to_the_tool_json():
+    assert McpJsonClient._unwrap_structured(_FASTMCP_ENVELOPE) == {
+        "plan": {"planVersion": "1.0", "status": "RESOLVED"},
+        "trace": [],
+    }
+
+
+def test_structured_content_plain_text_result_is_returned_as_text():
+    assert McpJsonClient._unwrap_structured({"result": "not json"}) == "not json"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"plan": {"status": "RESOLVED"}},  # a real structured object
+        {"result": {"plan": {}}},  # result already structured
+        {"result": "x", "other": 1},  # not the single-key envelope
+        [1, 2],
+        "text",
+    ],
+)
+def test_structured_content_without_the_envelope_is_untouched(value):
+    assert McpJsonClient._unwrap_structured(value) is value

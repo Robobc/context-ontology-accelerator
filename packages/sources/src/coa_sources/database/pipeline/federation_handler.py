@@ -87,7 +87,9 @@ _HANDLED_SUB_TYPES = (
 # DOCUMENTS sub-types never reach this pipeline, so a row carrying one is a
 # mis-stored record. The right treatment there is the long-standing no-op, not a
 # scan failure — this handler is not the place to police that.
-_DOCUMENT_SUB_TYPES = frozenset({SourceSubType.S3.value, SourceSubType.LOCAL_UPLOAD.value})
+_DOCUMENT_SUB_TYPES = frozenset(
+    {SourceSubType.S3.value, SourceSubType.LOCAL_UPLOAD.value, SourceSubType.BEDROCK_MANAGED_KB.value}
+)
 # What is left is a DATABASE sub-type the enum recognises and this handler has no
 # branch for. Empty today, and that is the point: it becomes non-empty only when a
 # new DATABASE sub-type ships without its branch here, which the catch-all in

@@ -170,6 +170,10 @@ def main() -> None:
     # _existing_embedding_indexes), and namespace teardown legitimately drops
     # these while this task may still be running.
     existing_indexes = _existing_embedding_indexes(EMBEDDING_INDEXES, TENANT_ID)
+    # Fork: a source built with VECTOR_STORE_MODE=DUMMY wrote no embeddings, so
+    # there is nothing to delete in AOSS whatever indexes other sources created.
+    if os.environ.get("VECTOR_STORE_MODE", "AOSS").strip().upper() == "DUMMY":
+        existing_indexes = []
     if existing_indexes:
         vector_index_names = existing_indexes
     else:

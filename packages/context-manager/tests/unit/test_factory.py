@@ -58,19 +58,28 @@ class TestFactory:
         mock_build.assert_called_once()
         assert result is mock_build.return_value
 
-    def test_build_document_retriever_routes_only_selected_namespace(self):
+    def test_build_document_retriever_reads_the_request_binding(self):
+        """Fork: no deployment map; the KB a namespace reads from is bound per request from its sources."""
         from coa_serve.clients.factory import build_document_retriever
+        from coa_serve.request_document_source import (
+            BoundDocumentSource,
+            bind_request_document_source,
+            reset_request_document_source,
+        )
+        from coa_serve.tier3.document_retriever import RegistryDocumentRetriever
 
-        config = MagicMock()
-        config.document_retriever_backend = "opensearch"
-        config.bedrock_kb_id = ""
-        config.bedrock_kb_by_namespace = (("managed-docs", "ABCDEFGHIJ"),)
-        config.bedrock_region = "us-east-1"
+        retriever = build_document_retriever(AsyncMock(spec=VectorClient))
+        assert isinstance(retriever, RegistryDocumentRetriever)
+        assert retriever.backend_name("managed-docs") == "opensearch"
 
-        retriever = build_document_retriever(config, AsyncMock(spec=VectorClient))
-
-        assert retriever.backend_name("managed-docs") == "bedrock-kb"
-        assert retriever.backend_name("default-search") == "opensearch"
+        kb = MagicMock()
+        kb.backend_name.return_value = "bedrock-kb"
+        token = bind_request_document_source(BoundDocumentSource(namespace="managed-docs", retriever=kb))
+        try:
+            assert retriever.backend_name("managed-docs") == "bedrock-kb"
+            assert retriever.backend_name("default-search") == "opensearch"
+        finally:
+            reset_request_document_source(token)
 
     @patch.dict("os.environ", {"PORTKEY_API_KEY": "test-key"})
     def test_build_llm_client_composes_portkey_with_bedrock_embeddings(self):

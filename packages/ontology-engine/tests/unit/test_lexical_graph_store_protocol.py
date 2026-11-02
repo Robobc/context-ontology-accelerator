@@ -54,6 +54,9 @@ class _CompleteMock:
     def get_graph_schema(self) -> ClassSchemaResult:
         return ClassSchemaResult(classes=[], relations=[])
 
+    def has_access_controlled_sources(self) -> bool:
+        return False
+
     def health_check(self) -> dict:
         return {"status": "healthy", "backend": "mock"}
 

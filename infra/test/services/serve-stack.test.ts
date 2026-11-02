@@ -9,6 +9,7 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { ServeStack } from "../../lib/stacks/services/serve-stack";
+import { assumeDatasourceAccessRoleStatement } from "../../lib/utils/datasource-assume";
 import {
   DEFAULT_BEDROCK_LLM_MODEL_ID,
   DEFAULT_RESOURCE_PREFIX,
@@ -32,9 +33,6 @@ const BASE_CONTEXT = {
 function createStack(
   contextOverrides: Record<string, unknown> = {},
   integrationProps: {
-    documentRetrieverBackend?: "opensearch" | "bedrock-kb";
-    bedrockKnowledgeBaseId?: string;
-    bedrockKnowledgeBaseByNamespace?: Record<string, string>;
     generationBackend?: "bedrock" | "portkey";
     portkeyBaseUrl?: string;
     portkeyModelId?: string;
@@ -76,37 +74,84 @@ function createStack(
   return Template.fromStack(stack);
 }
 
-describe("ServeStack - managed Knowledge Base retrieval", () => {
-  it("configures namespace routing and least-privilege Retrieve access", () => {
-    const template = createStack(
-      {},
-      {
-        documentRetrieverBackend: "opensearch",
-        bedrockKnowledgeBaseByNamespace: {
-          "managed-docs": "ABCDEFGHIJ",
-        },
-      },
-    );
+// Fork (ADR 0011): a namespace's Bedrock Managed Knowledge Base is a registered
+// BEDROCK_MANAGED_KB source, routed from the source registry per request. The
+// serve runtime therefore carries no KB map; it carries the means to reach
+// whatever KB a namespace registered: the same cross-account assume grant as
+// the sources stack's four consumers, the in-account read grant, and the
+// RESOURCE_PREFIX the ExternalId derives from.
+describe("ServeStack - Bedrock Managed Knowledge Base sources", () => {
+  const runtimeEnv = (template: Template): Record<string, unknown> => {
+    const [runtime] = Object.values(
+      template.findResources("AWS::BedrockAgentCore::Runtime"),
+    ) as any[];
+    return runtime.Properties.EnvironmentVariables;
+  };
 
-    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
-      EnvironmentVariables: Match.objectLike({
-        DOCUMENT_RETRIEVER_BACKEND: "opensearch",
-        BEDROCK_KB_BY_NAMESPACE: '{"managed-docs":"ABCDEFGHIJ"}',
-      }),
+  it("carries no deployment-level Knowledge Base routing", () => {
+    const env = runtimeEnv(createStack());
+    for (const stale of [
+      "DOCUMENT_RETRIEVER_BACKEND",
+      "BEDROCK_KNOWLEDGE_BASE_ID",
+      "BEDROCK_KB_BY_NAMESPACE",
+      "BEDROCK_KB_SEARCH_MODE",
+      "BEDROCK_KB_ENFORCE_USER_CONTEXT",
+    ]) {
+      expect(env).not.toHaveProperty(stale);
+    }
+  });
+
+  it("hands the runtime the {prefix}-{env}- RESOURCE_PREFIX the ExternalId derives from", () => {
+    // Same value the sources stack gives the kg-build task: registration (the
+    // ExternalId the control plane shows the customer) and query must agree.
+    expect(runtimeEnv(createStack())).toMatchObject({
+      RESOURCE_PREFIX: "coa-dev-",
     });
-    template.hasResourceProperties("AWS::IAM::Policy", {
+  });
+
+  it("holds the shared datasource-access assume grant, byte-equal to the sources stack's", () => {
+    // The fifth consumer of the one grant shape (see sources-stack.test.ts,
+    // "all four consumers"): reserved-name-bounded, no account restriction, and
+    // an assume presenting no ExternalId is denied.
+    template_hasAssumeGrant(createStack());
+  });
+
+  it("reads a Knowledge Base in this account, in any Region, under its own role", () => {
+    createStack().hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
+            Sid: "RetrieveBedrockKnowledgeBase",
             Effect: "Allow",
             Action: "bedrock:Retrieve",
-            Resource:
-              "arn:aws:bedrock:us-east-1:123456789012:knowledge-base/ABCDEFGHIJ",
+            Resource: "arn:aws:bedrock:*:123456789012:knowledge-base/*",
           }),
         ]),
       },
     });
   });
+
+  it("the shared helper refuses a prefix that is not the reserved segment", () => {
+    expect(() =>
+      assumeDatasourceAccessRoleStatement("coa-dev-", "Sid"),
+    ).toThrow(/datasource-access-/);
+  });
+
+  function template_hasAssumeGrant(template: Template): void {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          {
+            Sid: "AssumeRoleKbRetrieval",
+            Effect: "Allow",
+            Action: "sts:AssumeRole",
+            Resource: "arn:aws:iam::*:role/coa-dev-datasource-access-*",
+            Condition: { Null: { "sts:ExternalId": "false" } },
+          },
+        ]),
+      },
+    });
+  }
 });
 
 describe("ServeStack - Portkey generation", () => {

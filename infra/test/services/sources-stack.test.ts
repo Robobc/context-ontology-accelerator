@@ -921,14 +921,16 @@ describe("SourcesStack", () => {
         });
     };
 
-    it("grants assume on customer datasource-access roles in all three consumers", () => {
-      // The discovery Lambda, the enrichment task, and the sources API each get
-      // their own grant. The sources API's is the newest: it validates the
-      // customer's credential-access role at source-create, so a broken trust
-      // policy is reported at submit rather than at first scan. The Databricks
-      // connector holds the same shape from its own CDK app, which this template
-      // does not contain (it is deployed separately, on purpose).
-      expect(assumeStatements().length).toBe(3);
+    it("grants assume on customer datasource-access roles in all four consumers", () => {
+      // The discovery Lambda, the enrichment task, the sources API and (fork) the
+      // doc KG-build task each get their own grant. The sources API's validates
+      // the customer's credential-access role at source-create, so a broken trust
+      // policy is reported at submit rather than at first scan. The KG-build task
+      // assumes a BEDROCK_MANAGED_KB source's cross-account role for extraction;
+      // the serve runtime holds the same shape for per-user retrieval from its own
+      // stack (serve-stack.test.ts), as does the Databricks connector from its own
+      // CDK app. Neither is in this template (deployed separately, on purpose).
+      expect(assumeStatements().length).toBe(4);
     });
 
     it("requires an ExternalId on every datasource assume grant", () => {
@@ -941,14 +943,15 @@ describe("SourcesStack", () => {
       }
     });
 
-    // All three are produced by one helper precisely so they cannot drift; this is
+    // All four are produced by one helper precisely so they cannot drift; this is
     // what asserts the helper did not quietly stop being one shape. Account
     // wildcard included: the customer's credential-access role may live in any
     // account, this deployment's own included, so the reserved NAME prefix plus
     // the target's trust policy is the whole bound.
-    it("gives all three the identical account-agnostic reserved-prefix scope", () => {
+    it("gives all four the identical account-agnostic reserved-prefix scope", () => {
       const resources = assumeStatements().map((st) => st.Resource);
       expect(resources).toEqual([
+        "arn:aws:iam::*:role/coa-dev-datasource-access-*",
         "arn:aws:iam::*:role/coa-dev-datasource-access-*",
         "arn:aws:iam::*:role/coa-dev-datasource-access-*",
         "arn:aws:iam::*:role/coa-dev-datasource-access-*",
@@ -969,6 +972,7 @@ describe("SourcesStack", () => {
         "AssumeRoleCoaManaged",
         "AssumeRoleCustomerProvided",
         "AssumeRoleDatasourceAccessValidation",
+        "AssumeRoleKbExtraction",
       ]);
     });
 
@@ -1782,6 +1786,10 @@ describe("SourcesStack", () => {
     // connector stack deployed from a separate CDK app, where they become IAM grants, so
     // there the shared name fails OPEN. A future change env-scoping the rest of the
     // platform's parameters starts by moving the three names below.
+    //
+    // Fork: `doc-kg-build-role-arn` is env-scoped for the same reason as
+    // `db-connector-role-arn` — a Knowledge Base owner pastes it into a trust policy
+    // in their own account (ADR 0011).
     it("keeps the remaining role parameters on one env-less convention", () => {
       const names = Object.values(template.findResources("AWS::SSM::Parameter"))
         .map((p) => String(p.Properties?.Name ?? ""))
@@ -1789,14 +1797,40 @@ describe("SourcesStack", () => {
         .sort();
       expect(names).toEqual([
         "/coa/dev/sources/db-connector-role-arn",
+        "/coa/dev/sources/doc-kg-build-role-arn",
         "/coa/sources/api-role-arn",
         "/coa/sources/db-enrichment-role-arn",
         "/coa/sources/federation-provisioner-role-arn",
       ]);
       for (const name of names) {
         if (name.endsWith("/db-connector-role-arn")) continue;
+        if (name.endsWith("/doc-kg-build-role-arn")) continue;
         expect(name).not.toContain("/dev/");
       }
+    });
+
+    // Fork (ADR 0011): the value is the task role itself (GetAtt), never an ARN
+    // assembled from the prefix — the account and partition come from the deployment.
+    it("publishes the document KG-build task role for Knowledge Base owners' trust policies", () => {
+      const param = Object.values(
+        template.findResources("AWS::SSM::Parameter"),
+      ).find(
+        (p) => p.Properties?.Name === "/coa/dev/sources/doc-kg-build-role-arn",
+      );
+      expect(param).toBeDefined();
+      const roleId = param!.Properties.Value["Fn::GetAtt"][0] as string;
+      expect(param!.Properties.Value["Fn::GetAtt"][1]).toBe("Arn");
+      // The role that holds the KB extraction assume grant is the one published.
+      const policies = Object.values(
+        template.findResources("AWS::IAM::Policy"),
+      );
+      const kbExtraction = policies.find((p) =>
+        JSON.stringify(p.Properties.PolicyDocument).includes(
+          '"AssumeRoleKbExtraction"',
+        ),
+      );
+      expect(kbExtraction).toBeDefined();
+      expect(kbExtraction!.Properties.Roles[0].Ref).toBe(roleId);
     });
   });
 
@@ -2049,7 +2083,9 @@ describe("SourcesStack", () => {
     // built when it triggered the job; they never re-read the namespace.
     const flatDefinitions = (): string =>
       JSON.stringify(
-        Object.values(template.findResources("AWS::StepFunctions::StateMachine")),
+        Object.values(
+          template.findResources("AWS::StepFunctions::StateMachine"),
+        ),
       ).replace(/\\+"/g, '"');
 
     it("passes NAMESPACE_LANGUAGE from $.namespaceLanguage to the enrichment task", () => {
@@ -2192,6 +2228,35 @@ describe("SourcesStack", () => {
       // 30 min → task 1800 s, state-machine ceiling 32 min → 1920 s.
       expect(definition).toContain('"TimeoutSeconds":1800');
       expect(definition).toContain('"TimeoutSeconds":1920');
+    });
+
+    // Fork: the extraction LLM's max_tokens cap. graph_build ships 16384, which
+    // the Amazon Nova family rejects (10000 ceiling), so a Nova deployment needs
+    // the knob; a deployment that never sets it must be byte-identical.
+    const kgBuildEnv = (t: Template): Record<string, string> => {
+      const defs = Object.values(t.findResources("AWS::ECS::TaskDefinition"));
+      // BUILD_BATCH_WRITE_SIZE is set on the KG-build container only.
+      const kg = defs.find((d) =>
+        JSON.stringify(d.Properties.ContainerDefinitions[0]).includes(
+          "BUILD_BATCH_WRITE_SIZE",
+        ),
+      )!;
+      return Object.fromEntries(
+        kg.Properties.ContainerDefinitions[0].Environment.map(
+          (v: { Name: string; Value: unknown }) => [v.Name, v.Value],
+        ),
+      );
+    };
+
+    it("passes kg_build_extraction_max_tokens to the KG-build task when set", () => {
+      const env = kgBuildEnv(
+        synthWithContext({ kg_build_extraction_max_tokens: 8192 }),
+      );
+      expect(env.EXTRACTION_MAX_TOKENS).toBe("8192");
+    });
+
+    it("emits no EXTRACTION_MAX_TOKENS when the knob is unset", () => {
+      expect(kgBuildEnv(template)).not.toHaveProperty("EXTRACTION_MAX_TOKENS");
     });
 
     it("rejects a non-positive / non-numeric dbScanEnrichmentTimeoutMinutes at synth", () => {
@@ -2757,6 +2822,120 @@ describe("SourcesStack", () => {
       const definitions = JSON.stringify(stateMachines);
       expect(definitions).toContain("RESCAN_REVIEW_NEEDED");
       expect(definitions).toContain("$.discoveryResult.Payload.reviewNeeded");
+    });
+  });
+
+  describe("Fork: BEDROCK_MANAGED_KB ingestion (ADR 0011)", () => {
+    const ingestionDefinition = (): any => {
+      const machines = template.findResources(
+        "AWS::StepFunctions::StateMachine",
+        {
+          Properties: {
+            StateMachineName: Match.stringLikeRegexp(
+              "sources-doc-ingestion-pipeline$",
+            ),
+          },
+        },
+      );
+      const [machine] = Object.values(machines) as any[];
+      expect(machine).toBeDefined();
+      // DefinitionString is an Fn::Join over literal fragments and refs; the
+      // literal fragments carry every state name, path and env binding.
+      return {
+        states: JSON.parse(reassemble(machine.Properties.DefinitionString))
+          .States,
+      };
+    };
+    // Join the Fn::Join fragments with a placeholder for each ref so the
+    // definition parses as JSON. Refs always sit inside a quoted string value
+    // (an ARN, a table name), so the placeholder is bare.
+    const reassemble = (def: any): string => {
+      if (typeof def === "string") return def;
+      const parts = def["Fn::Join"][1] as unknown[];
+      return parts.map((p) => (typeof p === "string" ? p : "REF")).join("");
+    };
+
+    it("routes BEDROCK_KB jobs around preprocessing and every other job through it", () => {
+      const { states } = ingestionDefinition();
+      const route = states["SourcesInputMode?"];
+      expect(route.Type).toBe("Choice");
+      expect(route.Default).toBe("SourcesPreProcessing");
+      expect(route.Choices).toEqual([
+        {
+          And: [
+            { Variable: "$.input_mode", IsPresent: true },
+            { Variable: "$.input_mode", StringEquals: "BEDROCK_KB" },
+          ],
+          Next: "SourcesBedrockKbSkipPreprocess",
+        },
+      ]);
+      // The bypass supplies the one preprocess field the build task still binds.
+      const skip = states["SourcesBedrockKbSkipPreprocess"];
+      expect(skip.Type).toBe("Pass");
+      expect(skip.ResultPath).toBe("$.preprocessResult");
+      expect(skip.Parameters["staging_prefix.$"]).toContain("States.Format");
+      expect(skip.Next).toBe("SourcesKGBuild");
+      // Status bookkeeping still brackets the build on both branches.
+      expect(states["DocUpdateStatusIngesting"].Next).toBe("SourcesInputMode?");
+      expect(states["SourcesKGBuild"].Next).toBe("DocUpdateStatusCompleted");
+    });
+
+    it("binds the KB-mode env from the flattened job input the trigger always emits", () => {
+      const { states } = ingestionDefinition();
+      const env: Array<{ Name: string; "Value.$"?: string; Value?: string }> =
+        states["SourcesKGBuild"].Parameters.Overrides.ContainerOverrides[0]
+          .Environment;
+      const bound = Object.fromEntries(
+        env.map((e) => [e.Name, e["Value.$"] ?? e.Value]),
+      );
+      expect(bound).toEqual(
+        expect.objectContaining({
+          INPUT_MODE: "$.input_mode",
+          VECTOR_STORE_MODE: "$.vector_store_mode",
+          BEDROCK_KB_ID: "$.bedrock_kb_id",
+          BEDROCK_KB_DATA_SOURCE_IDS: "$.bedrock_kb_data_source_ids",
+          BEDROCK_KB_REGION: "$.bedrock_kb_region",
+          BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN:
+            "$.bedrock_kb_cross_account_role_arn",
+          BEDROCK_KB_EXTRACTION_USER_ID: "$.bedrock_kb_extraction_user_id",
+          // Unchanged: the staging path's prefix binding is shared.
+          STAGING_PREFIX: "$.preprocessResult.staging_prefix",
+        }),
+      );
+    });
+
+    it("gives the KG-build container the prefix the ExternalId is derived from", () => {
+      template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+        Family: Match.stringLikeRegexp("sources-doc-kg-build$"),
+        ContainerDefinitions: Match.arrayWith([
+          Match.objectLike({
+            Environment: Match.arrayWith([
+              { Name: "RESOURCE_PREFIX", Value: "coa-dev-" },
+            ]),
+          }),
+        ]),
+      });
+    });
+
+    it("scopes the in-account KB read to this account's knowledge bases in any Region", () => {
+      // The account is the boundary; the Region is not, because the source's
+      // `region` member lets a same-account KB live elsewhere (the first deployed
+      // run read a eu-central-1 KB from a us-east-1 deployment).
+      template.hasResourceProperties("AWS::IAM::Policy", {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Sid: "ReadBedrockKnowledgeBaseChunks",
+              Action: [
+                "bedrock:Retrieve",
+                "bedrock:GetDocumentContent",
+                "bedrock:ListKnowledgeBaseDocuments",
+              ],
+              Resource: `arn:aws:bedrock:*:${TEST_ENV.account}:knowledge-base/*`,
+            }),
+          ]),
+        },
+      });
     });
   });
 

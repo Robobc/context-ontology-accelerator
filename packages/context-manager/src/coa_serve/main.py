@@ -44,6 +44,12 @@ from .identity import display_principal, extract_jwt_identity, resolve_principal
 from .models import InvokeRequest, TraceStep
 from .namespace_language import bind_label_preference
 from .orchestrator import Orchestrator
+from .request_document_source import (
+    BoundDocumentSource,
+    bind_request_document_source,
+    reset_request_document_source,
+)
+from .request_identity import reset_request_user, set_request_user
 from .role_resolver import ResolvedProfile, may_view_debug_info, resolve_profile
 from .session import SessionManager
 from .session_actions import (
@@ -76,6 +82,8 @@ from .tier3.synthesizer import Synthesizer
 if TYPE_CHECKING:
     from .clients.sources_registry import SourcesRegistry
     from .deadline import Deadline
+    from .tier3.bedrock_kb_retriever import KbRetrieverCache
+    from .tier3.chunk_expander import ChunkExpander
 
 from .trace import TraceCollector
 
@@ -90,6 +98,11 @@ _orchestrator: Orchestrator | None = None
 _session_manager: SessionManager | None = None
 _session_metadata: SessionMetadataStore | None = None
 _sources_registry: SourcesRegistry | None = None
+# Fork: per-user retrievers for registered BEDROCK_MANAGED_KB sources, one per
+# (namespace, KB, region, role); the admission gate binds one to each request.
+_kb_retrievers: KbRetrieverCache | None = None
+# Fork (ADR 0012): agent-driven lexical-graph expansion from Knowledge Base chunk ids.
+_chunk_expander: ChunkExpander | None = None
 _nl_to_sparql: NLtoSPARQL | None = None
 _nl_to_sql_strategy: NLtoSQLStrategy | None = None
 _init_lock = asyncio.Lock()
@@ -132,7 +145,7 @@ _NAMESPACE_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 async def _ensure_initialized():
     """Initialize config and orchestrator on first request."""
     global _config, _guardrail_provider, _orchestrator, _session_manager
-    global _session_metadata, _sources_registry, _nl_to_sparql, _nl_to_sql_strategy
+    global _session_metadata, _sources_registry, _kb_retrievers, _chunk_expander, _nl_to_sparql, _nl_to_sql_strategy
     if _orchestrator is not None:
         return
     async with _init_lock:
@@ -185,10 +198,14 @@ async def _ensure_initialized():
             table_name=config.data_sources_table,
             namespaces_table=os.environ.get("NAMESPACES_TABLE", ""),
             region=config.bedrock_region,
-            external_document_namespaces=(namespace for namespace, _ in config.bedrock_kb_by_namespace),
-            external_document_default=(config.document_retriever_backend == "bedrock-kb"),
         )
         _sources_registry = sources_registry
+        # Fork: a namespace's documents may live in the Bedrock Managed Knowledge
+        # Base it registered as a source; the retriever for it is built on first
+        # use (assuming the source's cross-account role when it has one).
+        from .tier3.bedrock_kb_retriever import KbRetrieverCache
+
+        _kb_retrievers = KbRetrieverCache(default_region=config.bedrock_region)
         athena_executor = AthenaQueryExecutor(region=config.bedrock_region, sources_registry=sources_registry)
 
         # single-vs-cross-source dispatcher (Serve LLD §2.2.1 Option D).
@@ -276,7 +293,7 @@ async def _ensure_initialized():
         )
         from .clients.factory import build_document_retriever
 
-        document_retriever = build_document_retriever(config, opensearch_client)
+        document_retriever = build_document_retriever(opensearch_client)
         graph_traverser = GraphTraverser(graph_client=neptune_client)
 
         # Query-time chunk screening: evaluate retrieved content against retrieval
@@ -311,9 +328,23 @@ async def _ensure_initialized():
         )
 
         # Lexical baseline retriever — only when TIER3_STRATEGY="lexical-baseline"
-        from .clients.factory import build_lexical_retriever
+        # Fork: one document entitlement gate shared by every reader of the lexical
+        # graph (baseline retriever, agentic strategy/graph/chunk tools); None unless
+        # a namespace's documents live in a per-user Bedrock KB.
+        from .clients.factory import _graph_store_uri, build_lexical_retriever
+        from .tier3.document_entitlement import build_document_entitlement_gate
 
-        lexical_retriever = build_lexical_retriever(config)
+        entitlement_gate = build_document_entitlement_gate(
+            _graph_store_uri(config.neptune_endpoint) if config.neptune_endpoint else "", document_retriever
+        )
+        lexical_retriever = build_lexical_retriever(config, entitlement_gate=entitlement_gate)
+        # Fork (ADR 0012): the agent-driven chunk expansion shares the gate's store
+        # and entitlement cache; without a gate no per-user KB can be served, so
+        # the action reports itself unconfigured rather than walking ungated.
+        if entitlement_gate is not None:
+            from .tier3.chunk_expander import ChunkExpander
+
+            _chunk_expander = ChunkExpander(entitlement_gate)
 
         knowledge_retriever = KnowledgeRetriever(
             vector_retriever=document_retriever,
@@ -408,6 +439,7 @@ async def _ensure_initialized():
                 step_planner,
                 structured_query_tier=structured_query_tier,
                 guardrail_id_provider=guardrail_provider.guardrail_id,
+                entitlement_gate=entitlement_gate,  # fork: per-user KB document entitlement
             )
         except Exception as exc:
             logger.warning("agentic_retriever_unavailable", error=type(exc).__name__, error_msg=str(exc)[:200])
@@ -1038,6 +1070,106 @@ async def _handle_graph_traverse(payload: dict, request_id: str) -> dict:
     }
 
 
+# GraphExpandChunks bounds and defaults, per ``serve.smithy``. Enforced here as
+# well as at the REST edge because the MCP server invokes this action directly.
+GRAPH_EXPAND_MAX_CHUNK_IDS = 50  # KnowledgeBaseChunkIdList @length(min: 1, max: 50)
+GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH = 256  # KnowledgeBaseChunkId @length(min: 1, max: 256)
+_GRAPH_EXPAND_CHUNK_ID = re.compile(r"^[A-Za-z0-9._-]+$")  # KnowledgeBaseChunkId @pattern
+GRAPH_EXPAND_MIN_FACTS = 1
+GRAPH_EXPAND_MAX_FACTS = 500  # maxFacts @range(min: 1, max: 500)
+GRAPH_EXPAND_DEFAULT_FACTS = 100
+
+
+def _parse_graph_expand_options(options: Any) -> tuple[list[str], str, int]:
+    """Return ``(chunk_ids, scope, max_facts)`` from graphExpand ``options``, or raise ``ValueError``.
+
+    Out-of-range values are rejected, not clamped. Messages name the field,
+    never the rejected value (a chunk id is a Knowledge Base identifier the
+    caller already holds, but it is still not echoed).
+    """
+    from .tier3.chunk_expander import SCOPE_SEED_DOCUMENTS, SCOPES
+
+    if options is None:
+        options = {}
+    if not isinstance(options, dict):
+        raise ValueError("Invalid options. Must be an object.")
+    chunk_ids = options.get("chunkIds")
+    if (
+        not isinstance(chunk_ids, list)
+        or not 1 <= len(chunk_ids) <= GRAPH_EXPAND_MAX_CHUNK_IDS
+        or not all(
+            isinstance(c, str) and 1 <= len(c) <= GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH and _GRAPH_EXPAND_CHUNK_ID.match(c)
+            for c in chunk_ids
+        )
+    ):
+        raise ValueError(
+            f"Invalid chunkIds. Must be a list of 1 to {GRAPH_EXPAND_MAX_CHUNK_IDS} Knowledge Base chunk ids "
+            f"of 1 to {GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH} characters from [A-Za-z0-9._-]."
+        )
+    scope = options.get("scope")
+    if scope is None:
+        scope = SCOPE_SEED_DOCUMENTS
+    elif not isinstance(scope, str) or scope not in SCOPES:
+        raise ValueError(f"Invalid scope. Must be one of: {', '.join(sorted(SCOPES))}.")
+    max_facts = options.get("maxFacts")
+    max_facts = (
+        GRAPH_EXPAND_DEFAULT_FACTS
+        if max_facts is None
+        else _require_int(max_facts, "maxFacts", GRAPH_EXPAND_MIN_FACTS, GRAPH_EXPAND_MAX_FACTS)
+    )
+    return list(chunk_ids), scope, max_facts
+
+
+async def _handle_graph_expand(payload: dict, request_id: str) -> dict:
+    """Fork (ADR 0012): expand the lexical graph from Knowledge Base chunks the caller retrieved.
+
+    Runs after the namespace admission gate, so the caller is published
+    (``set_request_user``) and the namespace's Knowledge Base source is bound;
+    the expander checks every seed chunk's document against that source under
+    the caller's identity before walking anything.
+    """
+    namespace = payload.get("namespace", "")
+    if not namespace:
+        return _error(400, "namespace required", request_id)
+    try:
+        chunk_ids, scope, max_facts = _parse_graph_expand_options(payload.get("options"))
+    except ValueError as exc:
+        return _error(400, str(exc), request_id)
+
+    if _chunk_expander is None:
+        raise DataSourceUnavailableError("Chunk expansion not configured")
+
+    trace = TraceCollector()
+    try:
+        t0 = time.perf_counter()
+        result = await asyncio.wait_for(
+            _chunk_expander.expand(namespace, chunk_ids, scope=scope, max_facts=max_facts),
+            timeout=RESOLVE_TIMEOUT_S,
+        )
+        expand_ms = int((time.perf_counter() - t0) * 1000)
+        trace.record(
+            StepId.T3_GRAPH_EXPAND,
+            "success",
+            expand_ms,
+            detail=f"{len(result.facts)} facts, {len(result.related_chunks)} related chunks",
+            tool_used="neptune",
+        )
+    except TimeoutError as e:
+        raise DataSourceUnavailableError("Graph expansion timed out") from e
+    except DataSourceUnavailableError:
+        raise
+    except Exception as e:
+        logger.error("graph_expand_error", error=str(e), request_id=request_id)
+        raise DataSourceUnavailableError("Graph expansion failed") from e
+
+    return {
+        **result.to_dict(),
+        "trace": trace.steps_serializable,
+        "requestId": request_id,
+        "statusCode": 200,
+    }
+
+
 async def _setup_streaming_session(
     payload: dict,
     session_user_id: str,
@@ -1305,6 +1437,54 @@ async def _bind_namespace_label_preference(
     return None
 
 
+async def _bind_namespace_document_source(namespace: str, request_id: str) -> dict | None:
+    """Fork: resolve the namespace's Knowledge Base source once and bind it to this request.
+
+    A ``BEDROCK_MANAGED_KB`` source is routed like a Databricks one: from the
+    namespace's source registry, not from deployment configuration. The document
+    retriever and the entitlement gate read the binding
+    (:mod:`coa_serve.request_document_source`). Fails closed: a namespace whose
+    inventory cannot be read, or whose Knowledge Base cannot be reached (the
+    cross-account assume refused), is not served, because serving it would fall
+    back to an OpenSearch index holding none of its chunks with the gate off.
+
+    Returns:
+        ``None`` on success, else the error payload to yield.
+    """
+    from .clients.sources_registry import BedrockKbSourceUnavailableError
+
+    if _sources_registry is None or _kb_retrievers is None:
+        bind_request_document_source(None)
+        return None
+    try:
+        source = await _sources_registry.find_bedrock_kb_source(namespace)
+    except BedrockKbSourceUnavailableError as exc:
+        logger.warning(
+            "document_source_unavailable_fail_closed", namespace=namespace, reason=str(exc), request_id=request_id
+        )
+        return DataSourceUnavailableError("Unable to resolve document sources").to_dict(request_id)
+    except Exception:
+        logger.warning("document_source_lookup_failed", namespace=namespace, request_id=request_id, exc_info=True)
+        return DataSourceUnavailableError("Unable to resolve document sources").to_dict(request_id)
+    if source is None:
+        bind_request_document_source(None)
+        return None
+    try:
+        retriever = await asyncio.to_thread(_kb_retrievers.get, source)
+    except Exception as exc:
+        # The assume (or the ExternalId derivation) failed; the role ARN stays in the log.
+        logger.warning(
+            "document_source_session_failed",
+            namespace=namespace,
+            knowledge_base_id=source.knowledge_base_id,
+            error=type(exc).__name__,
+            request_id=request_id,
+        )
+        return DataSourceUnavailableError("Unable to reach the namespace's knowledge base").to_dict(request_id)
+    bind_request_document_source(BoundDocumentSource(namespace=namespace, retriever=retriever))
+    return None
+
+
 async def _authorize_namespace_access(
     namespace: str,
     jwt_user_id: str,
@@ -1382,11 +1562,35 @@ async def _authorize_namespace_access(
         )
         return None, AccessDeniedError(decision.reason or "not permitted to query this namespace").to_dict(request_id)
 
+    # Fork: publish the caller for retrieval adapters that enforce per-user ACL
+    # (Bedrock KB userContext, document entitlement gate). Request-scoped.
+    set_request_user(resolved.email or resolved.user_id)
     return resolved, None
 
 
 @app.entrypoint
 async def invoke(payload: dict, context=None):
+    """AgentCore entrypoint; scopes the fork's request identity around :func:`_invoke`.
+
+    Fork: the caller published by the admission gate (``set_request_user``) and
+    the Knowledge Base source it bound (``bind_request_document_source``) must
+    not outlive their request. A worker that handled an admitted request and then
+    serves one that skips admission (session CRUD, ``semanticPlan``,
+    ``translate``) would otherwise still read the previous caller, and the
+    previous namespace's Knowledge Base, from the ``ContextVar``s. Clear on
+    entry, restore on exit, whatever path the body takes.
+    """
+    token = set_request_user(None)
+    source_token = bind_request_document_source(None)
+    try:
+        async for event in _invoke(payload, context):
+            yield event
+    finally:
+        reset_request_document_source(source_token)
+        reset_request_user(token)
+
+
+async def _invoke(payload: dict, context=None):
     """Main entrypoint — AgentCore @app.entrypoint streaming handler.
 
     All consumer surfaces (Lambda handlers, Playground SSE, MCP) route here.
@@ -1518,6 +1722,11 @@ async def invoke(payload: dict, context=None):
         if language_error is not None:
             yield language_error
             return
+        # Fork: which Knowledge Base (if any) this namespace reads documents from.
+        source_error = await _bind_namespace_document_source(namespace, request_id)
+        if source_error is not None:
+            yield source_error
+            return
 
     # ── Namespace admission gate (Cedar) ───────────────────────────────────
     # Run the coarse "may this principal query this namespace at all?" decision
@@ -1569,6 +1778,9 @@ async def invoke(payload: dict, context=None):
             return
         if action == "graphTraverse":
             yield await _handle_graph_traverse(payload, request_id)
+            return
+        if action == "graphExpand":
+            yield await _handle_graph_expand(payload, request_id)
             return
     except ServeError as e:
         yield e.to_dict(request_id)
@@ -1632,6 +1844,7 @@ async def invoke(payload: dict, context=None):
             resolve_profile, upstream_user_id, upstream_groups, namespace=request.namespace, email=_jwt_email
         )
         resolved.inject_into(request.profile)
+        set_request_user(resolved.email or resolved.user_id)  # fork: see _authorize_namespace_access
 
     # ``includeDebugInfo`` returns the generated SQL/SPARQL, i.e. the physical
     # schema. Honour it only for a caller who already administers this

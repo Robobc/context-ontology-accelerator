@@ -448,6 +448,7 @@ def _build_document_detail(item: dict[str, Any], metrics: dict[str, Any] | None 
         "s3Prefixes",
         "sourceBucketArn",
         "roleArn",
+        "bedrockKnowledgeBaseConfiguration",
         "extractionConfig",
         "filesTotal",
         "filesSkipped",
@@ -1683,6 +1684,10 @@ def _handle_rescan(
             sqs_body["source_bucket_arn"] = item["sourceBucketArn"]
         if item.get("roleArn"):
             sqs_body["role_arn"] = item["roleArn"]
+        if item.get("bedrockKnowledgeBaseConfiguration"):
+            # Fork: BEDROCK_MANAGED_KB re-extracts from the Knowledge Base; same
+            # key the create path sends (document_routes.BEDROCK_KB_JOB_KEY).
+            sqs_body["bedrock_kb"] = item["bedrockKnowledgeBaseConfiguration"]
         try:
             _get_sqs().send_message(
                 QueueUrl=_INGESTION_QUEUE_URL,

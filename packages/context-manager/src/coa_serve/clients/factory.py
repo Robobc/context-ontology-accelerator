@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import structlog
@@ -124,27 +124,17 @@ def _build_default_clients() -> ClientSet:
     )
 
 
-def build_document_retriever(config: ServiceConfig, vector_client: VectorClient) -> DocumentRetriever:
-    """Build the default and per-namespace document retrieval adapters."""
-    from ..tier3.bedrock_kb_retriever import BedrockKnowledgeBaseRetriever
-    from ..tier3.document_retriever import RoutingDocumentRetriever
+def build_document_retriever(vector_client: VectorClient) -> DocumentRetriever:
+    """Build the document retriever: the request's registered Knowledge Base, else COA's own chunk index.
+
+    Fork: which namespaces read from a Bedrock Managed Knowledge Base is not
+    deployment configuration; it is the ``BEDROCK_MANAGED_KB`` source each
+    namespace registers, resolved per request by the admission gate.
+    """
+    from ..tier3.document_retriever import RegistryDocumentRetriever
     from ..tier3.vector_retriever import VectorRetriever
 
-    opensearch_retriever = VectorRetriever(vector_client)
-    default: DocumentRetriever = opensearch_retriever
-    if config.document_retriever_backend == "bedrock-kb":
-        default = BedrockKnowledgeBaseRetriever(
-            config.bedrock_kb_id,
-            region=config.bedrock_region,
-        )
-
-    routes = {
-        namespace: BedrockKnowledgeBaseRetriever(kb_id, region=config.bedrock_region)
-        for namespace, kb_id in config.bedrock_kb_by_namespace
-    }
-    if not routes:
-        return default
-    return RoutingDocumentRetriever(default=default, routes=routes)
+    return RegistryDocumentRetriever(default=VectorRetriever(vector_client))
 
 
 def build_llm_client(config: ServiceConfig):
@@ -174,9 +164,12 @@ def build_llm_client(config: ServiceConfig):
 
 
 def build_lexical_retriever(
-    config: ServiceConfig, *, timeout_s: float | None = None
+    config: ServiceConfig, *, timeout_s: float | None = None, entitlement_gate: Any | None = None
 ) -> BaselineLexicalRetriever | None:
     """Build the lexical baseline retriever (graphrag-toolkit adapter).
+
+    ``entitlement_gate`` (fork): the service's ``DocumentEntitlementGate``, applied
+    to every result node for per-user Bedrock KB namespaces; ``None`` = off.
 
     Built on every deployment so a per-request ``options.retrieverStrategy`` can
     trigger graphrag retrieval on-demand, regardless of ``TIER3_STRATEGY``.
@@ -249,5 +242,6 @@ def build_lexical_retriever(
         graph_store_uri=graph_uri,
         vector_store_uri=vector_store_uri,
         strategy=DEFAULT_SPEC,
+        entitlement_gate=entitlement_gate,
         **({"timeout_s": timeout_s} if timeout_s is not None else {}),
     )

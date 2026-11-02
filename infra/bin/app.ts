@@ -417,6 +417,7 @@ async function deploy(): Promise<void> {
       "/namespaces/{namespaceId}/translate": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/kb/search": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/graph/traverse": `/${prefix}/data-layer/api-fn-arn`,
+      "/namespaces/{namespaceId}/graph/expand": `/${prefix}/data-layer/api-fn-arn`,
       // DescribeSchema — data-layer proxies to the ontology-engine api-fn.
       "/namespaces/{namespaceId}/schema": `/${prefix}/data-layer/api-fn-arn`,
     },
@@ -440,9 +441,6 @@ async function deploy(): Promise<void> {
     bedrockLlmModelId: config.bedrockLlmModelId,
     bedrockEmbedModelId: config.bedrockEmbedModelId,
     allowedOverrideModels: config.allowedOverrideModels,
-    documentRetrieverBackend: config.documentRetrieverBackend,
-    bedrockKnowledgeBaseId: config.bedrockKnowledgeBaseId,
-    bedrockKnowledgeBaseByNamespace: config.bedrockKnowledgeBaseByNamespace,
     generationBackend: config.generationBackend,
     portkeyBaseUrl: config.portkeyBaseUrl,
     portkeyModelId: config.portkeyModelId,

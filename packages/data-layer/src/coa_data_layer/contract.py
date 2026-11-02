@@ -84,6 +84,18 @@ GRAPH_TRAVERSE_DIRECTION_DEFAULT = "both"
 
 # ── DescribeSchema ───────────────────────────────────────────────────────────
 # ``maxResults`` (query string): @range(min: 1, max: 1000)
+# GraphExpandChunks (fork, ADR 0012)
+GRAPH_EXPAND_CHUNK_IDS_MIN_ITEMS = 1
+GRAPH_EXPAND_CHUNK_IDS_MAX_ITEMS = 50
+GRAPH_EXPAND_CHUNK_ID_MIN_LENGTH = 1
+GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH = 256
+GRAPH_EXPAND_CHUNK_ID_PATTERN = r"^[A-Za-z0-9._-]+$"
+GRAPH_EXPAND_SCOPES: frozenset[str] = frozenset({"SEED_DOCUMENTS", "ENTITLED_DOCUMENTS"})
+GRAPH_EXPAND_SCOPE_DEFAULT = "SEED_DOCUMENTS"
+GRAPH_EXPAND_MAX_FACTS_MIN = 1
+GRAPH_EXPAND_MAX_FACTS_MAX = 500
+GRAPH_EXPAND_MAX_FACTS_DEFAULT = 100
+
 DESCRIBE_SCHEMA_MAX_RESULTS_MIN = 1
 DESCRIBE_SCHEMA_MAX_RESULTS_MAX = 1000
 
@@ -91,6 +103,7 @@ DESCRIBE_SCHEMA_MAX_RESULTS_MAX = 1000
 # so ``int()`` never sees a pathological string.
 _QUERY_INT_RE = re.compile(r"[0-9]{1,9}")
 _START_URI_RE = re.compile(GRAPH_TRAVERSE_START_URI_PATTERN)
+_CHUNK_ID_RE = re.compile(GRAPH_EXPAND_CHUNK_ID_PATTERN)
 
 
 class ContractViolation(ValueError):
@@ -179,6 +192,26 @@ def require_query_bool(raw: Any, name: str) -> bool:
     if isinstance(raw, str) and raw.lower() in ("true", "false"):
         return raw.lower() == "true"
     raise ContractViolation(f"Invalid {name}. Must be true or false.")
+
+
+def require_chunk_ids(value: Any) -> list[str]:
+    """Return ``value`` if it is a ``KnowledgeBaseChunkIdList``: a bounded, non-empty list of chunk ids."""
+    if (
+        not isinstance(value, list)
+        or not GRAPH_EXPAND_CHUNK_IDS_MIN_ITEMS <= len(value) <= GRAPH_EXPAND_CHUNK_IDS_MAX_ITEMS
+        or not all(
+            isinstance(item, str)
+            and GRAPH_EXPAND_CHUNK_ID_MIN_LENGTH <= len(item) <= GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH
+            and _CHUNK_ID_RE.fullmatch(item)
+            for item in value
+        )
+    ):
+        raise ContractViolation(
+            f"Invalid chunkIds. Must be a list of {GRAPH_EXPAND_CHUNK_IDS_MIN_ITEMS} to "
+            f"{GRAPH_EXPAND_CHUNK_IDS_MAX_ITEMS} Knowledge Base chunk ids of {GRAPH_EXPAND_CHUNK_ID_MIN_LENGTH} to "
+            f"{GRAPH_EXPAND_CHUNK_ID_MAX_LENGTH} characters from [A-Za-z0-9._-]."
+        )
+    return value
 
 
 def require_start_uri(value: Any) -> str:

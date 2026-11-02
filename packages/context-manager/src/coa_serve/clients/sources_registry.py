@@ -16,7 +16,6 @@ import os
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -54,6 +53,41 @@ _QUERY_LIMIT = 50
 # a long-lived process from growing without bound under high namespace cardinality
 # (TTL alone only invalidates on read, it never evicts).
 _ITEMS_CACHE_MAX = 1024
+
+
+_SOURCE_SUB_TYPE_BEDROCK_KB = "BEDROCK_MANAGED_KB"
+# Same item key the sources API stores the configuration under (document_routes.py).
+_BEDROCK_KB_ITEM_KEY = "bedrockKnowledgeBaseConfiguration"
+
+
+class BedrockKbSourceUnavailableError(RuntimeError):
+    """The namespace's Knowledge Base source could not be determined.
+
+    Raised when the source inventory is unreadable (timeout, truncated page,
+    DynamoDB error), when more than one ``BEDROCK_MANAGED_KB`` source is
+    registered, or when the stored configuration is malformed. The admission
+    gate fails the request closed on it: serving the namespace without its
+    Knowledge Base would route retrieval to an OpenSearch index that holds no
+    chunks for it and run the graph tools with the entitlement gate off.
+    """
+
+
+@dataclass(frozen=True)
+class BedrockKbSource:
+    """Fork: a namespace's registered ``BEDROCK_MANAGED_KB`` document source.
+
+    ``namespace_id`` is the resolved namespace UUID: it is the input to the
+    ExternalId the serve runtime presents when assuming ``cross_account_role_arn``
+    (``coa_common.constants.datasource_external_id``), so it must be the same
+    value the control plane shows the customer on ``GetNamespace``.
+    """
+
+    namespace_id: str
+    source_id: str
+    knowledge_base_id: str
+    region: str | None
+    cross_account_role_arn: str | None
+    data_source_ids: tuple[str, ...] = ()
 
 
 class NamespaceLanguageUnavailableError(RuntimeError):
@@ -146,27 +180,19 @@ class SourcesRegistry:
         namespaces_table: str | None = None,
         region: str | None = None,
         executor: ThreadPoolExecutor | None = None,
-        external_document_namespaces: Collection[str] | None = None,
-        external_document_default: bool = False,
     ):
-        """Configure DynamoDB access and externally managed document sources.
+        """Configure DynamoDB access.
 
         Args:
             table_name: Sources table name. Defaults to the ``DATA_SOURCES_TABLE`` env var.
             namespaces_table: Namespaces table name. Defaults to ``NAMESPACES_TABLE``.
             region: AWS region. Defaults to the resolved region.
             executor: Thread pool for running blocking boto3 calls off the event loop.
-            external_document_namespaces: Namespace IDs routed to an external
-                document retriever such as a managed Bedrock Knowledge Base.
-            external_document_default: Whether every namespace uses an external
-                document retriever by default.
         """
         self._table_name = table_name or os.environ.get("DATA_SOURCES_TABLE", "")
         self._namespaces_table = namespaces_table or os.environ.get("NAMESPACES_TABLE", "")
         self._region = region or resolve_region()
         self._executor = executor
-        self._external_document_namespaces = frozenset(external_document_namespaces or ())
-        self._external_document_default = external_document_default
         if self._table_name or self._namespaces_table:
             self._dynamodb = boto3.resource("dynamodb", region_name=self._region, config=sync_boto_config())
         else:
@@ -223,15 +249,6 @@ class SourcesRegistry:
             return resolve_namespace_id(namespace, table)
         except (ValueError, Exception):
             return namespace
-
-    def _has_external_documents(self, namespace: str) -> bool:
-        """Return whether configuration positively routes this namespace externally."""
-        resolved_namespace = self._resolve_ns(namespace)
-        return (
-            self._external_document_default
-            or namespace in self._external_document_namespaces
-            or resolved_namespace in self._external_document_namespaces
-        )
 
     async def namespace_exists(self, namespace: str) -> bool | None:
         """Return whether a namespace exists in the namespaces table.
@@ -488,6 +505,52 @@ class SourcesRegistry:
             if item.get("sourceType") == _SOURCE_TYPE_DATABASE:
                 return item
         return {}
+
+    async def find_bedrock_kb_source(self, namespace: str) -> BedrockKbSource | None:
+        """Fork: the namespace's ``BEDROCK_MANAGED_KB`` document source, or ``None`` when it has none.
+
+        Reads the shared, cached ``SRC#`` query, so the admission gate adds no
+        round-trip of its own to a request that also routes Tier-2. Raises
+        :class:`BedrockKbSourceUnavailableError` when the inventory cannot be read
+        or is ambiguous; unlike the tier-gating composition this must not fail
+        open, see the error's docstring. A deployment without a sources table has
+        no sources at all and gets ``None``.
+        """
+        if not self.available:
+            return None
+        items = await self._query_sources(namespace)
+        if items is None:
+            raise BedrockKbSourceUnavailableError("source inventory unavailable")
+        kb_items = [
+            item
+            for item in items
+            if item.get("sourceType") == _SOURCE_TYPE_DOCUMENTS
+            and (item.get("subType") == _SOURCE_SUB_TYPE_BEDROCK_KB or isinstance(item.get(_BEDROCK_KB_ITEM_KEY), dict))
+        ]
+        if not kb_items:
+            return None
+        if len(kb_items) > 1:
+            # Retrieve has one knowledgeBaseId; two registered KBs cannot be served
+            # without fan-out, which this release does not do. Refuse rather than
+            # pick one and silently hide the other's documents.
+            raise BedrockKbSourceUnavailableError("namespace registers more than one knowledge base source")
+        item = kb_items[0]
+        config = item.get(_BEDROCK_KB_ITEM_KEY)
+        knowledge_base_id = str(config.get("knowledgeBaseId") or "") if isinstance(config, dict) else ""
+        if not knowledge_base_id:
+            raise BedrockKbSourceUnavailableError("knowledge base source record has no knowledgeBaseId")
+        role_arn = str(config.get("crossAccountRoleArn") or "") or None
+        region = str(config.get("region") or "") or None
+        data_source_ids = tuple(str(s) for s in (config.get("dataSourceIds") or ()) if s)
+        source_id = str(item.get("sourceId") or str(item.get("SK", "")).removeprefix("SRC#"))
+        return BedrockKbSource(
+            namespace_id=self._resolve_ns(namespace),
+            source_id=source_id,
+            knowledge_base_id=knowledge_base_id,
+            region=region,
+            cross_account_role_arn=role_arn,
+            data_source_ids=data_source_ids,
+        )
 
     async def find_sole_database_source(self, namespace: str) -> dict[str, Any] | None:
         """Find the sole DATABASE source in a namespace, or None if ambiguous.
@@ -790,8 +853,7 @@ class SourcesRegistry:
             # request retries rather than being pinned to "run everything".
             return SourceComposition.unknown_composition()
 
-        has_external_documents = self._has_external_documents(namespace)
-        if not items and not has_external_documents:
+        if not items:
             # No SRC# records at all — an empty or not-yet-provisioned namespace, or a
             # name that does not resolve. This is NOT a reliable "namespace has zero
             # DATABASE and zero DOCUMENTS sources" signal (that would skip every tier);
@@ -800,14 +862,9 @@ class SourcesRegistry:
             return SourceComposition.unknown_composition()
 
         has_structured_source = any(item.get("sourceType") == _SOURCE_TYPE_DATABASE for item in items)
-        # A managed KB is a real unstructured source even though it has no SRC#
-        # row and no COA chunk index. Count the exact namespace route (or a
-        # deployment-wide external default) so standard and deep-reasoning
-        # retrieval do not hide the external document backend after, for
-        # example, a DATABASE source is added to the same namespace.
-        has_unstructured_source = has_external_documents or any(
-            item.get("sourceType") == _SOURCE_TYPE_DOCUMENTS for item in items
-        )
+        # A BEDROCK_MANAGED_KB source is a DOCUMENTS source with its own SRC# row,
+        # so it counts here like any other document source.
+        has_unstructured_source = any(item.get("sourceType") == _SOURCE_TYPE_DOCUMENTS for item in items)
         return SourceComposition(
             has_structured_source=has_structured_source, has_unstructured_source=has_unstructured_source
         )

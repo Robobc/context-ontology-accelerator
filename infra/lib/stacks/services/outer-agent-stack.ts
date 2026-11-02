@@ -23,7 +23,12 @@ export interface OuterAgentStackProps extends cdk.StackProps {
 }
 
 const TARGET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** Knowledge Base ids and their data source ids share this grammar. */
 const KNOWLEDGE_BASE_ID_PATTERN = /^[A-Za-z0-9]{10}$/;
+/** AWS Region names: us-east-1, eu-central-1, us-gov-west-1, eusc-de-east-1. */
+const REGION_PATTERN = /^[a-z]{2,4}(-[a-z]+){1,2}-\d$/;
+/** AgenticRetrieveStream rerankingModelType values the config may name. */
+const RERANKING_VALUES = new Set(["MANAGED", "NONE"]);
 
 /**
  * Trusted composition boundary: semantic plan -> native source execution ->
@@ -125,6 +130,10 @@ export class OuterAgentStack extends SCLStack {
         MAX_EVIDENCE_CHARACTERS: String(
           props.config.maxEvidenceCharacters ?? 30000,
         ),
+        // ADR 0012: after the Knowledge Base returns the user's chunks, the
+        // agent asks COA expand_chunks for the graph context around them.
+        COA_GRAPH_EXPANSION_SCOPE:
+          props.config.graphExpansionScope ?? "SEED_DOCUMENTS",
       },
       description:
         "Semantic planning, source-native retrieval, evidence assembly, and final generation",
@@ -177,12 +186,13 @@ export class OuterAgentStack extends SCLStack {
       }),
     );
 
-    const knowledgeBaseArns = Object.values(props.config.sourceTargets)
-      .flatMap((target) => target.knowledgeBaseIds ?? [])
-      .map(
-        (knowledgeBaseId) =>
-          `arn:${cdk.Aws.PARTITION}:bedrock:${region}:${account}:knowledge-base/${knowledgeBaseId}`,
-      );
+    const knowledgeBaseArns = Object.values(props.config.sourceTargets).flatMap(
+      (target) =>
+        (target.knowledgeBaseIds ?? []).map(
+          (knowledgeBaseId) =>
+            `arn:${cdk.Aws.PARTITION}:bedrock:${target.region ?? region}:${account}:knowledge-base/${knowledgeBaseId}`,
+        ),
+    );
     if (knowledgeBaseArns.length) {
       runtime.addToRolePolicy(
         new iam.PolicyStatement({
@@ -236,9 +246,36 @@ export class OuterAgentStack extends SCLStack {
             `Managed KB target ${targetId} requires 1-10 valid knowledgeBaseIds`,
           );
         }
-      } else if (knowledgeBaseIds.length) {
+      } else if (
+        knowledgeBaseIds.length ||
+        target.region !== undefined ||
+        target.dataSourceIds !== undefined ||
+        target.reranking !== undefined
+      ) {
         throw new Error(
-          `Source target ${targetId} does not accept knowledgeBaseIds`,
+          `Source target ${targetId} does not accept knowledgeBaseIds, region, dataSourceIds or reranking`,
+        );
+      }
+      if (
+        target.reranking !== undefined &&
+        !RERANKING_VALUES.has(target.reranking)
+      ) {
+        throw new Error(
+          `Source target ${targetId} reranking must be MANAGED or NONE`,
+        );
+      }
+      if (target.region !== undefined && !REGION_PATTERN.test(target.region)) {
+        throw new Error(
+          `Source target ${targetId} region must be an AWS Region name`,
+        );
+      }
+      const dataSourceIds = target.dataSourceIds ?? [];
+      if (
+        dataSourceIds.length > 10 ||
+        dataSourceIds.some((id) => !KNOWLEDGE_BASE_ID_PATTERN.test(id))
+      ) {
+        throw new Error(
+          `Source target ${targetId} dataSourceIds must be 0-10 valid data source ids`,
         );
       }
       if (

@@ -118,3 +118,21 @@ class SimpleHttpClient:
     async def post(self, url, **kwargs):
         self.calls.append({"url": url, **kwargs})
         return self.response
+
+
+@pytest.mark.asyncio
+async def test_no_claims_is_the_no_supported_answer_not_a_contract_failure():
+    """Observed on dev (2026-11-01): a finance-only reader asked an HR question, the Knowledge
+    Base returned only the finance chunk, the model answered {"claims": []} and the agent
+    reported a 400. The honest empty answer is a deterministic refusal, not an error."""
+    from coa_outer_agent.portkey import NO_SUPPORTED_ANSWER
+
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"choices": [{"message": {"content": json.dumps({"claims": []})}}]}
+    generator = client(SimpleHttpClient(response))
+
+    answer = await generator.generate(question="Who is the HR contact?", semantic_plan={}, context="[E1] finance")
+
+    assert answer == NO_SUPPORTED_ANSWER
+    assert "[E" not in answer

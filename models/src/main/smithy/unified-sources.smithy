@@ -934,6 +934,82 @@ list S3PrefixList {
     member: S3Prefix
 }
 
+/// Amazon Bedrock Knowledge Base identifier (10 upper-case alphanumerics).
+@pattern("^[A-Z0-9]{10}$")
+@length(min: 10, max: 10)
+string BedrockKnowledgeBaseId
+
+/// Amazon Bedrock Knowledge Base data source identifier.
+@pattern("^[A-Z0-9]{10}$")
+@length(min: 10, max: 10)
+string BedrockDataSourceId
+
+@length(max: 50)
+list BedrockDataSourceIdList {
+    member: BedrockDataSourceId
+}
+
+/// Bedrock Managed Knowledge Base config. Required for the BEDROCK_MANAGED_KB
+/// sub-type and selects it; mutually exclusive with sourceBucketArn/uploadId.
+///
+/// The knowledge base is reached exactly as a database source's warehouse is:
+/// through crossAccountRoleArn when the KB lives in another account, directly
+/// under this deployment's own roles when it lives in this one. Both the
+/// KG-build task (extraction, which must see every document) and the serve
+/// runtime (per-user Retrieve and the document entitlement probe) assume that
+/// one role with the namespace's External ID, so the KB owner decides which
+/// namespaces may read which knowledge bases by what the role's trust policy
+/// and permissions name — the same governance lever as for Databricks.
+structure BedrockKnowledgeBaseConfiguration {
+    @required
+    knowledgeBaseId: BedrockKnowledgeBaseId
+
+    /// Data sources to extract from. All of the KB's data sources when omitted.
+    dataSourceIds: BedrockDataSourceIdList
+
+    /// Region of the knowledge base. This deployment's region when omitted.
+    region: AwsRegion
+
+    /// Customer-owned IAM role in the KB owner's account. Same member name,
+    /// type and meaning as on GlueConfiguration, JdbcConfiguration and
+    /// DatabricksSqlWarehouseConfiguration. Optional like Glue's: omit it when
+    /// the KB is in this deployment's account.
+    ///
+    /// Its trust policy must name this deployment's KG-build task role AND
+    /// serve runtime role, conditioned on NamespaceDetail$datasourceExternalId
+    /// (one role can trust several namespaces by listing their External IDs).
+    /// Its permission policy grants `bedrock:Retrieve`,
+    /// `bedrock:GetDocumentContent` and `bedrock:ListKnowledgeBaseDocuments` on
+    /// the knowledge bases it chooses to expose.
+    ///
+    /// The role MUST be named {RESOURCE_PREFIX}datasource-access-*, because this
+    /// deployment's assume grant is scoped to that prefix, so registration
+    /// rejects any other name explicitly rather than letting it fail as an
+    /// opaque AccessDenied at first scan. There is no externalId member: the
+    /// value is derived from the namespace.
+    crossAccountRoleArn: IamRoleArn
+
+    /// The identity the KG build reads the knowledge base as: the email of a
+    /// service account the knowledge base owner has granted read access to
+    /// every document the graph should cover. Passed as `userContext.userId` on
+    /// every Retrieve and GetDocumentContent of the scan.
+    ///
+    /// Required in practice when any selected data source is ACL-enabled: Bedrock
+    /// returns nothing from such a data source to a request without a user
+    /// context, there is no administrative bypass, and the scan then fails
+    /// rather than build an empty graph. Harmless on non-ACL data sources, which
+    /// return every document to any identity. What this identity may read is
+    /// exactly what the graph will contain, so the knowledge base owner controls
+    /// the graph's coverage through this one account's permissions.
+    extractionUserId: BedrockUserContextId
+}
+
+/// A Bedrock `userContext.userId`: the user's email address as known to the
+/// data source. No whitespace.
+@pattern("^\\S+$")
+@length(min: 3, max: 320)
+string BedrockUserContextId
+
 /// Type of per-file preprocessing issue.
 enum PreprocessingIssueType {
     /// The file was skipped during preprocessing.
@@ -1031,6 +1107,14 @@ enum SourceSubType {
 
     /// Unstructured: direct file upload
     LOCAL_UPLOAD
+
+    /// Unstructured: an existing Amazon Bedrock Managed Knowledge Base. The
+    /// KB keeps parsing, chunking, chunk embedding and document-level ACL; this
+    /// service reads the KB's own chunks (same chunk ids) and runs only the
+    /// LLM entity/fact extraction into the graph. No files are staged, no
+    /// chunk vectors are written here, and the namespace's queries go through
+    /// the KB with the caller's identity so its ACL applies to every answer.
+    BEDROCK_MANAGED_KB
 }
 
 /// Unified lifecycle status for all source types.
@@ -1272,6 +1356,11 @@ structure CreateDocumentSourceInput {
     /// IAM role for cross-account S3 access.
     roleArn: IamRoleArn
 
+    /// Bedrock Managed Knowledge Base to read chunks from. Setting it selects the
+    /// BEDROCK_MANAGED_KB sub-type; s3Prefixes, uploadId and sourceBucketArn must
+    /// then be absent.
+    bedrockKnowledgeBaseConfiguration: BedrockKnowledgeBaseConfiguration
+
     extractionConfig: ExtractionConfig
 }
 
@@ -1452,6 +1541,9 @@ structure DocumentSourceDetail {
     sourceBucketArn: S3BucketArn
 
     roleArn: IamRoleArn
+
+    /// Set for BEDROCK_MANAGED_KB sources.
+    bedrockKnowledgeBaseConfiguration: BedrockKnowledgeBaseConfiguration
 
     extractionConfig: ExtractionConfig
 

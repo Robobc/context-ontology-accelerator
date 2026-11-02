@@ -234,6 +234,23 @@ except (TypeError, ValueError) as _chunk_exc:
 DELETE_PREV_VERSIONS = os.environ.get("DELETE_PREV_VERSIONS", DEFAULT_DELETE_PREV_VERSIONS).lower() == "true"
 BATCH_INFERENCE_ROLE_ARN = os.environ.get("BATCH_INFERENCE_ROLE_ARN", "")
 BEDROCK_MODEL_ARN = os.environ.get("BEDROCK_MODEL_ARN", "")
+
+# Fork: where the chunks come from and where their vectors go.
+#   INPUT_MODE        STAGING (default)  — today's path: staged text files, toolkit chunking.
+#                     BEDROCK_KB         — pre-chunked text from a Bedrock Managed Knowledge
+#                                          Base (kg_build/bedrock_kb_loader.py); no re-chunking,
+#                                          chunk ids kept so Retrieve hits join the graph 1:1.
+#   VECTOR_STORE_MODE AOSS (default)     — toolkit writes chunk/topic embeddings to OpenSearch.
+#                     DUMMY              — "dummy://" vector store, writes nothing (the KB owns
+#                                          the chunk vectors; topic embeddings are not produced).
+INPUT_MODE = os.environ.get("INPUT_MODE", "STAGING").strip().upper() or "STAGING"
+VECTOR_STORE_MODE = os.environ.get("VECTOR_STORE_MODE", "AOSS").strip().upper() or "AOSS"
+if INPUT_MODE not in ("STAGING", "BEDROCK_KB"):
+    logger.warning("invalid INPUT_MODE, using STAGING", input_mode=INPUT_MODE)
+    INPUT_MODE = "STAGING"
+if VECTOR_STORE_MODE not in ("AOSS", "DUMMY"):
+    logger.warning("invalid VECTOR_STORE_MODE, using AOSS", vector_store_mode=VECTOR_STORE_MODE)
+    VECTOR_STORE_MODE = "AOSS"
 # Embedding model for the chunk_* vector index. MUST match what serve queries
 # with (see coa_serve.lexical.baseline_retriever) — the shared
 # default is the single source of truth; overridable via env for migrations.
@@ -519,35 +536,15 @@ def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]
             metadata: dict[str, str | int] = {"filename": filename}
             sidecar = sidecars.get(stem)
             if sidecar:
-                # Sanitize keys: replace dots and hyphens with underscores so they
-                # are valid as Neptune/OpenCypher property names. The toolkit embeds
-                # metadata keys directly in Cypher queries without quoting.
-                # Two distinct source keys can collapse to the same sanitized key
-                # (e.g. "report.id" and "report-id" both -> "report_id"); a plain
-                # dict assignment would silently drop one value. Disambiguate
-                # collisions with a numeric suffix so no source metadata is lost.
-                origin_of: dict[str, str] = {}
-                for k, v in sidecar.items():
-                    safe_key = k.replace(".", "_").replace("-", "_")
-                    if safe_key in origin_of and origin_of[safe_key] != k:
-                        logger.warning(
-                            "Sanitized metadata key collision; disambiguating",
-                            s3_key=key,
-                            original_key=k,
-                            collides_with=origin_of[safe_key],
-                            sanitized_key=safe_key,
-                        )
-                        # Probe origin_of (the sanitized-key namespace this loop
-                        # owns) rather than metadata: metadata also carries
-                        # pre-seeded keys (filename, later versioning fields) that
-                        # are unrelated to sanitized-key disambiguation, so scoping
-                        # the free-slot search to origin_of keeps this self-contained.
-                        suffix = 2
-                        while f"{safe_key}_{suffix}" in origin_of:
-                            suffix += 1
-                        safe_key = f"{safe_key}_{suffix}"
-                    origin_of[safe_key] = k
-                    metadata[safe_key] = v
+                # Sanitize keys so they are valid Neptune/OpenCypher property names
+                # (the toolkit embeds metadata keys in Cypher unquoted), with
+                # collision-safe disambiguation. Shared with the Bedrock KB loader.
+                from coa_sources.documents.kg_build.bedrock_kb_loader import sanitize_metadata_keys
+
+                def _log_collision(*, _s3_key: str = key, **fields: str) -> None:
+                    logger.warning("Sanitized metadata key collision; disambiguating", s3_key=_s3_key, **fields)
+
+                metadata.update(sanitize_metadata_keys(sidecar.items(), on_collision=_log_collision))
 
             if ENABLE_VERSIONING:
                 id_fields = ["source_s3_key"] if "source_s3_key" in metadata else ["filename"]
@@ -575,6 +572,76 @@ def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]
         total_text_files=len(text_files),
     )
     return documents, failed_count + empty_count
+
+
+def _load_bedrock_kb_documents(namespace_id: str) -> tuple[list, int]:
+    """Fork: INPUT_MODE=BEDROCK_KB. Pre-chunked nodes from a Bedrock Managed Knowledge Base.
+
+    Env: ``BEDROCK_KB_ID`` (required), ``BEDROCK_KB_DATA_SOURCE_IDS`` (comma list,
+    empty = all), ``BEDROCK_KB_REGION`` (default AWS_REGION),
+    ``BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN`` (optional; the IAM role assumed for the
+    Bedrock calls when the KB is in another account), ``BEDROCK_KB_EXTRACTION_USER_ID``
+    (optional; the ``userContext.userId`` the scan reads the KB as, which decides
+    which documents an ACL-enabled data source returns to it; none = nothing).
+
+    The assume goes through ``assume_datasource_session`` with the namespace's
+    ExternalId, exactly like every other customer-supplied datasource role: the
+    role ARN arrived from the CreateSource caller, so the ExternalId (derived from
+    *namespace_id*, never from the request) is what binds the assume to the
+    namespace entitled to it. The target role's trust policy must therefore name
+    this ExternalId; the control plane shows it on GetNamespace.
+
+    Returns ``(nodes, unloaded_count)`` like ``_load_staged_documents``: the nodes
+    are the KB's chunks as ``TextNode``s (ids ``aws:<_chunk_id>``, grouped per
+    document, SOURCE relationship set), and ``unloaded_count`` is the number of
+    discovered documents that yielded no chunk.
+    """
+    import boto3
+    from coa_common.constants import datasource_external_id
+
+    from coa_sources.database.connectors.sts_assume import assume_datasource_session
+    from coa_sources.documents.kg_build.bedrock_kb_loader import load_bedrock_kb_chunks
+
+    kb_id = _require_env("BEDROCK_KB_ID")
+    ds_ids = [s.strip() for s in os.environ.get("BEDROCK_KB_DATA_SOURCE_IDS", "").split(",") if s.strip()]
+    region = os.environ.get("BEDROCK_KB_REGION", "").strip() or AWS_REGION
+    role_arn = os.environ.get("BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN", "").strip()
+    extraction_user_id = os.environ.get("BEDROCK_KB_EXTRACTION_USER_ID", "").strip() or None
+
+    if role_arn:
+        session = assume_datasource_session(
+            role_arn,
+            datasource_external_id(namespace_id),
+            region,
+            session_name=f"coa-kg-build-{namespace_id}",
+        )
+    else:
+        session = boto3.Session(region_name=region)
+    runtime = session.client("bedrock-agent-runtime")
+    agent = session.client("bedrock-agent")
+
+    def _log_collision(**fields: str) -> None:
+        logger.warning("Sanitized metadata key collision; disambiguating", knowledge_base_id=kb_id, **fields)
+
+    result = load_bedrock_kb_chunks(
+        knowledge_base_id=kb_id,
+        data_source_ids=ds_ids or None,
+        runtime=runtime,
+        agent=agent,
+        on_collision=_log_collision,
+        extraction_user_id=extraction_user_id,
+    )
+    logger.info(
+        "Loaded Bedrock KB chunks",
+        knowledge_base_id=kb_id,
+        extraction_user_id=extraction_user_id or "",
+        documents=len(result.documents),
+        chunks=len(result.chunks),
+        documents_without_chunks=result.documents_without_chunks,
+        documents_not_visible=result.documents_not_visible,
+        retrieve_calls=result.retrieve_calls,
+    )
+    return result.chunks, result.documents_without_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -1170,7 +1237,10 @@ def _setup_graphrag(tenant_id: str):
     neptune_host = neptune_endpoint.replace("wss://", "").replace("https://", "").rstrip("/")
     opensearch_host = opensearch_endpoint.replace("https://", "").replace("http://", "").rstrip("/")
     graph_store_uri = f"neptune-db://{neptune_host}:8182"
-    vector_store_uri = f"aoss://{opensearch_host}:443"
+    # Fork: DUMMY keeps the toolkit's vector writes out of OpenSearch (the Managed
+    # KB already holds the chunk vectors). The factory needs a non-empty
+    # index_names either way; EMBEDDING_INDEXES stays as configured.
+    vector_store_uri = "dummy://" if VECTOR_STORE_MODE == "DUMMY" else f"aoss://{opensearch_host}:443"
 
     # NOTE: chunking is intentionally NOT overridden here. With no SentenceSplitter
     # in the IndexingConfig, the toolkit falls back to its default
@@ -1194,7 +1264,9 @@ def _setup_graphrag(tenant_id: str):
         extraction_connect_timeout_seconds=EXTRACTION_CONNECT_TIMEOUT_SECONDS,
         extraction_max_attempts=EXTRACTION_MAX_ATTEMPTS,
         extraction_pool_size=max(EXTRACTION_NUM_THREADS_PER_WORKER, 10),
-        chunk_size="256 (toolkit default)",
+        chunk_size="none (Bedrock KB chunks)" if INPUT_MODE == "BEDROCK_KB" else "256 (toolkit default)",
+        input_mode=INPUT_MODE,
+        vector_store_mode=VECTOR_STORE_MODE,
     )
     return graph_store_uri, vector_store_uri
 
@@ -1348,7 +1420,14 @@ def _build_indexing_config(bucket_name: str, namespace_id: str, doc_source_id: s
     )
 
     kwargs: dict = {"extraction": extraction_config, "batch_config": batch_config}
-    if chunking is not None:
+    if INPUT_MODE == "BEDROCK_KB":
+        # Fork: the Knowledge Base already chunked the text. IndexingConfig treats
+        # an explicit None as "no chunking"; omitting the key (or passing []) would
+        # add the default SentenceSplitter and rehash every chunk id.
+        if chunking is not None:
+            logger.warning("CHUNK_SIZE ignored: INPUT_MODE=BEDROCK_KB never re-chunks", chunk_size=CHUNK_SIZE)
+        kwargs["chunking"] = None
+    elif chunking is not None:
         kwargs["chunking"] = chunking
     return IndexingConfig(**kwargs)
 
@@ -1465,6 +1544,9 @@ def _check_backend_health(
         return False
 
     # --- Vector store (AOSS) health check ---
+    if vector_store_uri.startswith("dummy://"):
+        logger.info("Vector store health check skipped (dummy vector store)")
+        return True
     try:
         from graphrag_toolkit.lexical_graph.storage.vector.opensearch_vector_indexes import (
             create_os_client,
@@ -1653,14 +1735,23 @@ def main() -> None:
     # 1. Load. A listing failure raises (transient S3/IAM error must not look
     # like "empty prefix") → mark SCAN_FAILED and exit non-zero. load_failed is
     # the count of listed files that could not be downloaded/decoded.
+    # Fork: INPUT_MODE=BEDROCK_KB loads the Knowledge Base's own chunks instead
+    # (nodes, not documents; the toolkit groups them by SOURCE relationship).
     try:
-        documents, load_failed = _load_staged_documents(bucket_name, staging_prefix)
-    except Exception:
+        if INPUT_MODE == "BEDROCK_KB":
+            documents, load_failed = _load_bedrock_kb_documents(namespace_id)
+        else:
+            documents, load_failed = _load_staged_documents(bucket_name, staging_prefix)
+    except Exception as exc:
         tb = traceback.format_exc()
         logger.error("Failed to load staged documents", staging_prefix=staging_prefix, error=tb)
-        ddb.update(
-            ddb_key, {"status": SourceStatus.SCAN_FAILED, "errorMessage": _stage_failure_message("SCAN_FAILED_LOAD")}
-        )
+        error_message = _stage_failure_message("SCAN_FAILED_LOAD")
+        # Fork: the one load failure whose fix is a configuration the steward
+        # controls (ADR 0011). Its message names the field; the generic text would
+        # send them to the logs for something the status row can say.
+        if type(exc).__name__ == "ExtractionIdentityRequiredError":
+            error_message = f"SCAN_FAILED_LOAD: {exc}"
+        ddb.update(ddb_key, {"status": SourceStatus.SCAN_FAILED, "errorMessage": error_message})
         sys.exit(1)
     if not documents:
         # Genuinely empty prefix (listing succeeded, zero usable docs). If some

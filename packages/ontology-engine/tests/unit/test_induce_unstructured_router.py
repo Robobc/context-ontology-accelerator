@@ -73,6 +73,29 @@ def _valid_request_body(namespace: str | None = None) -> dict[str, Any]:
     }
 
 
+def _make_report():
+    """Minimal successful pipeline report for worker tests that only care about wiring."""
+    from datetime import UTC, datetime
+
+    from coa_ontology.inducer.unstructured.schemas import UnstructuredInductionReport
+
+    return UnstructuredInductionReport(
+        pipeline_run_id="run-ok",
+        namespace=_NS,
+        ontology_id=_NAME,
+        tboxClassCount=1,
+        objectPropertyCount=0,
+        datatypePropertyCount=0,
+        conceptCount=0,
+        individualCount=0,
+        closeMatchAxiomCount=0,
+        description_mode="schema",
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        turtle="@prefix ex: <http://example.com/> . ex:Foo a <http://www.w3.org/2002/07/owl#Class> .",
+    )
+
+
 # ── Test app + client fixtures ──────────────────────────────────────────
 
 
@@ -594,7 +617,7 @@ class TestRunUnstructuredInductionWorker:
     def _make_request_body(self) -> UnstructuredInductionRequest:
         return UnstructuredInductionRequest(**_valid_request_body())
 
-    def _patch_external_dependencies(self, stack: ExitStack) -> None:
+    def _patch_external_dependencies(self, stack: ExitStack, *, access_controlled: bool = False) -> None:
         """Patch every AWS-touching client constructor used by the worker.
 
         The worker constructs :class:`NeptuneAnalyticsLexicalStore`,
@@ -628,13 +651,52 @@ class TestRunUnstructuredInductionWorker:
             "InMemoryIRIResolver": IRIResolver,
         }
         for name, cls in spec_map.items():
+            double = MagicMock(spec=cls)
+            if cls is LexicalGraphStore:
+                # Fork (ADR 0011): an ordinary graph; the guard test flips this to True.
+                double.has_access_controlled_sources.return_value = access_controlled
+            stack.enter_context(patch.object(induce_unstructured, name, return_value=double))
+
+    def test_access_controlled_graph_runs_tbox_only(self):
+        """Fork (ADR 0011): a graph whose sources are Bedrock KB documents (``aws:doc:*``)
+        is induced T-Box only. The worker probes the store once and threads the
+        answer into the pipeline config as ``tbox_only``; the pipeline owns the
+        refusal of entity-level shapes and the topic skip.
+        """
+        body = self._make_request_body()
+        pipeline_mock = MagicMock()
+        pipeline_mock.run.return_value = _make_report()
+
+        with ExitStack() as stack:
+            ds = stack.enter_context(patch.object(induce_unstructured, "dynamo_store", autospec=True))
             stack.enter_context(
-                patch.object(
-                    induce_unstructured,
-                    name,
-                    return_value=MagicMock(spec=cls),
-                )
+                patch.object(induce_unstructured, "UnstructuredInductionPipeline", return_value=pipeline_mock)
             )
+            self._patch_external_dependencies(stack, access_controlled=True)
+
+            induce_unstructured._run_unstructured_induction("job-acl", body, _NS, {})
+
+            pipeline_mock.run.assert_called_once()
+            config = pipeline_mock.run.call_args.args[0]
+            assert config.tbox_only is True
+            ds.create_proposal.assert_called_once()
+
+    def test_ordinary_graph_is_not_tbox_only(self):
+        """The default (non-KB) graph keeps the full rule set."""
+        body = self._make_request_body()
+        pipeline_mock = MagicMock()
+        pipeline_mock.run.return_value = _make_report()
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(induce_unstructured, "dynamo_store", autospec=True))
+            stack.enter_context(
+                patch.object(induce_unstructured, "UnstructuredInductionPipeline", return_value=pipeline_mock)
+            )
+            self._patch_external_dependencies(stack, access_controlled=False)
+
+            induce_unstructured._run_unstructured_induction("job-plain", body, _NS, {})
+
+            assert pipeline_mock.run.call_args.args[0].tbox_only is False
 
     def test_pipeline_exception_marks_job_failed_and_creates_no_proposal(self):
         """When the pipeline raises, the worker persists ``status="failed"``

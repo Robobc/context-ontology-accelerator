@@ -96,6 +96,95 @@ def extract_evidence(
     return items
 
 
+# Metadata keys under which a Knowledge Base result names its chunk. Same list
+# as COA serve's retriever (``_chunk_id`` is the Bedrock system key).
+_CHUNK_ID_KEYS = ("_chunk_id", "x-amz-bedrock-kb-chunk-id", "chunk_id")
+# ``KnowledgeBaseChunkId`` in serve.smithy: the grammar and bounds COA accepts.
+_CHUNK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
+GRAPH_EXPANSION_MAX_SEEDS = 50  # KnowledgeBaseChunkIdList @length(max: 50)
+GRAPH_TARGET_ID = "coa-graph"
+GRAPH_TARGET_KIND = "COA_GRAPH"
+
+
+def knowledge_base_chunk_ids(evidence: list[Evidence]) -> list[str]:
+    """The Knowledge Base ``_chunk_id`` of every ``MANAGED_KB`` evidence item, in rank order.
+
+    Only well-formed ids are kept (anything else cannot name a graph node and
+    would be rejected by COA), duplicates are dropped, and the list is cut to
+    what one ``expand_chunks`` call accepts.
+    """
+    seen: set[str] = set()
+    ids: list[str] = []
+    for item in evidence:
+        if item.target_kind != "MANAGED_KB":
+            continue
+        for key in _CHUNK_ID_KEYS:
+            value = item.metadata.get(key)
+            if isinstance(value, str) and _CHUNK_ID_RE.fullmatch(value):
+                if value not in seen:
+                    seen.add(value)
+                    ids.append(value)
+                break
+        if len(ids) >= GRAPH_EXPANSION_MAX_SEEDS:
+            break
+    return ids
+
+
+def graph_evidence(expansion: Any) -> list[Evidence]:
+    """Turn a COA ``expand_chunks`` result into evidence items, one per fact.
+
+    A fact is a sentence COA extracted from one chunk of one document; it is
+    cited like a chunk, with the document as its source. Entities and related
+    chunk ids ride along in ``metadata`` so the trace can show how the fact was
+    reached; their text is never fabricated here.
+    """
+    if isinstance(expansion, str):
+        try:
+            expansion = json.loads(expansion)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(expansion, dict):
+        return []
+    facts = expansion.get("facts")
+    if not isinstance(facts, list):
+        return []
+    labels: dict[str, str] = {}
+    for entity in expansion.get("entities") or []:
+        if isinstance(entity, dict) and isinstance(entity.get("id"), str) and isinstance(entity.get("label"), str):
+            labels[entity["id"]] = entity["label"]
+    items: list[Evidence] = []
+    seen: set[str] = set()
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        text = fact.get("text")
+        fact_id = fact.get("id")
+        if not isinstance(text, str) or not text.strip() or not isinstance(fact_id, str) or fact_id in seen:
+            continue
+        seen.add(fact_id)
+        source = fact.get("sourceDocumentId")
+        items.append(
+            Evidence(
+                evidence_id=f"G{len(items) + 1}",
+                target_id=GRAPH_TARGET_ID,
+                target_kind=GRAPH_TARGET_KIND,
+                text=strip_hidden_model_characters(text).strip(),
+                source=source if isinstance(source, str) and source else GRAPH_TARGET_ID,
+                score=None,
+                source_retriever="expand_chunks",
+                metadata={
+                    "factId": fact_id,
+                    "chunkId": fact.get("chunkId"),
+                    "subjectId": fact.get("subjectId"),
+                    "subjectLabel": labels.get(str(fact.get("subjectId"))),
+                    "objectId": fact.get("objectId"),
+                    "objectLabel": labels.get(str(fact.get("objectId"))) if fact.get("objectId") else None,
+                },
+            )
+        )
+    return items
+
+
 def assemble_context(
     evidence: list[Evidence],
     *,

@@ -31,7 +31,15 @@ def _positive_int(name: str, default: int) -> int:
 
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _KB_ID_RE = re.compile(r"^[A-Za-z0-9]{10}$")
+# Knowledge Base data source ids share the KB id grammar.
+_DATA_SOURCE_ID_RE = _KB_ID_RE
+# AWS Region names: us-east-1, eu-central-1, us-gov-west-1, eusc-de-east-1.
+_REGION_RE = re.compile(r"^[a-z]{2,4}(-[a-z]+){1,2}-\d$")
 _TARGET_KINDS = {"MANAGED_KB", "GOVERNED_QUERY", "EXTERNAL_GRAPH", "COA_GRAPH"}
+_MANAGED_KB_FIELDS = {"kind", "knowledgeBaseIds", "maxAgentIterations", "region", "dataSourceIds", "reranking"}
+# AgenticRetrieveStream rerankingModelType without CUSTOM (which needs a model
+# ARN this configuration has no slot for).
+_RERANKING = {"MANAGED", "NONE"}
 
 
 def _source_targets() -> dict[str, SourceTargetConfig]:
@@ -52,9 +60,23 @@ def _source_targets() -> dict[str, SourceTargetConfig]:
         kind = item.get("kind")
         if kind not in _TARGET_KINDS:
             raise ValueError(f"Source target {target_id} has an invalid kind")
-        allowed_fields = {"kind", "knowledgeBaseIds", "maxAgentIterations"} if kind == "MANAGED_KB" else {"kind"}
+        allowed_fields = _MANAGED_KB_FIELDS if kind == "MANAGED_KB" else {"kind"}
         if extra := set(item) - allowed_fields:
             raise ValueError(f"Source target {target_id} has unsupported fields: {sorted(extra)}")
+
+        region = item.get("region")
+        if region is not None and (not isinstance(region, str) or not _REGION_RE.fullmatch(region)):
+            raise ValueError(f"Source target {target_id} region must be an AWS Region name")
+        data_source_ids = item.get("dataSourceIds", [])
+        if (
+            not isinstance(data_source_ids, list)
+            or len(data_source_ids) > 10
+            or any(not isinstance(ds_id, str) or not _DATA_SOURCE_ID_RE.fullmatch(ds_id) for ds_id in data_source_ids)
+        ):
+            raise ValueError(f"Source target {target_id} dataSourceIds must be 0-10 valid data source ids")
+        reranking = item.get("reranking", "MANAGED")
+        if reranking not in _RERANKING:
+            raise ValueError(f"Source target {target_id} reranking must be one of {sorted(_RERANKING)}")
 
         knowledge_base_ids = item.get("knowledgeBaseIds", [])
         if kind == "MANAGED_KB":
@@ -75,6 +97,9 @@ def _source_targets() -> dict[str, SourceTargetConfig]:
             kind=kind,
             knowledge_base_ids=tuple(knowledge_base_ids),
             max_agent_iterations=max_iterations,
+            region=region,
+            data_source_ids=tuple(data_source_ids),
+            reranking=reranking,
         )
     return targets
 
@@ -94,6 +119,9 @@ class OuterAgentConfig:
     group_claim_name: str
     max_evidence_items: int
     max_evidence_characters: int
+    # ADR 0012: ``SEED_DOCUMENTS`` | ``ENTITLED_DOCUMENTS`` | ``None`` (off).
+    graph_expansion_scope: str | None
+    graph_expansion_max_facts: int
 
     @classmethod
     def from_env(cls) -> OuterAgentConfig:
@@ -116,4 +144,29 @@ class OuterAgentConfig:
             group_claim_name=os.environ.get("GROUP_CLAIM_NAME", "groups"),
             max_evidence_items=_positive_int("MAX_EVIDENCE_ITEMS", 12),
             max_evidence_characters=_positive_int("MAX_EVIDENCE_CHARACTERS", 30000),
+            graph_expansion_scope=_graph_expansion_scope(),
+            graph_expansion_max_facts=_bounded_int("COA_GRAPH_EXPANSION_MAX_FACTS", 100, 1, 500),
         )
+
+
+_GRAPH_EXPANSION_SCOPES = {"SEED_DOCUMENTS", "ENTITLED_DOCUMENTS"}
+_GRAPH_EXPANSION_OFF = "OFF"
+
+
+def _graph_expansion_scope() -> str | None:
+    """``COA_GRAPH_EXPANSION_SCOPE``: a serve.smithy ``ExpansionScope`` value or ``OFF``; default ``SEED_DOCUMENTS``."""
+    raw = os.environ.get("COA_GRAPH_EXPANSION_SCOPE", "SEED_DOCUMENTS").strip().upper()
+    if raw == _GRAPH_EXPANSION_OFF:
+        return None
+    if raw not in _GRAPH_EXPANSION_SCOPES:
+        raise ValueError(
+            f"COA_GRAPH_EXPANSION_SCOPE must be one of {sorted(_GRAPH_EXPANSION_SCOPES)} or {_GRAPH_EXPANSION_OFF}"
+        )
+    return raw
+
+
+def _bounded_int(name: str, default: int, lo: int, hi: int) -> int:
+    value = _positive_int(name, default)
+    if not lo <= value <= hi:
+        raise ValueError(f"{name} must be an integer from {lo} to {hi}")
+    return value

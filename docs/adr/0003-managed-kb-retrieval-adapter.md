@@ -1,6 +1,12 @@
 # ADR 0003: Use Bedrock Knowledge Bases for document retrieval only
 
-- Status: Accepted for the integration PoC
+- Status: Accepted for the integration PoC; **superseded in part by ADR 0011**.
+  The per-document ACL consequence below is closed there, and the
+  deployment-level routing this ADR introduced (`DOCUMENT_RETRIEVER_BACKEND`,
+  `BEDROCK_KNOWLEDGE_BASE_ID`, `BEDROCK_KB_BY_NAMESPACE` and the matching SSM
+  config) is removed on this fork: a namespace's Knowledge Base is its
+  registered `BEDROCK_MANAGED_KB` source, resolved per request from the source
+  registry. The retriever protocol and the Bedrock implementation remain.
 - Date: 2026-09-21
 
 ## Decision

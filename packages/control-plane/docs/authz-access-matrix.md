@@ -115,6 +115,7 @@ here, so this table cannot silently drift out of sync with the service again.
 | `/namespaces/{namespaceId}/ontology/foundational/{key}/load` | POST | `manageOntology` | Ontology |
 | `/namespaces/{namespaceId}/proposals/{proposalId}/repair-datatypes` | POST | `manageOntology` | OntologyProposal |
 | `/namespaces/{namespaceId}/graph/traverse` | POST | `traverseGraph` | Namespace |
+| `/namespaces/{namespaceId}/graph/expand` | POST | `searchDocuments` | Namespace |
 | `/namespaces/{namespaceId}/graph/ontology-overview` | GET | `viewNamespace` | Ontology |
 | `/namespaces/{namespaceId}/graph/search` | GET | `viewNamespace` | Ontology |
 | `/namespaces/{namespaceId}/graph/class` | GET | `viewNamespace` | Ontology |

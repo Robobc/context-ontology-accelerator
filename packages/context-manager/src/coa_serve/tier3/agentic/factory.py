@@ -140,6 +140,7 @@ def build_tool_registry(
     vector_retriever: VectorRetriever | None = None,
     ontology_source: OntologySource | None = None,
     structured_query_tier: Any | None = None,
+    entitlement_gate: Any | None = None,
 ) -> ToolRegistry:
     """Build the internal :class:`ToolRegistry` with endpoint-gated tools (Req 12.4-12.6).
 
@@ -161,6 +162,9 @@ def build_tool_registry(
         structured_query_tier: Optional Tier-2 structured-query tier; when supplied
             the ``nl_to_sql`` / ``nl_to_sparql`` structured tools are registered so
             the planner can query databases (omitted when ``None``).
+        entitlement_gate: Optional shared ``DocumentEntitlementGate`` (fork): applied
+            by the strategy, graph and chunk tools for per-user Bedrock KB
+            namespaces. Built once in ``main.py``; ``None`` = off.
 
     Returns:
         The populated :class:`ToolRegistry`, never exposed outside the Serve_Layer
@@ -182,7 +186,9 @@ def build_tool_registry(
     # 15.0s" → scored no-progress → wasted escalation step). The controller still
     # enforces the real deadline, so this only stops the adapter from cutting the
     # tool short first.
-    lexical = build_lexical_retriever(config, timeout_s=float(config.deep_reasoning_per_tool_timeout_s))
+    lexical = build_lexical_retriever(
+        config, timeout_s=float(config.deep_reasoning_per_tool_timeout_s), entitlement_gate=entitlement_gate
+    )
     if lexical is not None:
         build_strategy_tools(registry, lexical)
     else:
@@ -196,7 +202,7 @@ def build_tool_registry(
 
     # ── Graph_Traversal_Tool — neptune (Req 2.3) ───────────────────────
     if has_neptune:
-        build_graph_tool(registry, _graph_store_uri(config.neptune_endpoint))
+        build_graph_tool(registry, _graph_store_uri(config.neptune_endpoint), entitlement_gate=entitlement_gate)
     else:
         logger.warning(
             "agentic_tool_omitted",
@@ -211,7 +217,9 @@ def build_tool_registry(
     # but NOT registered by default. Set AGENTIC_ENABLE_CHUNK_WINDOW=1 to re-enable
     # it for experiments.
     if has_neptune and os.getenv("AGENTIC_ENABLE_CHUNK_WINDOW", "") == "1":
-        build_chunk_expansion_tool(registry, _graph_store_uri(config.neptune_endpoint))
+        build_chunk_expansion_tool(
+            registry, _graph_store_uri(config.neptune_endpoint), entitlement_gate=entitlement_gate
+        )
     elif has_neptune:
         logger.info(
             "agentic_tool_disabled",
@@ -222,7 +230,7 @@ def build_tool_registry(
     # ── Vector_Search_Tool — opensearch + embed client (Req 2.3) ───────
     if has_opensearch and embed_client is not None:
         vr = vector_retriever if vector_retriever is not None else VectorRetriever(clients.vector)
-        build_vector_tool(registry, vr, embed_client)
+        build_vector_tool(registry, vr, embed_client, entitlement_gate=entitlement_gate)
     else:
         missing = [] if has_opensearch else ["opensearch_endpoint"]
         if embed_client is None:
@@ -276,6 +284,7 @@ def build_agentic_retriever(
     embed_client: LLMClient | None = None,
     structured_query_tier: Any | None = None,
     guardrail_id_provider: Callable[[], str] | None = None,
+    entitlement_gate: Any | None = None,
 ) -> AgenticRetriever:
     """Compose the :class:`AgenticRetriever` from the registry and its collaborators.
 
@@ -310,6 +319,7 @@ def build_agentic_retriever(
             each call; forwarded to the :class:`Synthesizer` and
             :class:`DecompositionPlanner` so an operator's SSM guardrail change
             reaches the warm agentic path without a redeploy.
+        entitlement_gate: Forwarded to :func:`build_tool_registry` (fork).
 
     Returns:
         The composed :class:`AgenticRetriever`.
@@ -324,7 +334,11 @@ def build_agentic_retriever(
         registry
         if registry is not None
         else build_tool_registry(
-            config, clients, vector_retriever=vector_retriever, structured_query_tier=structured_query_tier
+            config,
+            clients,
+            vector_retriever=vector_retriever,
+            structured_query_tier=structured_query_tier,
+            entitlement_gate=entitlement_gate,
         )
     )
     # The agentic path synthesizes over EVERY chunk its multi-step session gathered

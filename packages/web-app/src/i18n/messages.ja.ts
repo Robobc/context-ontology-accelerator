@@ -351,6 +351,7 @@ export const MESSAGES_JA = {
   "Custom connector": "カスタムコネクタ",
   Databricks: "Databricks",
   Upload: "アップロード",
+  "Bedrock Knowledge Base": "Bedrock ナレッジベース",
   "10 sources": "10 件",
   "20 sources": "20 件",
   "50 sources": "50 件",
@@ -731,6 +732,41 @@ export const MESSAGES_JA = {
   "Add prefix": "プレフィックスを追加",
   "Cross-account access (optional)": "クロスアカウントアクセス（任意）",
   "Role ARN": "ロール ARN",
+  // Fork (ADR 0011): Documents → Bedrock Knowledge Base tab.
+  "Knowledge base": "ナレッジベース",
+  "Knowledge base ID": "ナレッジベース ID",
+  "Knowledge base ID is required.": "ナレッジベース ID は必須です。",
+  "Must be a knowledge base ID: 10 upper-case letters or digits.":
+    "ナレッジベース ID は英大文字または数字 10 文字です。",
+  "An Amazon Bedrock Knowledge Base whose documents are already parsed, chunked and embedded. Nothing is copied: Context Ontology Accelerator reads the knowledge base's own chunks and extracts entities, facts and topics from them.":
+    "文書の解析、チャンク化、埋め込みが済んでいる Amazon Bedrock ナレッジベースです。文書はコピーされません。Context Ontology Accelerator はナレッジベース自身のチャンクを読み取り、そこからエンティティ、ファクト、トピックを抽出します。",
+  "The knowledge base keeps the vectors and the document permissions. Each question is answered from what the knowledge base returns for the asking user, and the knowledge graph is filtered to the same documents.":
+    "ベクトルと文書のアクセス権はナレッジベースが保持します。各質問は、質問したユーザーに対してナレッジベースが返す内容から回答され、ナレッジグラフも同じ文書に絞り込まれます。",
+  "Optional. The knowledge base's AWS Region; this deployment's Region when left blank.":
+    "任意。ナレッジベースの AWS リージョンです。空欄の場合はこのデプロイのリージョンになります。",
+  "Data source IDs": "データソース ID",
+  "Optional. Only these data sources of the knowledge base are read; all of them when left blank. Separate several with commas.":
+    "任意。ナレッジベースのうち指定したデータソースだけを読み取ります。空欄の場合はすべてが対象です。複数はカンマで区切ります。",
+  "Each data source ID is 10 upper-case letters or digits. Separate several with commas.":
+    "データソース ID は英大文字または数字 10 文字です。複数はカンマで区切ります。",
+  "Maximum {count} data source IDs.": "データソース ID は最大 {count} 件です。",
+  "Knowledge base access": "ナレッジベースへのアクセス",
+  "Knowledge base access role ARN": "ナレッジベースアクセスロール ARN",
+  "The IAM role Context Ontology Accelerator assumes to read the knowledge base. Required when the knowledge base is in another AWS account; leave blank when it is in this deployment's account. The role's name must start with {prefix}, its trust policy must name this deployment's extraction task role and serve runtime role and require the External ID below, and its permissions decide which knowledge bases this namespace can read.":
+    "Context Ontology Accelerator がナレッジベースを読み取るために引き受ける IAM ロールです。ナレッジベースが別の AWS アカウントにある場合は必須で、このデプロイのアカウントにある場合は空欄にします。ロール名は {prefix} で始める必要があり、信頼ポリシーではこのデプロイの抽出タスクロールとサーブランタイムロールを指定して下の External ID を要求し、その権限でこの名前空間が読み取れるナレッジベースが決まります。",
+  "The role is used twice: once by the extraction task, which reads every document to build the graph, and on every question by the serve runtime, which reads as the asking user.":
+    "このロールは 2 か所で使われます。グラフ構築のためにすべての文書を読み取る抽出タスクと、質問のたびに質問したユーザーとして読み取るサーブランタイムです。",
+  "(this deployment's)": "（このデプロイのもの）",
+  "(all)": "（すべて）",
+  "(this deployment's account)": "（このデプロイのアカウント）",
+  "Extraction identity": "抽出アイデンティティ",
+  "The account the knowledge graph is built as: the email of a user or service account the knowledge base owner has granted read access to every document the graph should cover. Required when the knowledge base enforces document permissions, because it returns nothing to a read without an identity; the graph will contain exactly what this account may read, and nothing else.":
+    "ナレッジグラフを構築する際のアカウントです。グラフに含めるすべての文書への読み取り権限をナレッジベース所有者が付与したユーザーまたはサービスアカウントのメールアドレスを指定します。ナレッジベースが文書のアクセス権を適用する場合は必須です（アイデンティティなしの読み取りには何も返されません）。グラフにはこのアカウントが読み取れるものだけが含まれます。",
+  "This identity decides the graph's coverage, not what anyone sees: every question is still answered as the asking user.":
+    "このアイデンティティはグラフの範囲を決めるもので、誰に何が見えるかは決めません。各質問は引き続き質問したユーザーとして回答されます。",
+  "Must be the email address of the account the knowledge base owner granted read access to.":
+    "ナレッジベース所有者が読み取り権限を付与したアカウントのメールアドレスを指定してください。",
+  "(none: non-ACL data sources only)": "（なし: ACL なしのデータソースのみ）",
   "Advanced options": "詳細オプション",
   "Tracks document versions in Neptune.":
     "Neptune で文書のバージョンを追跡します。",

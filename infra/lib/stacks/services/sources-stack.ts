@@ -2171,6 +2171,10 @@ export class SourcesStack extends SCLStack {
       environment: {
         BUCKET_NAME: sourcesBucket.bucketName,
         DOC_SOURCES_TABLE: this.sourcesTable.tableName,
+        // Fork: BEDROCK_MANAGED_KB sources assume a customer-supplied extraction
+        // role with the namespace's ExternalId, which coa_common derives from this
+        // prefix (`datasource_external_id`). Same value the sources API carries.
+        RESOURCE_PREFIX: this.prefixed(""),
         NEPTUNE_ENDPOINT: neptuneEndpoint,
         OPENSEARCH_ENDPOINT: opensearchEndpoint,
         BATCH_INFERENCE_ROLE_ARN: batchInferenceRole.roleArn,
@@ -2189,6 +2193,18 @@ export class SourcesStack extends SCLStack {
         BEDROCK_EMBED_MODEL_ID: embedModelId,
         BEDROCK_EMBED_DIMENSIONS: embedDimensions,
         BEDROCK_CHAT_MODEL_ID: chatModelId,
+        // Fork: cap on the extraction LLM's max_tokens (graph_build
+        // EXTRACTION_MAX_TOKENS, shipped default 16384). The extraction model is
+        // the chat model, and the Amazon Nova family rejects any request above
+        // 10000 output tokens with a ValidationException, which fails every
+        // document of every scan (first seen on the first document ingestion of
+        // a Nova deployment). Presence-checked so an unset knob changes nothing.
+        ...(this.node.tryGetContext("kg_build_extraction_max_tokens") !==
+          undefined && {
+          EXTRACTION_MAX_TOKENS: String(
+            this.node.tryGetContext("kg_build_extraction_max_tokens"),
+          ),
+        }),
         // Content screening: retrieval guardrail for ingestion-time ApplyGuardrail
         // (SDO-188). Empty string disables screening gracefully.
         RETRIEVAL_GUARDRAIL_ID: ssm.StringParameter.valueForStringParameter(
@@ -2297,6 +2313,34 @@ export class SourcesStack extends SCLStack {
         conditions: {
           StringEquals: { "iam:PassedToService": "bedrock.amazonaws.com" },
         },
+      }),
+    );
+    // ── Fork: BEDROCK_MANAGED_KB sources ──────────────────────────────
+    // The KG build reads a Bedrock Managed Knowledge Base's own chunks instead
+    // of staged files (INPUT_MODE=BEDROCK_KB). The KB normally lives in the
+    // customer's account, reached through the customer's
+    // `{prefix}-datasource-access-*` extraction role — the same grant shape,
+    // ExternalId guard and reserved-name bound as every other datasource assume
+    // (the task is the fourth consumer of this helper). The in-account grant
+    // below covers a KB in this deployment's own account, where no role hop is
+    // needed. `GetDocumentContent` is the optional completeness check and is
+    // authorised against `bedrock:Retrieve` as well; `ListKnowledgeBaseDocuments`
+    // is the document discovery for S3/custom data sources. Any Region of THIS
+    // account: the source's `region` member lets a same-account KB live in
+    // another Region (the first deployed run hit exactly that), and the
+    // account id is the boundary that matters here.
+    kgBuildTaskDef.taskRole.addToPrincipalPolicy(
+      this.assumeDatasourceAccessRoleStatement("AssumeRoleKbExtraction"),
+    );
+    kgBuildTaskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: "ReadBedrockKnowledgeBaseChunks",
+        actions: [
+          "bedrock:Retrieve",
+          "bedrock:GetDocumentContent",
+          "bedrock:ListKnowledgeBaseDocuments",
+        ],
+        resources: [`arn:aws:bedrock:*:${this.account}:knowledge-base/*`],
       }),
     );
 
@@ -2568,6 +2612,48 @@ export class SourcesStack extends SCLStack {
                 "$.extraction_config.delete_prev_versions",
               ),
             },
+            // ── Fork: BEDROCK_MANAGED_KB sources ──────────────────────────
+            // The trigger Lambda flattens the job's `bedrock_kb` object into
+            // these always-present string fields (STAGING / AOSS / "" for every
+            // other source), because stringAt fails the execution on a missing
+            // path — the same contract as PREFERRED_TOPICS above, with the same
+            // brief deploy-ordering window between this definition and the
+            // Lambda code. BEDROCK_KB mode reads the Knowledge Base's own chunks
+            // (no re-chunking, chunk ids `aws:<_chunk_id>`) and writes no
+            // embeddings (the KB already holds them). See graph_build.py and
+            // docs/adr/0011.
+            {
+              name: "INPUT_MODE",
+              value: sfn.JsonPath.stringAt("$.input_mode"),
+            },
+            {
+              name: "VECTOR_STORE_MODE",
+              value: sfn.JsonPath.stringAt("$.vector_store_mode"),
+            },
+            {
+              name: "BEDROCK_KB_ID",
+              value: sfn.JsonPath.stringAt("$.bedrock_kb_id"),
+            },
+            {
+              name: "BEDROCK_KB_DATA_SOURCE_IDS",
+              value: sfn.JsonPath.stringAt("$.bedrock_kb_data_source_ids"),
+            },
+            {
+              name: "BEDROCK_KB_REGION",
+              value: sfn.JsonPath.stringAt("$.bedrock_kb_region"),
+            },
+            {
+              name: "BEDROCK_KB_CROSS_ACCOUNT_ROLE_ARN",
+              value: sfn.JsonPath.stringAt(
+                "$.bedrock_kb_cross_account_role_arn",
+              ),
+            },
+            {
+              // The identity the scan reads the KB as (userContext.userId); an
+              // ACL-enabled data source returns nothing without one.
+              name: "BEDROCK_KB_EXTRACTION_USER_ID",
+              value: sfn.JsonPath.stringAt("$.bedrock_kb_extraction_user_id"),
+            },
           ],
         },
       ],
@@ -2678,16 +2764,50 @@ export class SourcesStack extends SCLStack {
       )
       .otherwise(kgBuildTask.next(docUpdateCompleted));
 
+    // Fork: a BEDROCK_MANAGED_KB job has nothing to preprocess — the Knowledge
+    // Base holds the parsed, chunked documents and the KG-build task reads them
+    // directly (INPUT_MODE=BEDROCK_KB). Preprocessing would list zero S3 objects
+    // and report the source empty, so it is bypassed. The Pass supplies the one
+    // `preprocessResult` field the build task still binds (STAGING_PREFIX, which
+    // graph_build requires non-empty and ignores in this mode), so the task
+    // definition stays shared with the staging path. `isPresent` first: an
+    // execution input from before the trigger emitted `input_mode` must take
+    // the staging branch, not fail the Choice.
+    const kbSkipPreprocess = new sfn.Pass(
+      this,
+      "SourcesBedrockKbSkipPreprocess",
+      {
+        parameters: {
+          staging_prefix: sfn.JsonPath.format(
+            "{}/staging/{}/",
+            sfn.JsonPath.stringAt("$.namespace_id"),
+            sfn.JsonPath.stringAt("$.doc_source_id"),
+          ),
+        },
+        resultPath: "$.preprocessResult",
+      },
+    );
+    const routeByInputMode = new sfn.Choice(this, "SourcesInputMode?")
+      .when(
+        sfn.Condition.and(
+          sfn.Condition.isPresent("$.input_mode"),
+          sfn.Condition.stringEquals("$.input_mode", "BEDROCK_KB"),
+        ),
+        kbSkipPreprocess.next(kgBuildTask),
+      )
+      .otherwise(
+        preprocessTask
+          .next(savePreprocessingResults)
+          .next(checkPreprocessResult),
+      );
+
     const docIngestionStateMachine = new sfn.StateMachine(
       this,
       "SourcesDocIngestionStateMachine",
       {
         stateMachineName: this.prefixed("sources-doc-ingestion-pipeline"),
         definitionBody: sfn.DefinitionBody.fromChainable(
-          docUpdateIngesting
-            .next(preprocessTask)
-            .next(savePreprocessingResults)
-            .next(checkPreprocessResult),
+          docUpdateIngesting.next(routeByInputMode),
         ),
         timeout: cdk.Duration.hours(24),
       },
@@ -4080,6 +4200,19 @@ export class SourcesStack extends SCLStack {
       parameterName: `${ssmPrefix}/sources/db-enrichment-role-arn`,
       stringValue: dbEnrichmentTaskDef.taskRole.roleArn,
       description: "Sources database enrichment ECS task role ARN",
+    });
+    // Fork (ADR 0011): the document KG-build task role is a principal a Knowledge
+    // Base owner's `{prefix}-datasource-access-*` role must trust (the other is
+    // serve's runtime role, `/{project}/{env}/serve/runtime-role-arn`). Published
+    // so the owner reads it rather than assembling it. ENV-SCOPED like that
+    // sibling and `db-connector-role-arn`: it becomes an IAM trust grant in another
+    // account, where a sibling environment overwriting it would have the owner
+    // trust the wrong environment's task (fail OPEN), not merely break this one.
+    new ssm.StringParameter(this, "SsmSourcesDocKgBuildRoleArn", {
+      parameterName: `${ssmPrefix}/${envName}/sources/doc-kg-build-role-arn`,
+      stringValue: kgBuildTaskDef.taskRole.roleArn,
+      description:
+        "Document KG-build ECS task role ARN — the extraction-time principal a Knowledge Base's datasource-access role must trust",
     });
 
     // ================================================================

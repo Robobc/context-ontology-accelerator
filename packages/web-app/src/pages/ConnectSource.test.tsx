@@ -1368,6 +1368,254 @@ describe("ConnectSource — Databricks SQL Warehouse", () => {
   }, 25000);
 });
 
+// Fork (ADR 0011): a Bedrock Managed Knowledge Base is registered as a DOCUMENTS
+// source on its own tab. It follows the Databricks contract for reaching a store
+// in another account — `crossAccountRoleArn` under the reserved name prefix, the
+// namespace-derived External ID shown read-only — with the role optional, as on
+// the Glue form, because a KB in this deployment's own account is read directly.
+describe("ConnectSource — Bedrock Knowledge Base (Documents tab)", () => {
+  const KB_ID = "ABCDEFGHIJ";
+  const KB_ROLE_ARN =
+    "arn:aws:iam::222222222222:role/coa-dev-datasource-access-kb";
+
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockCreateAsync.mockReset();
+    resetNamespaceQuery();
+  });
+
+  /** Select Documents, switch to the Knowledge Base tab, fill the required fields. */
+  async function fillKnowledgeBaseStep(
+    overrides: {
+      kbId?: string;
+      region?: string;
+      dataSourceIds?: string;
+      roleArn?: string;
+      extractionUserId?: string;
+    } = {},
+  ) {
+    await user.click(screen.getByLabelText("Documents"));
+    await clickNext();
+    await user.click(
+      screen.getByRole("tab", { name: "Bedrock Knowledge Base" }),
+    );
+    await user.type(
+      screen.getByPlaceholderText("e.g. knowledge-hub"),
+      "knowledge-hub",
+    );
+    await user.type(
+      screen.getByPlaceholderText(KB_ID),
+      overrides.kbId ?? KB_ID,
+    );
+    if (overrides.region)
+      await user.type(
+        screen.getByPlaceholderText("us-east-1"),
+        overrides.region,
+      );
+    if (overrides.dataSourceIds)
+      await user.type(
+        screen.getByPlaceholderText("KLMNOPQRST, UVWXYZ0123"),
+        overrides.dataSourceIds,
+      );
+    if (overrides.roleArn)
+      await user.type(
+        screen.getByPlaceholderText(KB_ROLE_ARN),
+        overrides.roleArn,
+      );
+    if (overrides.extractionUserId)
+      await user.type(
+        screen.getByPlaceholderText("coa-extraction@example.com"),
+        overrides.extractionUserId,
+      );
+  }
+
+  const submittedDocumentSource = () => {
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const body = mockCreate.mock.calls[0][0].body;
+    expect(body.sourceType).toBe("DOCUMENTS");
+    return body.documentSource;
+  };
+
+  it("offers the knowledge base as a Documents tab", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await user.click(screen.getByLabelText("Documents"));
+    await clickNext();
+
+    expect(
+      screen.getByRole("tab", { name: "Bedrock Knowledge Base" }),
+    ).toBeInTheDocument();
+  });
+
+  it("treats the knowledge base as a document source — no enrichment step, review follows", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep();
+    await clickNext();
+
+    expect(
+      screen.queryByText(/Enable AI metadata enrichment/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^connect source$/i }),
+    ).toBeInTheDocument();
+  }, 25000);
+
+  it("submits bedrockKnowledgeBaseConfiguration with the extraction config and nothing S3- or upload-shaped", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep({
+      region: "eu-central-1",
+      dataSourceIds: "KLMNOPQRST, UVWXYZ0123",
+      roleArn: KB_ROLE_ARN,
+      extractionUserId: "coa-extraction@example.com",
+    });
+    await clickNext();
+    await user.click(screen.getByRole("button", { name: /^connect source$/i }));
+
+    const documentSource = submittedDocumentSource();
+    expect(documentSource.name).toBe("knowledge-hub");
+    expect(documentSource.bedrockKnowledgeBaseConfiguration).toEqual({
+      knowledgeBaseId: KB_ID,
+      dataSourceIds: ["KLMNOPQRST", "UVWXYZ0123"],
+      region: "eu-central-1",
+      crossAccountRoleArn: KB_ROLE_ARN,
+      extractionUserId: "coa-extraction@example.com",
+    });
+    expect(documentSource.extractionConfig).toBeDefined();
+    // The backend 400s when any of these ride along: the configuration present
+    // selects the sub-type, and the KB is the document store.
+    expect(documentSource.sourceBucketArn).toBeUndefined();
+    expect(documentSource.s3Prefixes).toBeUndefined();
+    expect(documentSource.uploadId).toBeUndefined();
+    expect(documentSource.roleArn).toBeUndefined();
+    expect(mockUploadUrls).not.toHaveBeenCalled();
+  }, 25000);
+
+  it("leaves the optional fields out of the payload for a same-account knowledge base", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep();
+    await clickNext();
+    await user.click(screen.getByRole("button", { name: /^connect source$/i }));
+
+    expect(submittedDocumentSource().bedrockKnowledgeBaseConfiguration).toEqual(
+      {
+        knowledgeBaseId: KB_ID,
+        dataSourceIds: undefined,
+        region: undefined,
+        crossAccountRoleArn: undefined,
+      },
+    );
+  }, 25000);
+
+  it("shows the namespace-derived External ID read-only and never submits one", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep({ roleArn: KB_ROLE_ARN });
+
+    expect(screen.getByText(DERIVED_EXTERNAL_ID)).toBeInTheDocument();
+    expect(
+      screen.queryByDisplayValue(DERIVED_EXTERNAL_ID),
+    ).not.toBeInTheDocument();
+
+    await clickNext();
+    await user.click(screen.getByRole("button", { name: /^connect source$/i }));
+
+    expect(
+      submittedDocumentSource().bedrockKnowledgeBaseConfiguration.externalId,
+    ).toBeUndefined();
+  }, 25000);
+
+  it("names the required role prefix on the form, derived from the namespace", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep();
+
+    expect(
+      screen.getByText(
+        new RegExp(
+          `The role's name must start with '${DERIVED_RESOURCE_PREFIX}datasource-access-'`,
+        ),
+      ),
+    ).toBeInTheDocument();
+  }, 25000);
+
+  it("rejects a role under another deployment's prefix, naming this deployment's", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep({
+      roleArn: "arn:aws:iam::222222222222:role/coa-prod-datasource-access-kb",
+    });
+    await clickNext();
+
+    expect(
+      screen.getByText(
+        new RegExp(
+          `Role name must start with '${DERIVED_RESOURCE_PREFIX}datasource-access-'`,
+        ),
+      ),
+    ).toBeInTheDocument();
+    expect(mockCreate).not.toHaveBeenCalled();
+  }, 25000);
+
+  it("rejects a role ARN outside the reserved name shape", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep({
+      roleArn: "arn:aws:iam::222222222222:role/coa-dev-kb-reader",
+    });
+    await clickNext();
+
+    expect(
+      screen.getByText(/Role ARN must match pattern/i),
+    ).toBeInTheDocument();
+    expect(mockCreate).not.toHaveBeenCalled();
+  }, 25000);
+
+  it("blocks Next on a knowledge base ID that is not 10 upper-case alphanumerics", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep({ kbId: "abc-123" });
+    await clickNext();
+
+    expect(
+      screen.getByText(
+        "Must be a knowledge base ID: 10 upper-case letters or digits.",
+      ),
+    ).toBeInTheDocument();
+    expect(mockCreate).not.toHaveBeenCalled();
+  }, 25000);
+
+  it("blocks Next on a malformed data source ID in the list", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep({ dataSourceIds: "KLMNOPQRST, nope" });
+    await clickNext();
+
+    expect(
+      screen.getByText(
+        "Each data source ID is 10 upper-case letters or digits. Separate several with commas.",
+      ),
+    ).toBeInTheDocument();
+    expect(mockCreate).not.toHaveBeenCalled();
+  }, 25000);
+
+  it("summarises the knowledge base and the access role on the review step", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await fillKnowledgeBaseStep({ roleArn: KB_ROLE_ARN });
+    await clickNext();
+
+    expect(screen.getByText("knowledge-hub")).toBeInTheDocument();
+    expect(screen.getByText(KB_ID)).toBeInTheDocument();
+    expect(screen.getByText(KB_ROLE_ARN)).toBeInTheDocument();
+    // Blank optionals read as what the server will do, not as empty cells.
+    expect(screen.getByText("(this deployment's)")).toBeInTheDocument();
+    expect(screen.getByText("(all)")).toBeInTheDocument();
+  }, 25000);
+});
+
 describe("ConnectSource — server-formatted registration errors", () => {
   // Shaped like a real wiring verdict: the two causes STS cannot distinguish, and
   // the exact sts:ExternalId value to paste.

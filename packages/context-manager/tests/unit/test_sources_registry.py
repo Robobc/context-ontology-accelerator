@@ -521,26 +521,20 @@ class TestSourceComposition:
         assert comp.has_unstructured_source is False
 
     @pytest.mark.asyncio
-    async def test_database_plus_exact_external_kb_route_is_mixed(self):
-        """An external KB counts as documents without requiring a fake SRC# row."""
-        registry = self._make_registry_with_query([{"sourceType": "DATABASE", "sourceId": "s1"}])
-        registry._external_document_namespaces = frozenset({"ns-db"})
+    async def test_database_plus_bedrock_kb_source_is_mixed(self):
+        """Fork: a BEDROCK_MANAGED_KB source is a DOCUMENTS record like any other."""
+        registry = self._make_registry_with_query(
+            [
+                {"sourceType": "DATABASE", "sourceId": "s1"},
+                {"sourceType": "DOCUMENTS", "subType": "BEDROCK_MANAGED_KB", "sourceId": "kb1"},
+            ]
+        )
 
         comp = await registry.get_source_composition("ns-db")
 
         assert comp.has_structured_source is True
         assert comp.has_unstructured_source is True
         assert comp.unknown is False
-
-    @pytest.mark.asyncio
-    async def test_database_plus_external_default_is_mixed(self):
-        registry = self._make_registry_with_query([{"sourceType": "DATABASE", "sourceId": "s1"}])
-        registry._external_document_default = True
-
-        comp = await registry.get_source_composition("ns-db")
-
-        assert comp.has_structured_source is True
-        assert comp.has_unstructured_source is True
 
     @pytest.mark.asyncio
     async def test_mixed(self):
@@ -565,29 +559,6 @@ class TestSourceComposition:
         # Fail-open: unknown must present as has-everything so no tier is dropped.
         assert comp.has_structured_source is True
         assert comp.has_unstructured_source is True
-
-    @pytest.mark.asyncio
-    async def test_empty_namespace_with_exact_external_kb_is_document_only(self):
-        """An explicit KB route makes an empty SRC# result unambiguous."""
-        registry = self._make_registry_with_query([])
-        registry._external_document_namespaces = frozenset({"ns-kb"})
-
-        comp = await registry.get_source_composition("ns-kb")
-
-        assert comp.has_structured_source is False
-        assert comp.has_unstructured_source is True
-        assert comp.unknown is False
-
-    @pytest.mark.asyncio
-    async def test_empty_namespace_with_external_default_is_document_only(self):
-        registry = self._make_registry_with_query([])
-        registry._external_document_default = True
-
-        comp = await registry.get_source_composition("ns-kb")
-
-        assert comp.has_structured_source is False
-        assert comp.has_unstructured_source is True
-        assert comp.unknown is False
 
     @pytest.mark.asyncio
     async def test_not_available_is_unknown(self):

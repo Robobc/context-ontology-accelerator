@@ -91,11 +91,33 @@ export interface CustomDomainConfig {
 // ── SSM Config (JSON-serializable) ─────────────────────────────────
 
 export interface OuterAgentSourceTargetConfig {
-  readonly kind: "MANAGED_KB" | "GOVERNED_QUERY" | "EXTERNAL_GRAPH" | "COA_GRAPH";
+  readonly kind:
+    | "MANAGED_KB"
+    | "GOVERNED_QUERY"
+    | "EXTERNAL_GRAPH"
+    | "COA_GRAPH";
   /** Administrator-bound managed KBs. Required only for MANAGED_KB. */
   readonly knowledgeBaseIds?: string[];
   /** Maximum AgenticRetrieveStream planning/retrieval iterations. @default 5 */
   readonly maxAgentIterations?: number;
+  /**
+   * Region the knowledge bases live in (MANAGED_KB only). The runtime builds
+   * its Bedrock client there and the IAM grant names that Region's KB ARNs.
+   * @default the deployment Region
+   */
+  readonly region?: string;
+  /**
+   * Knowledge Base data source ids the retrieval is limited to (MANAGED_KB
+   * only, 0-10): the same `_data_source_id` scope a COA-registered
+   * `BEDROCK_MANAGED_KB` source carries. @default the whole knowledge base
+   */
+  readonly dataSourceIds?: string[];
+  /**
+   * AgenticRetrieveStream reranking (MANAGED_KB only). Bedrock rejects
+   * `MANAGED` for knowledge bases on a custom embedding model (managed-search
+   * KBs); set `NONE` for those. @default "MANAGED"
+   */
+  readonly reranking?: "MANAGED" | "NONE";
 }
 
 export interface OuterAgentConfig {
@@ -103,6 +125,16 @@ export interface OuterAgentConfig {
   readonly sourceTargets: Record<string, OuterAgentSourceTargetConfig>;
   readonly maxEvidenceItems?: number;
   readonly maxEvidenceCharacters?: number;
+  /**
+   * ADR 0012: how far COA `expand_chunks` may reach from the Knowledge Base
+   * chunks the agent retrieved. `SEED_DOCUMENTS` (default) stays within the
+   * documents of those chunks; `ENTITLED_DOCUMENTS` follows entities into
+   * every document the Knowledge Base shows the caller; `OFF` skips the step.
+   */
+  readonly graphExpansionScope?:
+    | "SEED_DOCUMENTS"
+    | "ENTITLED_DOCUMENTS"
+    | "OFF";
 }
 
 /**
@@ -181,16 +213,6 @@ export interface SsmConfig {
   /** Model IDs allowed for per-request override via options.modelId.
    *  When omitted or empty, any valid model ID is accepted. */
   readonly allowedOverrideModels?: string[];
-
-  /** Default passage-retrieval backend. OpenSearch remains the ontology vector
-   * index even when this is BEDROCK_KB. */
-  readonly documentRetrieverBackend?: "opensearch" | "bedrock-kb";
-
-  /** Default existing Bedrock Knowledge Base id for document retrieval. */
-  readonly bedrockKnowledgeBaseId?: string;
-
-  /** Namespace id to existing Bedrock Knowledge Base id overrides. */
-  readonly bedrockKnowledgeBaseByNamespace?: Record<string, string>;
 
   /** Generation backend; embeddings remain on Bedrock in both modes. */
   readonly generationBackend?: "bedrock" | "portkey";

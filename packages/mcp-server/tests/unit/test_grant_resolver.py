@@ -380,7 +380,7 @@ class TestCedarEvaluation:
         assert profile.namespace == "sales"
 
     def test_tool_cedar_action_mapping_complete(self):
-        """All 7 MCP tools have a Cedar action mapping."""
+        """Every MCP tool has a Cedar action mapping."""
         expected_tools = {
             "list_metrics",
             "describe_schema",
@@ -390,6 +390,7 @@ class TestCedarEvaluation:
             "translate_sql",
             "rag_retrieval",
             "graph_traversal",
+            "expand_chunks",
         }
         assert set(TOOL_CEDAR_ACTION.keys()) == expected_tools
 

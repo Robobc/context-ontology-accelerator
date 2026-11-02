@@ -13,10 +13,12 @@ import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { Construct } from "constructs";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
+import { RESERVED_DATASOURCE_ROLE_SEGMENT } from "../../aspects/reserved-role-prefix";
 import { resolveContext, namespaceTagKey } from "../../context";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { retainAgentCoreSecurityGroup } from "../../utils/agentcore-teardown";
 import { brandEnv } from "../../utils/brand-env";
+import { assumeDatasourceAccessRoleStatement } from "../../utils/datasource-assume";
 import { parseEcrImageUri } from "../../utils/ecr-utils";
 import { bundlePython } from "../../utils/python-bundling";
 import { fromRoot, Paths } from "../../paths";
@@ -84,15 +86,6 @@ export interface ServeStackProps extends cdk.StackProps {
   /** Comma-separated list of model IDs allowed for per-request override.
    *  When omitted, any valid model ID is accepted (open by default). */
   readonly allowedOverrideModels?: string[];
-
-  /** Default document retrieval backend. */
-  readonly documentRetrieverBackend?: "opensearch" | "bedrock-kb";
-
-  /** Existing Bedrock Knowledge Base used as the default document backend. */
-  readonly bedrockKnowledgeBaseId?: string;
-
-  /** Per-namespace existing Bedrock Knowledge Base overrides. */
-  readonly bedrockKnowledgeBaseByNamespace?: Record<string, string>;
 
   /** Generation backend; embeddings continue to use Bedrock. */
   readonly generationBackend?: "bedrock" | "portkey";
@@ -720,17 +713,11 @@ export class ServeStack extends SCLStack {
           ...(props.allowedOverrideModels?.length && {
             ALLOWED_OVERRIDE_MODELS: props.allowedOverrideModels.join(","),
           }),
-          DOCUMENT_RETRIEVER_BACKEND:
-            props.documentRetrieverBackend ?? "opensearch",
-          ...(props.bedrockKnowledgeBaseId && {
-            BEDROCK_KNOWLEDGE_BASE_ID: props.bedrockKnowledgeBaseId,
-          }),
-          ...(props.bedrockKnowledgeBaseByNamespace &&
-            Object.keys(props.bedrockKnowledgeBaseByNamespace).length && {
-              BEDROCK_KB_BY_NAMESPACE: JSON.stringify(
-                props.bedrockKnowledgeBaseByNamespace,
-              ),
-            }),
+          // Fork: `{prefix}-{env}-`, the ExternalId derivation input
+          // (`datasource_external_id`) for assuming a BEDROCK_MANAGED_KB source's
+          // cross-account role. Same value the sources stack hands its consumers;
+          // the runtime refuses to default it, see `require_resource_prefix`.
+          RESOURCE_PREFIX: this.prefixed(""),
           GENERATION_BACKEND: props.generationBackend ?? "bedrock",
           ...(props.portkeyBaseUrl && {
             PORTKEY_BASE_URL: props.portkeyBaseUrl,
@@ -764,25 +751,32 @@ export class ServeStack extends SCLStack {
         }),
       );
 
-      const knowledgeBaseIds = Array.from(
-        new Set(
-          [
-            props.bedrockKnowledgeBaseId,
-            ...Object.values(props.bedrockKnowledgeBaseByNamespace ?? {}),
-          ].filter((id): id is string => Boolean(id)),
+      // ── Fork: BEDROCK_MANAGED_KB sources ──────────────────────────────
+      // A namespace that registered a Bedrock Managed Knowledge Base as a
+      // document source is served from it: per-user `Retrieve` for Tier-3 and
+      // one `Retrieve` per document for the entitlement gate's probe. The KB
+      // normally lives in the customer's account, reached through the source's
+      // `{prefix}-datasource-access-*` role with the namespace ExternalId, the
+      // same grant shape, guard and reserved-name bound as the sources stack's
+      // four consumers (this runtime is the fifth). The in-account grant covers
+      // a KB in this deployment's own account, where no role hop is needed;
+      // which KBs that reaches is decided per namespace by the source registry,
+      // and what each user sees by the KB's own ACL (`userContext`).
+      runtime.addToRolePolicy(
+        assumeDatasourceAccessRoleStatement(
+          this.prefixed(RESERVED_DATASOURCE_ROLE_SEGMENT),
+          "AssumeRoleKbRetrieval",
         ),
       );
-      if (knowledgeBaseIds.length) {
-        runtime.addToRolePolicy(
-          new iam.PolicyStatement({
-            actions: ["bedrock:Retrieve"],
-            resources: knowledgeBaseIds.map(
-              (id) =>
-                `arn:aws:bedrock:${region}:${account}:knowledge-base/${id}`,
-            ),
-          }),
-        );
-      }
+      // Any Region of this account: a same-account KB may live in another
+      // Region (the source's `region` member), and the account is the boundary.
+      runtime.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: "RetrieveBedrockKnowledgeBase",
+          actions: ["bedrock:Retrieve"],
+          resources: [`arn:aws:bedrock:*:${account}:knowledge-base/*`],
+        }),
+      );
       if (props.portkeySecretArn) {
         secretsmanager.Secret.fromSecretCompleteArn(
           this,

@@ -1028,6 +1028,182 @@ operation GraphTraverse {
     ]
 }
 
+// ── GraphExpandChunks ────────────────────────────────────────────────────────
+/// Expand the document knowledge graph outward from Knowledge Base chunks the
+/// caller has already retrieved. Each Bedrock Knowledge Base `_chunk_id` is
+/// mapped to its graph node; the response carries the facts and entities
+/// extracted from those chunks and, through the entities, the facts and chunks
+/// of other documents that mention them. Everything returned is confined to
+/// documents the caller may read: the seed chunks are verified against the
+/// Knowledge Base under the caller's identity (a chunk the caller could not
+/// retrieve is not expanded), and the expansion is cut to the seed documents by
+/// default or, with `scope: ENTITLED_DOCUMENTS`, to every document the Knowledge
+/// Base shows this caller. Withheld items are reported as counts only; their
+/// contents and identifiers are not. Fetch chunk text from the Knowledge Base,
+/// never from this operation. A namespace whose documents do not come from a
+/// Knowledge Base expands nothing.
+@http(method: "POST", uri: "/namespaces/{namespaceId}/graph/expand")
+operation GraphExpandChunks {
+    input := {
+        @required
+        @httpLabel
+        namespaceId: Uuid
+
+        /// Knowledge Base chunk identifiers (`_chunk_id` as returned by
+        /// Retrieve) to expand from.
+        @required
+        chunkIds: KnowledgeBaseChunkIdList
+
+        /// Which documents the expansion may reach. Defaults to `SEED_DOCUMENTS`.
+        scope: ExpansionScope
+
+        /// Maximum number of facts to return. Defaults to 100.
+        @range(min: 1, max: 500)
+        maxFacts: Integer
+    }
+
+    output := {
+        /// Entities that take part in the returned facts.
+        @required
+        entities: LexicalEntityList
+
+        /// Facts reached from the seed chunks, each with the chunk and document
+        /// it was extracted from.
+        @required
+        facts: LexicalFactList
+
+        /// Chunks of other documents the caller may read that mention a
+        /// returned entity. Fetch their text from the Knowledge Base; pass
+        /// their identifiers back to this operation to keep navigating.
+        @required
+        relatedChunks: RelatedChunkList
+
+        /// Counts of what was withheld.
+        @required
+        withheld: WithheldSummary
+
+        /// Step-by-step trace of the expansion.
+        @required
+        trace: TraceStepList
+    }
+
+    errors: [
+        ValidationError
+        NamespaceNotFoundError
+    ]
+}
+
+/// Bedrock Knowledge Base chunk identifiers.
+@length(min: 1, max: 50)
+list KnowledgeBaseChunkIdList {
+    member: KnowledgeBaseChunkId
+}
+
+/// A Bedrock Knowledge Base `_chunk_id`, as the Knowledge Base returns it in a
+/// Retrieve result's metadata.
+@length(min: 1, max: 256)
+@pattern("^[A-Za-z0-9._-]+$")
+string KnowledgeBaseChunkId
+
+/// Which documents a chunk expansion may reach.
+enum ExpansionScope {
+    /// Only the documents the seed chunks belong to.
+    SEED_DOCUMENTS = "SEED_DOCUMENTS"
+
+    /// Every document the Knowledge Base shows the caller. Each document
+    /// reached is checked against the Knowledge Base under the caller's
+    /// identity before anything from it is returned.
+    ENTITLED_DOCUMENTS = "ENTITLED_DOCUMENTS"
+}
+
+/// An entity extracted from documents, as stored in the lexical graph.
+structure LexicalEntity {
+    /// Graph identifier of the entity.
+    @required
+    id: String
+
+    /// Surface form the entity was extracted under.
+    @required
+    label: CustomerData
+
+    /// Classification the extractor assigned (for example `Project`).
+    class: String
+}
+
+list LexicalEntityList {
+    member: LexicalEntity
+}
+
+/// A fact extracted from one chunk: a subject entity, a predicate and an
+/// object entity or literal, kept as the extractor wrote it.
+structure LexicalFact {
+    /// Graph identifier of the fact.
+    @required
+    id: String
+
+    /// The fact as extracted (`<subject> <PREDICATE> <object>`).
+    @required
+    text: CustomerData
+
+    /// Graph identifier of the subject entity.
+    @required
+    subjectId: String
+
+    /// Graph identifier of the object entity; absent when the object is a
+    /// literal value.
+    objectId: String
+
+    /// Knowledge Base `_chunk_id` of the chunk the fact was extracted from.
+    @required
+    chunkId: KnowledgeBaseChunkId
+
+    /// Source URI of the document that chunk belongs to.
+    @required
+    sourceDocumentId: String
+}
+
+list LexicalFactList {
+    member: LexicalFact
+}
+
+/// A chunk of another document that mentions one of the returned entities.
+structure RelatedChunk {
+    /// Knowledge Base `_chunk_id` of the chunk.
+    @required
+    chunkId: KnowledgeBaseChunkId
+
+    /// Source URI of the document the chunk belongs to.
+    @required
+    sourceDocumentId: String
+
+    /// Graph identifiers of the returned entities this chunk mentions.
+    @required
+    entityIds: StringList
+}
+
+list RelatedChunkList {
+    member: RelatedChunk
+}
+
+/// Counts of items withheld from a chunk expansion. Items are withheld when
+/// they belong to a document the caller may not read, lie outside the
+/// requested scope, are unknown to the graph, or exceed `maxFacts`; the
+/// reasons are not distinguished, so a count never confirms that a document
+/// exists.
+structure WithheldSummary {
+    /// Seed chunks that were not expanded.
+    @required
+    seedChunks: Integer
+
+    /// Facts not returned.
+    @required
+    facts: Integer
+
+    /// Related chunks not returned.
+    @required
+    relatedChunks: Integer
+}
+
 // ── DescribeSchema ───────────────────────────────────────────────────────────
 /// Describe the namespace's queryable schema: classes and their properties
 /// across every ontology loaded into the namespace (induced, foundational,

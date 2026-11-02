@@ -41,6 +41,7 @@ const SOURCE_SUBTYPE_LABELS: Record<string, AppMessage> = {
   DATABRICKS_SQL_WAREHOUSE: "Databricks",
   S3: "S3",
   LOCAL_UPLOAD: "Upload",
+  BEDROCK_MANAGED_KB: "Bedrock Knowledge Base",
 };
 
 function sourceTypeLabel(
