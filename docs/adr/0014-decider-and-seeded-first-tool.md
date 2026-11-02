@@ -2,9 +2,22 @@
 
 ## Status
 
-Proposed, design only. Nothing in this ADR is implemented; it records the
-design agreed on 2026-11-02 so that the implementation can be reviewed against
-it. Follows ADR 0013, whose deployed A/B is the evidence this design answers.
+Proposed. Rollout step 1 is implemented on `feature/deep-reasoning-structured-first`
+(2026-11-02): the `Decider` protocol with the `off` and `llm` backends, the
+live SSM-backed settings provider, the `seeded` planner profile (D1, D2, D4),
+request-level `plannerProfile=seeded` and `deciderModelId`, the CDK and
+`deploy.sh` knobs, and the unit coverage listed under Verification. D3, the
+`check_answerable` operation and the labelled set are not yet implemented.
+Follows ADR 0013, whose deployed A/B is the evidence this design answers.
+
+One design change from the version first written: there is **no separate `jev`
+HTTP backend**. Syngenta routes all generation through Portkey (ADR 0002), and
+a Jev-class model would be reached the same way: a model id the gateway
+routes. The `llm` backend therefore takes any model id the deployment's
+generation client can address (Bedrock model id, or a Portkey model slug), and
+"use a Jev-class classifier" is a change of `modelId` in the SSM parameter, not
+a code path. A dedicated adapter would only be needed for a classifier with a
+non-chat API, which there is no reachable instance of today.
 
 ## Context
 
@@ -79,21 +92,44 @@ raises into the loop: a timeout, a parse failure or an unknown option returns an
 abstention (`option=""`, `confidence=0.0`), and every caller treats abstention
 as "do what you did before this ADR existed".
 
-Backends, selected by `DECIDER_BACKEND`:
+Backends, selected by the live `backend` setting:
 
 | Value | What runs | When to use it |
 |---|---|---|
-| `off` (**default**) | No decider is built. Every caller takes its pre-ADR path. | Default; nothing moves. |
-| `llm` | `LLMDecider` over the deployment's generation client (`LLMClient.converse`, so Bedrock *or* Portkey), `temperature=0`, a system prompt that permits only a JSON object `{"answers":[{"option":"…","confidence":0.0}]}`, options passed as a closed list, model `DECIDER_MODEL_ID` (default: the deployment's generation model, so no new model access is needed; Nova Micro / Lite or Claude Haiku are the intended cheap settings). On Bedrock, when the model supports forced tool use, the same class may send a `toolConfig` with `toolChoice={tool: decide}` so the shape is guaranteed rather than parsed; this is an optimisation behind `DECIDER_STRUCTURED_OUTPUT=auto|on|off`, never a requirement. | The baseline. What Syngenta would run. |
-| `jev` | `JevDecider`, an HTTP adapter speaking a Jev-class API (state + typed questions → typed answers), endpoint `DECIDER_ENDPOINT`, credential from `DECIDER_SECRET_ARN`, same `Decider` surface. | Only when a Jev-class model is reachable from inside the deployment's trust boundary (for example once such a model is available on Bedrock or a private endpoint). Shipped as an adapter with a contract test against a recorded fixture, not exercised against a live third-party service from this repository. |
+| `off` (**default**) | Nothing is called; every question is an abstention and every caller takes its pre-ADR path. | Default; nothing moves. |
+| `llm` | `LLMDecider` over the deployment's generation client (`LLMClient.converse`, so Bedrock *or* Portkey), `temperature=0`, `max_tokens=512`, a system prompt that permits only `{"answers":[{"id":"q1","option":"…","confidence":0.0}]}`, options passed as a closed list and validated on the way back (an option outside the list is an abstention). `modelId` names the model: empty means the generation client's own default (no new model access needed); a Bedrock id such as Nova Micro / Lite or Claude Haiku is the intended cheap setting; through Portkey it can be any model slug the gateway routes, a Jev-class classifier included. The guardrail id is read through the same live provider the planner uses and the user-derived state is guard-tagged. | The baseline. What Syngenta runs. |
 
-Shared knobs: `DECIDER_TIMEOUT_S` (default 3), `DECIDER_MIN_CONFIDENCE`
-(default 0.7; below it a choice is treated as an abstention),
-`DECIDER_MAX_STATE_CHARS` (default 6000). All exposed as CDK context
-(`decider_backend`, `decider_model_id`, …) and `SCL_DECIDER_*` in
-`scripts/deploy.sh`, following ADR 0013's knobs. `ServiceConfig` validates the
-backend name and falls back to `off` with a warning, as it does for the planner
-profile.
+Forced tool use on Bedrock Converse (so the JSON shape is guaranteed rather
+than parsed) was considered and left out of step 1: Portkey is the baseline
+route, the parser already treats any malformed reply as an abstention, and
+the small models tested emit the object reliably at temperature 0. It remains
+an optimisation to add behind a flag if parse failures show up in the trace.
+
+**Live settings, no redeploy.** The settings are read on every call from a
+provider, and the provider shipped is `DeciderConfigProvider`
+(`coa_serve/decider_config.py`), a sibling of the guardrail provider: it
+overlays ONE SSM parameter on the environment defaults on a 60 s TTL with
+last-known-good on failure:
+
+```
+<SSM_PREFIX>/deep-reasoning/decider    (String, JSON; every key optional)
+{"backend": "llm", "modelId": "amazon.nova-micro-v1:0",
+ "minConfidence": 0.7, "timeoutS": 3, "maxStateChars": 6000}
+```
+
+Switching the decider on, off, or onto another model (a Jev-class slug
+through Portkey, say) is one `aws ssm put-parameter`, effective on every warm
+instance within a minute, and an operator can see it took effect in the
+`decider_config_changed` log line and in the `decider` trace row, which names
+the backend and model each request ran with. The environment defaults
+(`DECIDER_BACKEND`, `DECIDER_MODEL_ID`, `DECIDER_MIN_CONFIDENCE`,
+`DECIDER_TIMEOUT_S`; CDK context `decider_backend`, `decider_model_id`;
+`SCL_DECIDER_BACKEND`, `SCL_DECIDER_MODEL_ID` in `scripts/deploy.sh`) only
+apply when the parameter does not exist, so a deployment that never creates it
+behaves exactly as its CDK context says. A parameter that is not valid JSON or
+names an unknown backend is logged and ignored, never trusted. A request may
+also pass `options.deciderModelId` to run one request on another model, which
+is how two models are compared on one image without touching the parameter.
 
 Observability: every decision records one trace step, `decider`, with
 `detail="<purpose>: <option> (<confidence>) via <backend> in <ms>"` and a
@@ -109,13 +145,14 @@ A third planner profile value, `seeded`, added to `PLANNER_PROFILES`
 everything `structured_first` does (modality rule v2 in the prompt, ontology
 pre-resolve) and adds:
 
-**D1. Modality per sub-question.** After `decompose` and before the fan-out,
-`AgenticRetriever.resolve` calls `decider.choose_many` once over all
-sub-questions (state = the original question, the sub-questions, the names of
-the registered-and-not-withheld tools, the catalog's table business names
-already available from the structured tier's retrieval context, and the
-pre-resolved ontology's class names, bounded by `DECIDER_MAX_STATE_CHARS`), one
-question per sub-question: *"Is this sub-question answered by a figure, count,
+**D1. Modality per sub-question.** After `decompose` and the ontology
+pre-resolve, before the fan-out, `AgenticRetriever.resolve` calls
+`decider.choose_many` once over all sub-questions (state = the original
+question, the numbered sub-questions, the structured tools registered and not
+withheld for this request, and the pre-resolved ontology's class names capped
+at 40, bounded by `maxStateChars`; the catalog's table business names are not
+included in step 1 because the structured tier resolves them per call and the
+ontology classes already name the domain), one question per sub-question: *"Is this sub-question answered by a figure, count,
 amount, date or status in the relational tables (`tabular`), by what documents
 say or how entities relate across them (`document`), or does it need both
 (`mixed`)?"* Options: `tabular | document | mixed`. The result is written on
@@ -230,22 +267,25 @@ free; its job is to avoid the expensive call, not to be invisible.
 
 | Piece | Location |
 |---|---|
-| `Decider` protocol, `Choice`, `LLMDecider`, `JevDecider`, `build_decider(config, llm_client)` | `packages/context-manager/src/coa_serve/tier3/agentic/decider.py` |
-| Config + env parsing (`decider_backend`, `decider_model_id`, `decider_endpoint`, `decider_secret_arn`, `decider_timeout_s`, `decider_min_confidence`, `decider_structured_output`, `decider_entitlement_gate`) | `coa_serve/config.py`; CDK `infra/lib/stacks/services/serve-stack.ts`; `scripts/deploy.sh` |
-| `SubQuestion.modality`, `.modality_confidence`; `ToolResult.withheld` | `tier3/agentic/models.py`, `tier3/agentic/tools/base.py` |
-| D1 call site | `AgenticRetriever.resolve`, after `answer_language`, before `_preresolve_ontology` |
-| D2 seed, D3 stop | `ReasoningController.run_subquestion` |
-| `seeded` profile | `tier3/agentic/planner.py` (`PLANNER_PROFILES`), `models.py` validator, mcp `PlannerProfileLiteral` |
-| `CheckAnswerable` | Smithy model under `smithy/`, handler `coa_serve/check_answerable.py`, REST route via generated OpenAPI, MCP tool in `coa_mcp/server.py` + `tools/discovery.py` |
+| `Decider` protocol, `Choice`, `DeciderSettings`, `LLMDecider`, `parse_answers`, `modality_questions`, `modality_state` | `packages/context-manager/src/coa_serve/tier3/agentic/decider.py` |
+| Live settings: `DeciderConfigProvider`, `settings_from_json`, `build_decider_config_provider` | `coa_serve/decider_config.py` (wired and primed in `main.py` beside the guardrail provider) |
+| Env defaults (`decider_backend`, `decider_model_id`, `decider_min_confidence`, `decider_timeout_s`) | `coa_serve/config.py`; CDK `infra/lib/stacks/services/serve-stack.ts`; `scripts/deploy.sh` |
+| `SubQuestion.modality`, `.modality_confidence`, `.seed_tool` | `tier3/agentic/models.py` |
+| D1 call site (`_tag_modality`) | `AgenticRetriever.resolve`, after `_preresolve_ontology`, before the fan-out |
+| D2 seed | `ReasoningController.run_subquestion`, first iteration |
+| `seeded` profile | `tier3/agentic/planner.py` (`PLANNER_PROFILES`), `coa_serve/models.py` validator (+ `deciderModelId`), mcp `PlannerProfileLiteral` |
+| D3 (`ToolResult.withheld`, entitlement-aware stop) | not yet implemented: `tier3/agentic/tools/base.py`, `graph_tool.py`, controller no-progress handling |
+| `CheckAnswerable` | not yet implemented: Smithy model under `smithy/`, handler `coa_serve/check_answerable.py`, REST route via generated OpenAPI, MCP tool in `coa_mcp/server.py` + `tools/discovery.py` |
 
 ### 5. Rollout
 
-1. `Decider` + `llm` backend + D1/D2/D4 + `seeded` profile, unit-tested with a
-   scripted decider (the same double pattern as `ScriptedPlanner`), including
-   the ADR 0013 regression pair extended with a third arm: `seeded` calls
-   `nl_to_sql` with the sub-question verbatim as step 1 and never calls the
-   planner for it. Deploy to dev with `DECIDER_BACKEND=llm`,
-   `DECIDER_MODEL_ID` = Nova Micro, profile default still `legacy`.
+1. **Done.** `Decider` + `llm` backend + live settings + D1/D2/D4 + `seeded`
+   profile, unit-tested with a scripted decider (the same double pattern as
+   `ScriptedPlanner`), including the ADR 0013 regression pair extended with a
+   third arm: `seeded` calls `nl_to_sql` with the sub-question verbatim as step
+   1 and never consults the planner for it. Deploy to dev with the stack
+   defaults (`off`, profile `legacy`), then switch the decider on through the
+   SSM parameter and run the A/B with `plannerProfile=seeded` per request.
 2. Labelled set: 50–150 sub-questions over `ppm360-poc` and `ppm360-kb-test`
    with gold modality and gold first tool (the harness the literature brief
    asked for), half of them paraphrases. Report decider accuracy and confusion
@@ -273,10 +313,13 @@ free; its job is to avoid the expensive call, not to be invisible.
   Bedrock, but Amazon-internal, experimental ("do not build production-critical
   decision paths on it yet"), and coupled to Strands. COA is upstream open
   source; a 60-line protocol with the same shape is the better dependency.
-- **Use TypeSafe's Jev directly.** Not reachable from a customer deployment
-  without data egress to a third party; not approved internally; not on
-  Bedrock. The `jev` backend exists so the day one is reachable the change is a
-  configuration value.
+- **Use TypeSafe's Jev directly, or ship a dedicated `jev` HTTP adapter.** Jev
+  is not reachable from a customer deployment without data egress to a third
+  party, is not approved internally, and is not on Bedrock. When a Jev-class
+  model is reachable it will be through the gateway the deployment already
+  trusts (Portkey for Syngenta), as a model id, so the swap is one
+  configuration value and no adapter is needed; one would be written only for
+  a classifier whose API is not chat-shaped.
 - **Seed every step from a plan (full ReWOO).** Brittle when observations
   disagree with the plan, as ReWOO itself notes. Seeding only the first tool
   keeps the reactive loop and the existing fallbacks.
@@ -284,9 +327,49 @@ free; its job is to avoid the expensive call, not to be invisible.
   numbers; the fork rule and ADR 0013's lesson (prompt behaviour varies with
   wording and model) both argue for opt-in until measured.
 
+## Verification
+
+### Unit (step 1, `test_tier3_agentic_decider.py` 45 tests, `test_tier3_agentic_planner_profile.py` +24)
+
+- `parse_answers`: valid answers, case-insensitive canonical options, an option
+  outside the list, a missing answer, fenced/prose-wrapped JSON, confidence
+  clamping and non-numeric confidence, positional answers without ids, garbage.
+- `DeciderSettings`: default off, unknown backend → off, clamps;
+  `settings_from_json` overlays defaults and rejects an unusable document.
+- `LLMDecider`: implements the protocol; `off` abstains without a model call;
+  call shape (state, closed options, `temperature=0`, model id, guard content,
+  classifier system prompt); request model id outranks settings; empty model id
+  means client default; state truncation; timeout, model error and guardrail
+  block all abstain; a failing settings provider reads as `off`; settings are
+  read live per call.
+- `DeciderConfigProvider`: parameter path; absent parameter → env defaults;
+  overlay; bad first read → env defaults; unknown backend ignored; SSM failure →
+  last-known-good with immediate retry; TTL caching and refresh; `prime`.
+- `seeded` profile over the real retriever, controller and registry: one
+  batched decider call guard-tagged with the question; the tabular
+  sub-question's first step is `nl_to_sql` with its text verbatim and the
+  planner is not consulted for it; `decider` and `subquestion_modality` trace
+  rows; pre-resolve still runs; backend `off` → `decider skipped`, behaves as
+  `structured_first`; no decider wired → skipped; abstention → `failed`, no
+  seed; low confidence → tagged, not seeded; `mixed` → seeded; structured
+  tools withheld → no seed and the state says so; `options.deciderModelId`
+  forwarded and named in the trace; `legacy` and `structured_first` never
+  consult the decider; the controller ignores a seed for an unregistered tool;
+  the ADR 0013 regression pair's third arm (`max_steps=3`, a planner that never
+  proposes SQL: the figure comes from the seed alone, `sufficiency_satisfied`).
+- Request model: `seeded` accepted, profiles pinned to `PLANNER_PROFILES`,
+  `deciderModelId` validation; `ServiceConfig` env parsing and fallbacks;
+  factory wiring with and without a live provider; MCP forwards `seeded`; CDK
+  defaults (`DECIDER_BACKEND=off`, no empty `DECIDER_MODEL_ID`) and overrides.
+- `make lint` green; 3,662 context-manager unit tests pass.
+
+### Deployed A/B
+
+Pending (rollout step 1 deploy + step 2 labelled set).
+
 ## Consequences
 
-- Defaults unchanged: `DECIDER_BACKEND=off`, `plannerProfile=legacy`. The new
+- Defaults unchanged: `backend=off`, `plannerProfile=legacy`. The new
   dataclass fields default to empty/zero and no existing code reads them.
 - Under `seeded`, a tabular sub-question's first step costs one tool call and
   no planner inference, with the sub-question text intact. The two failure modes

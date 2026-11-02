@@ -202,6 +202,7 @@ figure it was asked for. `plannerProfile` selects how the planner routes:
 |---|---|
 | `legacy` | The graph-first standing strategy for every sub-question. **The default when the deployment sets nothing.** Byte for byte the planner prompt that shipped before this option existed. |
 | `structured_first` | The planner decides each sub-question's **modality** first: a tabular sub-question (a figure, amount, count, total, status held in the namespace's tables) goes straight to `nl_to_sql` or `nl_to_sparql`; a document or relationship sub-question follows the graph strategy. The namespace ontology is resolved **once, before the sub-questions fan out**, at zero step cost, instead of once per sub-question inside the budget. |
+| `seeded` | `structured_first`, plus a typed **Decider** (a small, cheap classifier call) tags each sub-question `tabular`, `document` or `mixed` with a confidence, and the controller makes `nl_to_sql` the **first step** of a tabular sub-question with the sub-question text **verbatim**, without consulting the planner. The planner resumes from step 2 (or at once when the tool returned no rows). Requires the deployment's Decider to be on (see below); otherwise it behaves as `structured_first` and the trace says so (`decider skipped`). |
 
 ```json
 { "query": "What is the full cost of project X, and what did its latest stage-gate memo decide?",
@@ -215,12 +216,25 @@ Notes:
   deployment moves nothing.
 - **Ignored in `standard` mode.** It is a Deep Reasoning planner setting; the
   cascade never reads it.
-- **Validation.** Any value other than `legacy` or `structured_first` is
-  rejected with **400**.
+- **Validation.** Any value other than `legacy`, `structured_first` or `seeded`
+  is rejected with **400**.
 - **Observable in the trace.** A non-default profile records a `planner_profile`
   step, and the pre-resolve records `ontology_preresolved` with `success`,
   `skipped` (tool withheld or no ontology) or `failed` (the loop proceeds as
-  before; the answer is flagged partial).
+  before; the answer is flagged partial). Under `seeded`, one `decider` row
+  reports every sub-question's tag, confidence and whether it was seeded, plus
+  the backend and model it ran on (`modality: q1=tabular(0.93) seed,
+  q2=document(0.88) via llm/amazon.nova-micro-v1:0`), one `subquestion_modality`
+  row per tagged sub-question, and the seeded step appears as
+  `next_step_select … nl_to_sql: seeded (modality tabular 0.93)`.
+- **`deciderModelId`** (with `seeded`) runs this request's Decider on another
+  model than the deployment's current setting (a non-empty string, at most 200
+  characters; a Bedrock model id, or through Portkey any model slug the gateway
+  routes), which is how two classifier models are compared on one image. The
+  trace's `decider` row names the model used.
+- **The Decider is a deployment setting, changeable live.** It is off unless the
+  operator turns it on; `seeded` degrades to `structured_first` while it is off.
+  See the deployment guide for the SSM parameter.
 - Source-composition gating still applies: on a document-only namespace the
   structured tools are withheld and the modality rule has nothing to route to.
 - Same surfaces as `mode`: REST / streaming `options.plannerProfile`, and the

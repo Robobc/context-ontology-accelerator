@@ -611,7 +611,33 @@ are normally managed by the stack rather than set manually.
 The gather loop is also bounded by **step** caps, not just the time budget, and those are the cheaper lever when answers are slow but not improving:
 
 - `DEEP_REASONING_MAX_STEPS` (default **5**) — the maximum reasoning steps per **request**, shared by every sub-question and exploration branch the question decomposes into (the cap is aggregate, not per sub-question). Each step is a serial planner LLM round-trip plus one tool call, so fewer steps means proportionally less latency. Lowered from 10: in the COA-100 runs the back half of a 10-step loop rarely improved accuracy but did inflate latency (serial round-trips), and a longer context tended to dilute rather than help. A mixed question that decomposes into two sub-questions has two or three steps each under the default; see the planner profile below before raising it. Exposed as CDK context `deep_reasoning_max_steps` (`SCL_DEEP_REASONING_MAX_STEPS=8 make deploy-dev`).
-- `DEEP_REASONING_PLANNER_PROFILE` (default **`legacy`**) — how the planner picks a sub-question's first tool. `legacy` is the graph-first standing strategy (ontology lookup, entity anchoring, traversal) for every sub-question. `structured_first` makes the planner decide the sub-question's **modality** first, so a tabular sub-question (a figure, count, amount, status that lives in the namespace's tables) goes straight to `nl_to_sql` / `nl_to_sparql`, and resolves the namespace ontology once before the sub-questions fan out instead of once per sub-question inside the step budget. A request may override the deployment default with `options.plannerProfile`. CDK context `deep_reasoning_planner_profile` (`SCL_DEEP_REASONING_PLANNER_PROFILE=structured_first make deploy-dev`); an unknown value falls back to `legacy` with a warning. See ADR 0013.
+- `DEEP_REASONING_PLANNER_PROFILE` (default **`legacy`**) — how the planner picks a sub-question's first tool. `legacy` is the graph-first standing strategy (ontology lookup, entity anchoring, traversal) for every sub-question. `structured_first` makes the planner decide the sub-question's **modality** first, so a tabular sub-question (a figure, count, amount, status that lives in the namespace's tables) goes straight to `nl_to_sql` / `nl_to_sparql`, and resolves the namespace ontology once before the sub-questions fan out instead of once per sub-question inside the step budget. `seeded` adds the Decider below: it tags each sub-question's modality and makes `nl_to_sql` the first step of tabular ones with the sub-question verbatim, no planner call. A request may override the deployment default with `options.plannerProfile`. CDK context `deep_reasoning_planner_profile` (`SCL_DEEP_REASONING_PLANNER_PROFILE=structured_first make deploy-dev`); an unknown value falls back to `legacy` with a warning. See ADR 0013 and ADR 0014.
+
+#### Deep-reasoning Decider (live, no redeploy)
+
+The `seeded` planner profile asks a **Decider**, a small classifier call over the deployment's generation client (Bedrock, or Portkey when `GENERATION_BACKEND=portkey`), to tag each sub-question `tabular` / `document` / `mixed` with a confidence. It is **off by default**: with the Decider off, `seeded` behaves exactly as `structured_first` and the request trace records `decider skipped`.
+
+Its settings are read live from **one SSM parameter** on a 60 s TTL, so you turn it on, off, or onto another model without redeploying:
+
+```bash
+# Turn the Decider on, on Nova Micro (every key is optional; omitted keys keep the environment defaults)
+aws ssm put-parameter --type String --overwrite \
+  --name "${SSM_PREFIX:-/coa}/deep-reasoning/decider" \
+  --value '{"backend": "llm", "modelId": "amazon.nova-micro-v1:0", "minConfidence": 0.7, "timeoutS": 3}'
+
+# Point it at a classifier the Portkey gateway routes (the model slug is whatever Portkey knows it as)
+aws ssm put-parameter --type String --overwrite \
+  --name "${SSM_PREFIX:-/coa}/deep-reasoning/decider" \
+  --value '{"backend": "llm", "modelId": "<portkey-model-slug>"}'
+
+# Turn it off again
+aws ssm put-parameter --type String --overwrite \
+  --name "${SSM_PREFIX:-/coa}/deep-reasoning/decider" --value '{"backend": "off"}'
+```
+
+Keys: `backend` (`off` | `llm`), `modelId` (empty = the generation client's default model), `minConfidence` (0–1, default 0.7; a tag below it is not acted on), `timeoutS` (default 3; a late answer is an abstention, never an error), `maxStateChars` (default 6000). A parameter that is not valid JSON or names an unknown backend is logged (`decider_config_refresh_failed`) and ignored: the previous settings stay in force, or the environment defaults when there were none. The change shows up as `decider_config_changed` in the serve log within the TTL, and every deep-reasoning request's `decider` trace row names the backend and model it actually ran with. The serve runtime role already reads `${SSM_PREFIX}/*`, so no IAM change is needed.
+
+Environment defaults, used only while the parameter does not exist: `DECIDER_BACKEND` (default `off`), `DECIDER_MODEL_ID`, `DECIDER_MIN_CONFIDENCE`, `DECIDER_TIMEOUT_S`; CDK context `decider_backend` / `decider_model_id` (`SCL_DECIDER_BACKEND=llm SCL_DECIDER_MODEL_ID=amazon.nova-micro-v1:0 make deploy-dev`). A request may also pass `options.deciderModelId` to run that one request's Decider on another model, which is the quickest way to compare two classifier models on one deployment. Through Portkey the model must be one the gateway's configuration routes; that routing is configured in Portkey, not in COA. See ADR 0014.
 - `DEEP_REASONING_MAX_NO_PROGRESS_STEPS` (default **2**) — consecutive no-progress steps tolerated before the loop stops with `no_new_information`. Lowered from 3 so a wandering loop stops quickly. `1` restores stop-on-first-miss.
 - `DEEP_REASONING_ONTOLOGY_TIMEOUT_S` (default **6**, floored at 1) — a fast-fail cap on a single graph-backed ontology lookup. The lookup is one preparatory step, so it must not swallow a large slice of the gather budget when Neptune is slow: the underlying graph client's own read-timeout × retry can otherwise stack to ~16 s per lookup. On timeout the ontology degrades to empty (the soft-prior traversal still runs) rather than starving the step budget. Raise it only if ontology lookups legitimately need longer on a very large namespace; it cannot be disabled.
 
