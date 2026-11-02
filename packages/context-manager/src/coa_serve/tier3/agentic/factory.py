@@ -285,6 +285,7 @@ def build_agentic_retriever(
     structured_query_tier: Any | None = None,
     guardrail_id_provider: Callable[[], str] | None = None,
     entitlement_gate: Any | None = None,
+    decider_settings_provider: Callable[[], Any] | None = None,
 ) -> AgenticRetriever:
     """Compose the :class:`AgenticRetriever` from the registry and its collaborators.
 
@@ -320,6 +321,9 @@ def build_agentic_retriever(
             :class:`DecompositionPlanner` so an operator's SSM guardrail change
             reaches the warm agentic path without a redeploy.
         entitlement_gate: Forwarded to :func:`build_tool_registry` (fork).
+        decider_settings_provider: ADR 0014 — callable returning the Decider's
+            live :class:`DeciderSettings` (backend, model, threshold, timeout) on
+            each call; ``None`` uses the environment defaults from ``config``.
 
     Returns:
         The composed :class:`AgenticRetriever`.
@@ -362,12 +366,32 @@ def build_agentic_retriever(
         ontology_edge_mode=config.deep_reasoning_ontology_edge_mode,
     )
 
+    # ADR 0014: the typed Decider over the same generation client (Bedrock or
+    # Portkey). Its backend/model/threshold are read from ``decider_settings_provider``
+    # on every call, so a live (SSM-backed) provider changes them without a redeploy;
+    # the environment defaults from ``config`` are the fallback provider.
+    from .decider import DeciderSettings, LLMDecider
+
+    env_defaults = DeciderSettings(
+        backend=config.decider_backend,
+        model_id=config.decider_model_id,
+        min_confidence=config.decider_min_confidence,
+        timeout_s=config.decider_timeout_s,
+    ).normalised()
+    decider = LLMDecider(
+        clients.llm,
+        settings_provider=decider_settings_provider or (lambda: env_defaults),
+        guardrail_id_provider=guardrail_id_provider,
+    )
+
     logger.info(
         "agentic_retriever_built",
         tier3_strategy=config.tier3_strategy,
         tools=reg.names(),
         time_budget_s=budget.time_budget_s,
         max_steps=budget.max_steps,
+        planner_profile=config.deep_reasoning_planner_profile,
+        decider_backend=decider.settings().backend,
     )
     return AgenticRetriever(
         reg,
@@ -377,6 +401,7 @@ def build_agentic_retriever(
         budget,
         embed_client=embed_client if embed_client is not None else clients.llm,
         planner_profile=config.deep_reasoning_planner_profile,
+        decider=decider,
     )
 
 

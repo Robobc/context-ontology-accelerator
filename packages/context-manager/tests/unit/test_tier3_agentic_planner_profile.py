@@ -40,6 +40,7 @@ import pytest
 from coa_serve.tier3.agentic import AgenticBudgetConfig
 from coa_serve.tier3.agentic.context import AccumulatedContext
 from coa_serve.tier3.agentic.controller import ReasoningController
+from coa_serve.tier3.agentic.decider import ABSTAIN, Choice, DeciderSettings
 from coa_serve.tier3.agentic.models import PlannerDecision, StopReason, SubQuestion
 from coa_serve.tier3.agentic.planner import (
     _PROPOSE_SYSTEM,
@@ -227,7 +228,7 @@ class TestProposeSystemFor:
         assert system.endswith(_PROPOSE_SYSTEM[-80:])
 
     def test_profiles_set(self):
-        assert frozenset({"legacy", "structured_first"}) == PLANNER_PROFILES
+        assert frozenset({"legacy", "structured_first", "seeded"}) == PLANNER_PROFILES
 
 
 class _LLM:
@@ -539,3 +540,359 @@ class TestLazyImportInvariant:
         env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
         proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=False)
         assert proc.returncode == 0, proc.stderr
+
+
+# ── seeded profile (ADR 0014): decider-tagged modality + seeded first tool ─────
+
+
+class ScriptedDecider:
+    """A :class:`Decider` double: fixed settings, scripted choices, recorded calls."""
+
+    def __init__(self, choices: list[Choice] | None = None, *, backend: str = "llm", min_confidence: float = 0.7):
+        self._choices = choices
+        self._settings = DeciderSettings(backend=backend, model_id="fake-model", min_confidence=min_confidence)
+        self.calls: list[dict] = []
+
+    def settings(self) -> DeciderSettings:
+        return self._settings
+
+    async def choose_many(self, *, state, questions, guard_content=None, model_id=None):
+        self.calls.append({"state": state, "n": len(questions), "guard": guard_content, "model_id": model_id})
+        if self._choices is None:
+            return [ABSTAIN] * len(questions)
+        return list(self._choices)
+
+
+def make_seeded_retriever(
+    *, planner, tools, sub_questions, decider, max_steps: int = 10, final_semantic_search: bool = False
+) -> AgenticRetriever:
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register(tool)
+    return AgenticRetriever(
+        registry=registry,
+        controller=ReasoningController(planner, per_tool_timeout_s=5.0),
+        decomposer=FakeDecomposer([SubQuestion(text=t) for t in sub_questions]),
+        synthesizer=FakeSynthesizer(),
+        budget=AgenticBudgetConfig(time_budget_s=300, max_steps=max_steps),
+        clock_source=FakeClockSource(),
+        final_semantic_search=final_semantic_search,
+        decider=decider,
+    )
+
+
+SEEDED = {"plannerProfile": "seeded"}
+TAG_TAB_DOC = [Choice("tabular", 0.93), Choice("document", 0.88)]
+
+
+@pytest.mark.unit
+class TestSeededProfile:
+    @pytest.mark.asyncio
+    async def test_tabular_subquestion_is_seeded_with_verbatim_text_and_no_planner_call(self):
+        tools = _mixed_tools()
+        planner = RecordingPlanner()
+        dec = ScriptedDecider(TAG_TAB_DOC)
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=planner, tools=list(tools.values()), sub_questions=[TABULAR_SQ, DOCUMENT_SQ], decider=dec
+        ).resolve("q", NS, trace=trace, options=SEEDED)
+        # One batched decider call over both sub-questions, guard-tagged with the question.
+        assert len(dec.calls) == 1 and dec.calls[0]["n"] == 2 and dec.calls[0]["guard"] == "q"
+        assert "nl_to_sql" in dec.calls[0]["state"] and TABULAR_SQ in dec.calls[0]["state"]
+        # The tabular sub-question's first step was nl_to_sql with its text verbatim.
+        assert [(c["namespace"], c["query"]) for c in tools["nl_to_sql"].calls] == [(NS, TABULAR_SQ)]
+        seeded = [s for s in steps(trace, "next_step_select") if "seeded" in str(s.detail)]
+        assert len(seeded) == 1 and "nl_to_sql: seeded (modality tabular 0.93)" in str(seeded[0].detail)
+        assert [s.status for s in steps(trace, "nl_to_sql")] == ["succeeded"]
+        # The planner was never asked about the tabular sub-question's first step; the
+        # document one went to the planner as usual (it proposes nothing → loop ends).
+        asked = [s for s in planner.seen]
+        assert all(s["profile"] == "seeded" for s in asked)
+        # Trace rows: decider success + one modality row per tagged sub-question.
+        dec_rows = steps(trace, "decider")
+        assert [s.status for s in dec_rows] == ["success"]
+        assert "q1=tabular(0.93) seed" in str(dec_rows[0].detail) and "q2=document(0.88)" in str(dec_rows[0].detail)
+        assert "via llm/fake-model" in str(dec_rows[0].detail)
+        modality_rows = steps(trace, "subquestion_modality")
+        assert len(modality_rows) == 2
+        assert "tabular (0.93), seed nl_to_sql" in str(modality_rows[0].detail)
+        # Pre-resolve still ran (seeded ⊇ structured_first).
+        assert [s.status for s in steps(trace, "ontology_preresolved")] == ["success"]
+
+    @pytest.mark.asyncio
+    async def test_backend_off_degrades_to_structured_first(self):
+        tools = _mixed_tools()
+        dec = ScriptedDecider(TAG_TAB_DOC, backend="off")
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=RecordingPlanner(), tools=list(tools.values()), sub_questions=[TABULAR_SQ], decider=dec
+        ).resolve("q", NS, trace=trace, options=SEEDED)
+        assert dec.calls == []
+        assert tools["nl_to_sql"].calls == []
+        rows = steps(trace, "decider")
+        assert [s.status for s in rows] == ["skipped"] and "backend off" in str(rows[0].detail)
+        assert [s.status for s in steps(trace, "ontology_preresolved")] == ["success"]
+
+    @pytest.mark.asyncio
+    async def test_no_decider_wired_is_skipped(self):
+        tools = _mixed_tools()
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=RecordingPlanner(), tools=list(tools.values()), sub_questions=[TABULAR_SQ], decider=None
+        ).resolve("q", NS, trace=trace, options=SEEDED)
+        assert [s.status for s in steps(trace, "decider")] == ["skipped"]
+        assert tools["nl_to_sql"].calls == []
+
+    @pytest.mark.asyncio
+    async def test_abstention_leaves_subquestions_untouched(self):
+        tools = _mixed_tools()
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=RecordingPlanner(),
+            tools=list(tools.values()),
+            sub_questions=[TABULAR_SQ, DOCUMENT_SQ],
+            decider=ScriptedDecider(None),
+        ).resolve("q", NS, trace=trace, options=SEEDED)
+        assert [s.status for s in steps(trace, "decider")] == ["failed"]
+        assert steps(trace, "subquestion_modality") == []
+        assert tools["nl_to_sql"].calls == []
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_tags_but_does_not_seed(self):
+        tools = _mixed_tools()
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=RecordingPlanner(),
+            tools=list(tools.values()),
+            sub_questions=[TABULAR_SQ],
+            decider=ScriptedDecider([Choice("tabular", 0.4)]),
+        ).resolve("q", NS, trace=trace, options=SEEDED)
+        assert tools["nl_to_sql"].calls == []
+        assert "q1=tabular(0.40)" in str(steps(trace, "decider")[0].detail)
+        assert "seed" not in str(steps(trace, "decider")[0].detail)
+
+    @pytest.mark.asyncio
+    async def test_mixed_is_seeded_structured_first(self):
+        tools = _mixed_tools()
+        await make_seeded_retriever(
+            planner=RecordingPlanner(),
+            tools=list(tools.values()),
+            sub_questions=[TABULAR_SQ],
+            decider=ScriptedDecider([Choice("mixed", 0.9)]),
+        ).resolve("q", NS, trace=TraceCollector(), options=SEEDED)
+        assert [(c["namespace"], c["query"]) for c in tools["nl_to_sql"].calls] == [(NS, TABULAR_SQ)]
+
+    @pytest.mark.asyncio
+    async def test_no_seed_when_structured_tools_withheld(self):
+        tools = _mixed_tools()
+        dec = ScriptedDecider(TAG_TAB_DOC)
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=RecordingPlanner(), tools=list(tools.values()), sub_questions=[TABULAR_SQ, DOCUMENT_SQ], decider=dec
+        ).resolve("q", NS, trace=trace, options=SEEDED, has_structured_source=False)
+        assert "none" in dec.calls[0]["state"]  # the state says no structured tools
+        assert tools["nl_to_sql"].calls == []
+        assert "seed" not in str(steps(trace, "decider")[0].detail)
+
+    @pytest.mark.asyncio
+    async def test_request_decider_model_id_is_forwarded(self):
+        dec = ScriptedDecider(TAG_TAB_DOC)
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=RecordingPlanner(),
+            tools=list(_mixed_tools().values()),
+            sub_questions=[TABULAR_SQ, DOCUMENT_SQ],
+            decider=dec,
+        ).resolve("q", NS, trace=trace, options={**SEEDED, "deciderModelId": "@portkey/jev-1.13"})
+        assert dec.calls[0]["model_id"] == "@portkey/jev-1.13"
+        assert "via llm/@portkey/jev-1.13" in str(steps(trace, "decider")[0].detail)
+
+    @pytest.mark.asyncio
+    async def test_other_profiles_never_consult_the_decider(self):
+        for profile in ("legacy", "structured_first"):
+            dec = ScriptedDecider(TAG_TAB_DOC)
+            trace = TraceCollector()
+            await make_seeded_retriever(
+                planner=RecordingPlanner(), tools=list(_mixed_tools().values()), sub_questions=[TABULAR_SQ], decider=dec
+            ).resolve("q", NS, trace=trace, options={"plannerProfile": profile})
+            assert dec.calls == [], profile
+            assert steps(trace, "decider") == [], profile
+
+    @pytest.mark.asyncio
+    async def test_controller_ignores_a_seed_for_an_unregistered_tool(self):
+        """A seed the controller cannot honour costs nothing: the planner runs step 1."""
+        planner = RecordingPlanner()
+        registry = ToolRegistry()
+        retriever = AgenticRetriever(
+            registry=registry,
+            controller=ReasoningController(planner, per_tool_timeout_s=5.0),
+            decomposer=FakeDecomposer([SubQuestion(text="q1", seed_tool="nl_to_sql", modality="tabular")]),
+            synthesizer=FakeSynthesizer(),
+            budget=AgenticBudgetConfig(time_budget_s=300, max_steps=3),
+            clock_source=FakeClockSource(),
+            final_semantic_search=False,
+        )
+        trace = TraceCollector()
+        await retriever.resolve("q", NS, trace=trace)
+        assert len(planner.seen) == 1  # planner consulted for step 1
+        assert not any("seeded" in str(s.detail) for s in steps(trace, "next_step_select"))
+
+    @pytest.mark.asyncio
+    async def test_regression_third_arm_seeded_routes_sql_verbatim_within_budget(self):
+        """ADR 0013's regression pair, third arm: same tools, same max_steps=3.
+
+        ``structured_first`` relies on the planner double choosing nl_to_sql; ``seeded``
+        does not consult the planner for that step at all, and the SQL input is the
+        sub-question verbatim rather than whatever the planner would have written.
+        """
+        tools = _mixed_tools()
+
+        class GraphOnlyPlanner:
+            """Never proposes nl_to_sql: any SQL call must come from the seed.
+
+            Declares a sub-question sufficient once its fork holds structured rows (the
+            seeded step answered it) or once the graph was traversed for it.
+            """
+
+            def __init__(self):
+                self.asked: list[str] = []
+                self.traversed: set[str] = set()
+
+            async def propose_steps(self, *, sub_question, context, tool_specs):
+                self.asked.append(sub_question.text)
+                self.traversed.add(sub_question.text)
+                return [PlannerDecision(tool_name="graph_traversal", inputs={"query": sub_question.text})]
+
+            async def check_sufficiency(self, *, sub_question, context):
+                return bool(context.rows) or sub_question.text in self.traversed
+
+        planner = GraphOnlyPlanner()
+        trace = TraceCollector()
+        await make_seeded_retriever(
+            planner=planner,
+            tools=list(tools.values()),
+            sub_questions=[TABULAR_SQ, DOCUMENT_SQ],
+            decider=ScriptedDecider(TAG_TAB_DOC),
+            max_steps=3,
+        ).resolve("q", NS, trace=trace, options=SEEDED)
+        assert [(c["namespace"], c["query"]) for c in tools["nl_to_sql"].calls] == [(NS, TABULAR_SQ)]
+        assert planner.asked == [DOCUMENT_SQ]  # the planner was consulted for the document half only
+        assert [s.status for s in steps(trace, "graph_traversal")] == ["succeeded"]
+        assert str(StopReason.max_steps_reached) not in stop_detail(trace)
+
+
+@pytest.mark.unit
+class TestSeededWiring:
+    @pytest.mark.parametrize("value", ["seeded"])
+    def test_request_model_accepts_seeded(self, value):
+        from coa_serve.models import InvokeRequest
+
+        assert (
+            InvokeRequest(query="q", namespace="demo", options={"plannerProfile": value}).options["plannerProfile"]
+            == value
+        )
+
+    def test_request_model_profiles_match_planner_constants(self):
+        from coa_serve.models import _PLANNER_PROFILES
+
+        assert frozenset(_PLANNER_PROFILES) == PLANNER_PROFILES
+
+    @pytest.mark.parametrize("value", ["amazon.nova-micro-v1:0", "@portkey/jev-1.13"])
+    def test_request_model_accepts_decider_model_id(self, value):
+        from coa_serve.models import InvokeRequest
+
+        assert (
+            InvokeRequest(query="q", namespace="demo", options={"deciderModelId": value}).options["deciderModelId"]
+            == value
+        )
+
+    @pytest.mark.parametrize("value", ["", "   ", 3, None, "x" * 201])
+    def test_request_model_rejects_bad_decider_model_id(self, value):
+        from coa_serve.models import InvokeRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="deciderModelId"):
+            InvokeRequest(query="q", namespace="demo", options={"deciderModelId": value})
+
+    def test_config_env_defaults(self, monkeypatch):
+        for k in ("DECIDER_BACKEND", "DECIDER_MODEL_ID", "DECIDER_MIN_CONFIDENCE", "DECIDER_TIMEOUT_S"):
+            monkeypatch.delenv(k, raising=False)
+        cfg = TestServiceConfigEnv()._load()
+        assert (cfg.decider_backend, cfg.decider_model_id, cfg.decider_min_confidence, cfg.decider_timeout_s) == (
+            "off",
+            "",
+            0.7,
+            3.0,
+        )
+
+    def test_config_env_parsed_and_validated(self, monkeypatch):
+        monkeypatch.setenv("DECIDER_BACKEND", " LLM ")
+        monkeypatch.setenv("DECIDER_MODEL_ID", "amazon.nova-micro-v1:0")
+        monkeypatch.setenv("DECIDER_MIN_CONFIDENCE", "0.85")
+        monkeypatch.setenv("DECIDER_TIMEOUT_S", "99")  # out of range → default
+        cfg = TestServiceConfigEnv()._load()
+        assert (cfg.decider_backend, cfg.decider_model_id, cfg.decider_min_confidence, cfg.decider_timeout_s) == (
+            "llm",
+            "amazon.nova-micro-v1:0",
+            0.85,
+            3.0,
+        )
+
+    def test_config_invalid_backend_falls_back_to_off(self, monkeypatch):
+        monkeypatch.setenv("DECIDER_BACKEND", "jev")
+        assert TestServiceConfigEnv()._load().decider_backend == "off"
+
+    def test_factory_wires_decider_with_live_provider(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from coa_serve.config import ServiceConfig
+        from coa_serve.tier3.agentic.factory import build_agentic_retriever
+
+        monkeypatch.setenv("ENVIRONMENT", "local")
+        config = ServiceConfig(
+            guardrail_id="",
+            vkg_endpoint="http://vkg.local:8080",
+            neptune_endpoint="",
+            opensearch_endpoint="",
+            bedrock_model_id="model",
+            bedrock_region="us-east-1",
+            data_sources_table="",
+            metric_definitions_table="",
+            memory_id="",
+            session_metadata_table="",
+            decider_backend="off",
+        )
+        clients = SimpleNamespace(graph=object(), vector=object(), llm=_LLM())
+        live = {"s": DeciderSettings(backend="llm", model_id="live-model")}
+        retriever = build_agentic_retriever(
+            config, clients, RecordingPlanner(), decider_settings_provider=lambda: live["s"]
+        )
+        assert retriever._decider is not None
+        assert retriever._decider.settings().model_id == "live-model"  # provider wins over env default
+        live["s"] = DeciderSettings(backend="off")
+        assert retriever._decider.settings().enabled is False  # read live, no rebuild
+
+    def test_factory_falls_back_to_env_defaults_without_provider(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from coa_serve.config import ServiceConfig
+        from coa_serve.tier3.agentic.factory import build_agentic_retriever
+
+        monkeypatch.setenv("ENVIRONMENT", "local")
+        config = ServiceConfig(
+            guardrail_id="",
+            vkg_endpoint="http://vkg.local:8080",
+            neptune_endpoint="",
+            opensearch_endpoint="",
+            bedrock_model_id="model",
+            bedrock_region="us-east-1",
+            data_sources_table="",
+            metric_definitions_table="",
+            memory_id="",
+            session_metadata_table="",
+            decider_backend="llm",
+            decider_model_id="env-model",
+        )
+        clients = SimpleNamespace(graph=object(), vector=object(), llm=_LLM())
+        retriever = build_agentic_retriever(config, clients, RecordingPlanner())
+        assert retriever._decider.settings() == DeciderSettings(backend="llm", model_id="env-model")

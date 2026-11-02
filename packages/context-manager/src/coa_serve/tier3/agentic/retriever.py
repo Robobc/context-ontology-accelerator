@@ -45,7 +45,7 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -56,8 +56,20 @@ from ...trace import client_error_detail
 from ..knowledge_retriever import Tier3Result
 from .budget import BudgetClock
 from .context import AccumulatedContext
+from .decider import (
+    MODALITY_DOCUMENT,
+    Choice,
+    Decider,
+    modality_questions,
+    modality_state,
+)
 from .models import StopReason, SubQuestion
-from .planner import PLANNER_PROFILE_LEGACY, PLANNER_PROFILE_STRUCTURED_FIRST, PLANNER_PROFILES
+from .planner import (
+    PLANNER_PROFILE_LEGACY,
+    PLANNER_PROFILE_SEEDED,
+    PLANNER_PROFILE_STRUCTURED_FIRST,
+    PLANNER_PROFILES,
+)
 from .tools.structured_tool import NL_TO_SPARQL_TOOL, NL_TO_SQL_TOOL
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime/graphrag import
@@ -190,9 +202,14 @@ class AgenticRetriever:
         synthesize_working_answer_only: bool = False,
         synthesize_without_working_answer: bool = False,
         planner_profile: str = PLANNER_PROFILE_LEGACY,
+        decider: Decider | None = None,
     ) -> None:
         """Wire the registry, controller, decomposer, synthesizer, budget, and flags."""
         self._registry = registry
+        # ADR 0014: the typed Decider the ``seeded`` profile consults for each
+        # sub-question's modality. ``None`` or a backend of ``off`` means the
+        # profile degrades to ``structured_first`` and says so in the trace.
+        self._decider = decider
         self._controller = controller
         self._decomposer = decomposer
         self._synthesizer = synthesizer
@@ -381,8 +398,15 @@ class AgenticRetriever:
         # shares ``ctx.ontology`` by reference; without this step each fork spent its
         # first reasoning step on its own ontology_lookup). Costs wall-clock, never a
         # reasoning step; a failure is recorded and the loop proceeds as before.
-        if ctx.planner_profile == PLANNER_PROFILE_STRUCTURED_FIRST:
+        if ctx.planner_profile in (PLANNER_PROFILE_STRUCTURED_FIRST, PLANNER_PROFILE_SEEDED):
             await self._preresolve_ontology(namespace, ctx, clock, trace, excluded_tools, tool_context)
+
+        # 1c. (seeded, ADR 0014) Ask the Decider for each sub-question's modality in
+        # ONE batched call and seed the structured tool as the first step of the
+        # tabular ones. Costs wall-clock, never a reasoning step; an abstention or a
+        # disabled backend leaves the sub-questions untouched (= structured_first).
+        if ctx.planner_profile == PLANNER_PROFILE_SEEDED:
+            sub_questions = await self._tag_modality(query, sub_questions, ctx, clock, trace, excluded_tools, options)
 
         # 2. Run the initial (independent) Sub_Questions concurrently: each gets a
         # private forked sub-context (own seen_keys, own local branch queue) while the
@@ -490,6 +514,90 @@ class AgenticRetriever:
             clock.elapsed_ms() - started,
             detail=f"{len(ontology.node_types)} node types, {len(ontology.edge_types)} edge types",
         )
+
+    # ── decider-tagged modality + seeded first tool (ADR 0014) ──────────
+
+    async def _tag_modality(
+        self,
+        query: str,
+        sub_questions: list[SubQuestion],
+        ctx: AccumulatedContext,
+        clock: BudgetClock,
+        trace: TraceCollector,
+        excluded_tools: frozenset[str],
+        options: dict | None,
+    ) -> list[SubQuestion]:
+        """Tag each sub-question's modality through the Decider and set its seed tool.
+
+        One ``choose_many`` over all sub-questions. A ``tabular`` or ``mixed`` tag
+        at or above the live ``min_confidence`` seeds ``nl_to_sql`` (when registered
+        and not withheld for this request) as that sub-question's first step; the
+        controller then invokes it with the sub-question text verbatim and no
+        planner call. ``document``, an abstention, a disabled backend or any
+        failure leave the sub-question as it was. Records ``decider`` once and
+        ``subquestion_modality`` per tagged sub-question; never raises.
+        """
+        decider = self._decider
+        if decider is None:
+            trace.record("decider", "skipped", clock.elapsed_ms(), detail="no decider wired; seeded = structured_first")
+            return sub_questions
+        settings = decider.settings()
+        if not settings.enabled:
+            trace.record("decider", "skipped", clock.elapsed_ms(), detail="backend off; seeded = structured_first")
+            return sub_questions
+        structured = [
+            t for t in (NL_TO_SQL_TOOL, NL_TO_SPARQL_TOOL) if self._registry.get(t) and t not in excluded_tools
+        ]
+        class_names = tuple(getattr(ctx.ontology, "node_types", ()) or ()) if ctx.ontology is not None else ()
+        state = modality_state(
+            question=query,
+            sub_questions=[sq.text for sq in sub_questions],
+            structured_tools=structured,
+            class_names=class_names,
+        )
+        model_override = (options or {}).get("deciderModelId")
+        started = clock.elapsed_ms()
+        choices: list[Choice] = await decider.choose_many(
+            state=state,
+            questions=modality_questions(len(sub_questions)),
+            guard_content=query,
+            model_id=model_override if isinstance(model_override, str) and model_override else None,
+        )
+        elapsed = clock.elapsed_ms() - started
+        if len(choices) != len(sub_questions) or all(c.abstained for c in choices):
+            trace.record("decider", "failed", elapsed, detail=f"modality: abstained via {settings.backend}")
+            return sub_questions
+        seed_available = NL_TO_SQL_TOOL in structured
+        tagged: list[SubQuestion] = []
+        summary: list[str] = []
+        for i, (sq, choice) in enumerate(zip(sub_questions, choices, strict=True), start=1):
+            if choice.abstained:
+                tagged.append(sq)
+                summary.append(f"q{i}=abstained")
+                continue
+            seed = (
+                NL_TO_SQL_TOOL
+                if seed_available
+                and choice.option != MODALITY_DOCUMENT
+                and choice.confidence >= settings.min_confidence
+                else ""
+            )
+            tagged.append(replace(sq, modality=choice.option, modality_confidence=choice.confidence, seed_tool=seed))
+            summary.append(f"q{i}={choice.option}({choice.confidence:.2f}){' seed' if seed else ''}")
+            trace.record(
+                "subquestion_modality",
+                "success",
+                clock.elapsed_ms(),
+                detail=f"{choice.option} ({choice.confidence:.2f}){f', seed {seed}' if seed else ''}: {sq.text[:80]}",
+            )
+        model_label = model_override if isinstance(model_override, str) and model_override else settings.model_id
+        trace.record(
+            "decider",
+            "success",
+            elapsed,
+            detail=f"modality: {', '.join(summary)} via {settings.backend}/{model_label or 'default'}",
+        )
+        return tagged
 
     async def _run_subquestions_parallel(
         self,

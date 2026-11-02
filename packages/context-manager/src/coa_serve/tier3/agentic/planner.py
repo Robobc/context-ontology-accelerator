@@ -170,7 +170,13 @@ _PROPOSE_SYSTEM = (
 # wording cannot make the two compete.
 PLANNER_PROFILE_LEGACY = "legacy"
 PLANNER_PROFILE_STRUCTURED_FIRST = "structured_first"
-PLANNER_PROFILES: frozenset[str] = frozenset({PLANNER_PROFILE_LEGACY, PLANNER_PROFILE_STRUCTURED_FIRST})
+# ADR 0014: ``structured_first`` plus a Decider-tagged modality per sub-question
+# and a seeded first tool for tabular ones. Same planner prompt as
+# ``structured_first``; the difference is in the retriever/controller.
+PLANNER_PROFILE_SEEDED = "seeded"
+PLANNER_PROFILES: frozenset[str] = frozenset(
+    {PLANNER_PROFILE_LEGACY, PLANNER_PROFILE_STRUCTURED_FIRST, PLANNER_PROFILE_SEEDED}
+)
 
 _STRUCTURED_FIRST_MODALITY_RULE = (
     "FIRST, DECIDE THE MODALITY OF THIS SUB-QUESTION, before anything else:\n"
@@ -210,6 +216,7 @@ assert _PROPOSE_SYSTEM_STRUCTURED_FIRST != _PROPOSE_SYSTEM, (
 _PROPOSE_SYSTEM_BY_PROFILE: dict[str, str] = {
     PLANNER_PROFILE_LEGACY: _PROPOSE_SYSTEM,
     PLANNER_PROFILE_STRUCTURED_FIRST: _PROPOSE_SYSTEM_STRUCTURED_FIRST,
+    PLANNER_PROFILE_SEEDED: _PROPOSE_SYSTEM_STRUCTURED_FIRST,
 }
 
 

@@ -50,11 +50,20 @@ class SubQuestion:
         origin: Where the Sub_Question came from — ``"decomposition"`` for an
             initial decomposition product, ``"branch"`` for one derived from an
             Exploration_Branch.
+        modality: ADR 0014 — the Decider's modality tag (``tabular`` /
+            ``document`` / ``mixed``), ``""`` when not decided.
+        modality_confidence: The Decider's 0–1 confidence in ``modality``.
+        seed_tool: ADR 0014 — the tool the controller invokes as this
+            Sub_Question's FIRST step without consulting the planner, with the
+            Sub_Question text verbatim as ``query``; ``""`` means no seed.
     """
 
     text: str
     multi_entity: bool = False
     origin: str = "decomposition"
+    modality: str = ""
+    modality_confidence: float = 0.0
+    seed_tool: str = ""
 
 
 @dataclass(frozen=True)
