@@ -442,7 +442,7 @@ contract in `ROUTING-HARNESS.md`.
 
 Every error is `document → tabular` (Haiku also `→ mixed`) on questions that
 ask for a status or a figure *as reported in a document* ("what combined full
-cost does the Seedcare summary report"); the `doc_vs_table_trap` tag scores
+cost does the business-line summary report"); the `doc_vs_table_trap` tag scores
 58% / 50% / 25%. Data-vault, budget and finance wording, paraphrases and
 not-entitled items are 100% on Nova Micro. Two things follow: the smallest
 model is the best classifier here, so the cheap default is also the accurate
@@ -474,7 +474,7 @@ Reading it: the routing problem the two ADRs set out to fix is fixed. Under
 under `seeded` it is reached first on all 14, the budget is exhausted in 44%
 of runs instead of 72%, and 1.4 fewer tool steps are spent per question. The
 deployed Decider agreed with the offline run (same tags, same single
-over-routing on the Seedcare-summary trap).
+over-routing on the business-line-summary trap).
 
 End-to-end correctness is low in every arm, and the harness shows where it is
 lost, which is the reason it scores the layers separately:
@@ -486,10 +486,11 @@ lost, which is the reason it scores the layers separately:
    `m_legacy_region_count` ("0 projects" for EAME/APAC, gold 8 and 17). These
    are Tier-2 properties that Standard mode shares; the governed-metric path
    (Tier 1) is what the product offers for them.
-2. **Over-routing is worse than a miss.** On `d_seedcare_combined_cost` both
-   non-legacy arms tagged the question tabular, ran SQL, and answered with a
-   confident, plausible, wrong figure (462,926,640.94, the sum over every
-   Seedcare project in the tables, where the document covers eight). A
+2. **Over-routing is worse than a miss.** On the business-line combined-cost
+   item both non-legacy arms tagged the question tabular, ran SQL, and
+   answered with a confident, plausible, wrong figure (the sum over every
+   project of that business line in the tables, where the document covers
+   eight). A
    document question answered from the tables fails silently; the modality
    rule fix above is therefore the next Decider change.
 3. **Document retrieval.** 0% on document questions in both non-legacy arms
